@@ -6,3 +6,7 @@
 	path = mpc-hc
 	url = https://github.com/adipose/mpc-hc.git
 	branch = dvb-json-api
+[submodule "cast-mock"]
+	path = cast-mock
+	url = https://github.com/adipose/castv2-mock-device.git
+	branch = main

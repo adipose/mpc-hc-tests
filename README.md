@@ -10,18 +10,22 @@ mpc-hc/       the MPC-HC revision under test (build per its own docs)
 emulator/     bda-vtuner: virtual DVB/ATSC BDA tuner driver, generated
               transport streams, encoding matrix, host-to-target transport
               (dependency of the dvb suite)
+cast-mock/    castv2-mock-device: a mock Google Cast receiver -- mDNS, TLS,
+              CastV2 protobuf, adversarial failure switches (dependency of
+              the chromecast suite)
 suites/
   dvb/        Digital TV: scripted tuner scans, channel-record and
               /dvb/channels.json assertions against the emulator's encoding
               matrix, rendered-frame pixel probes
+  chromecast/ Cast sender behaviour against the mock receiver (scaffold; see
+              its README)
 ```
 
 The shape generalises: a suite is `suites/<name>/` with a README, driving the
 pinned player against declared expectations rather than golden images, adding
 a submodule where it needs an external dependency the way `dvb` uses the
-emulator. Natural candidates: Chromecast/casting (against a receiver
-emulator), playback and format coverage, UI/theming captures, subtitle
-rendering.
+emulator and `chromecast` uses the cast mock. Natural candidates still open:
+playback and format coverage, UI/theming captures, subtitle rendering.
 
 ## Setup
 
@@ -48,6 +52,7 @@ Each submodule pins a SHA (the reproducibility anchor) and declares in
   (edit `.gitmodules` url+branch, `git submodule sync`, update, commit) and
   nothing else here changes.
 - `emulator` tracks `master` of bda-vtuner.
+- `cast-mock` tracks `main` of castv2-mock-device.
 
 To move to a branch's current tip: `git submodule update --remote <name>`,
 re-run the affected suites, and commit the bump -- that commit is the record
