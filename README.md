@@ -31,13 +31,15 @@ playback and format coverage, UI/theming captures, subtitle rendering.
 
 ```powershell
 git clone --recursive https://github.com/adipose/mpc-hc-tests
-Copy-Item emulator\testbed.sample.psd1 testbed.config.psd1   # then edit
+.\emulator\tools\Install-TestBed.ps1   # WDK ISO, TSDuck, ffmpeg, config
 ```
 
-The config at this root is found by the emulator's transport (nearest wins),
-so one file configures every suite that drives a target machine. For the dvb
-suite: follow the emulator README's Getting started through driver install
-and stream provisioning, build MPC-HC from `mpc-hc/`, deploy the built
+The installer downloads and hash-verifies every host-side prerequisite and
+creates `testbed.config.psd1` at this root (it detects the submodule layout);
+edit that file to point at your target. The config here is found by the
+emulator's transport (nearest wins), so one file configures every suite that
+drives a target machine. For the dvb suite: follow the emulator README's
+Getting started through driver install and stream provisioning, build MPC-HC from `mpc-hc/`, deploy the built
 `mpc-hc64.exe` with `LAVFilters64` beside it to the target, then run jobs
 from `suites/dvb/` (its README documents each script).
 
