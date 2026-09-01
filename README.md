@@ -1,32 +1,41 @@
-# mpc-dvb-tests
+# mpc-hc-tests
 
-Integration tests for MPC-HC's Digital TV support, run against the
-**bda-vtuner** software tuner. Both dependencies are pinned as submodules, so
-every commit here records exactly which emulator revision was tested against
-exactly which MPC-HC revision.
+A test suite for MPC-HC. The player revision under test is pinned as a
+submodule, so every commit here records exactly which MPC-HC was tested, with
+what, and how it fared. Suites live side by side under `suites/`; each brings
+its own dependencies as submodules where it needs them.
 
 ```
-emulator/   bda-vtuner: virtual BDA driver, stream generation, encoding
-            matrix, host-to-target transport (see its README to set up the
-            tuner first)
-mpc-hc/     the MPC-HC revision under test (build it per its own docs; deploy
-            the built mpc-hc64.exe with LAVFilters64 beside it to the target)
-harness/    the tests: scripted scans, channel-record and /dvb/channels.json
-            assertions against the emulator's matrix, rendered-frame pixel
-            probes
+mpc-hc/       the MPC-HC revision under test (build per its own docs)
+emulator/     bda-vtuner: virtual DVB/ATSC BDA tuner driver, generated
+              transport streams, encoding matrix, host-to-target transport
+              (dependency of the dvb suite)
+suites/
+  dvb/        Digital TV: scripted tuner scans, channel-record and
+              /dvb/channels.json assertions against the emulator's encoding
+              matrix, rendered-frame pixel probes
 ```
+
+The shape generalises: a suite is `suites/<name>/` with a README, driving the
+pinned player against declared expectations rather than golden images, adding
+a submodule where it needs an external dependency the way `dvb` uses the
+emulator. Natural candidates: Chromecast/casting (against a receiver
+emulator), playback and format coverage, UI/theming captures, subtitle
+rendering.
 
 ## Setup
 
 ```powershell
-git clone --recursive <this repo>
+git clone --recursive https://github.com/adipose/mpc-hc-tests
 Copy-Item emulator\testbed.sample.psd1 testbed.config.psd1   # then edit
 ```
 
 The config at this root is found by the emulator's transport (nearest wins),
-so one file configures everything. Follow the emulator README's Getting
-started through driver install and stream provisioning, build MPC-HC from
-`mpc-hc/`, then run jobs from `harness/` (its README documents each script).
+so one file configures every suite that drives a target machine. For the dvb
+suite: follow the emulator README's Getting started through driver install
+and stream provisioning, build MPC-HC from `mpc-hc/`, deploy the built
+`mpc-hc64.exe` with `LAVFilters64` beside it to the target, then run jobs
+from `suites/dvb/` (its README documents each script).
 
 ## Versioning
 
@@ -34,13 +43,13 @@ Each submodule pins a SHA (the reproducibility anchor) and declares in
 `.gitmodules` the branch it tracks (the intent):
 
 - `mpc-hc` tracks `dvb-json-api` on the fork -- the PR branch carrying the
-  enriched `/dvb/channels.json` these tests assert on. **When that PR merges
-  upstream, repoint the submodule to `clsid2/mpc-hc` branch `develop`** (edit
-  `.gitmodules` url+branch, `git submodule sync`, update, commit) and nothing
-  else here changes.
+  enriched `/dvb/channels.json` the dvb suite asserts on. **When that PR
+  merges upstream, repoint the submodule to `clsid2/mpc-hc` branch `develop`**
+  (edit `.gitmodules` url+branch, `git submodule sync`, update, commit) and
+  nothing else here changes.
 - `emulator` tracks `master` of bda-vtuner.
 
 To move to a branch's current tip: `git submodule update --remote <name>`,
-re-run the tests, and commit the bump -- that commit is the record of the
-tested pairing. `harness/BdaRenderMap.ps1` documents which MPC-HC JSON
-spellings the pinned revision emits; revisit it on any player bump.
+re-run the affected suites, and commit the bump -- that commit is the record
+of the tested pairing. `suites/dvb/BdaRenderMap.ps1` documents which MPC-HC
+JSON spellings the pinned revision emits; revisit it on any player bump.

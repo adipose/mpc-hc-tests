@@ -44,7 +44,7 @@ $jobs = Get-Content $Plan -Raw | ConvertFrom-Json
 # invalidates the comparison rather than one result. This also settles the
 # lock-scope question the per-job rig lock raised: the claim is what provides
 # exclusivity now, and it has no stale timeout to trip on a long plan.
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigClaim.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigClaim.ps1')
 $claim = Enter-RigClaim -VMName $VMName
 $guest = $claim.Guest
 Write-Host "rig: $guest" -ForegroundColor DarkGray

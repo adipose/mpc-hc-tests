@@ -1,6 +1,6 @@
 # MPC-HC scan harness
 
-Part of the **mpc-dvb-tests** superproject: the `emulator` submodule provides
+Part of the **mpc-dvb-tests** superproject: the superproject's `emulator` submodule provides
 the virtual BDA driver, generated streams, encoding matrix and the transport
 plumbing these scripts dot-source; the `mpc-hc` submodule pins the player
 revision under test. Configure once via `testbed.config.psd1` at the

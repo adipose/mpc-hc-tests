@@ -97,7 +97,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigClaim.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigClaim.ps1')
 $claim = Enter-RigClaim -VMName $VMName
 $session = Connect-TestGuest -Guest $claim.Guest -CredentialPath $CredentialPath
 
@@ -111,7 +111,7 @@ Clear-InheritedRigLock -Session $session -Claim $claim
 # More than one session drives this guest. Capturing frames while another is
 # swapping the binary or cycling a tuner device produces plausible output
 # measured against the wrong thing, which is worse than an error.
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigLock.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigLock.ps1')
 $rigLock = Enter-RigLock -Session $session -Owner $LockOwner -Purpose 'frame capture' -WaitSeconds $LockWaitSeconds
 
 try {

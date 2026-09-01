@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigClaim.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigClaim.ps1')
 $targets = if ($VMName) { $VMName }
            elseif ((Get-TestBedConfig).BrokerPath) { Get-FanOutTargets }
            else { @((Get-TestBedConfig).Guest) }

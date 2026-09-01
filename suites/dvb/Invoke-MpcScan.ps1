@@ -73,7 +73,7 @@ if (-not $label) { throw 'Job needs a label' }
 # Claim before anything else. A session that scans without claiming is
 # invisible to the broker, so the pool can hand the same guest to someone else
 # and both runs proceed looking entirely normal.
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigClaim.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigClaim.ps1')
 $claim = Enter-RigClaim -VMName $VMName
 $guest = $claim.Guest
 Write-Verbose "guest: $guest"
@@ -147,7 +147,7 @@ Clear-InheritedRigLock -Session $session -Claim $claim
 #
 # Acquire before anything touches guest state -- which means before the device
 # cycle below, not after it.
-. (Join-Path $PSScriptRoot '..\emulator\tools\RigLock.ps1')
+. (Join-Path $PSScriptRoot '..\..\emulator\tools\RigLock.ps1')
 $rigLock = Enter-RigLock -Session $session -Owner $LockOwner -Purpose "scan: $label" -WaitSeconds $LockWaitSeconds
 
 try {

@@ -79,7 +79,7 @@ param(
 
     # The streams and their declarations are the emulator's; this asserts
     # MPC-HC against them. Default: the pinned emulator submodule.
-    [string]   $MatrixPath = (Join-Path $PSScriptRoot '..\emulator\tools\encoding-matrix.psd1'),
+    [string]   $MatrixPath = (Join-Path $PSScriptRoot '..\..\emulator\tools\encoding-matrix.psd1'),
     [string[]] $EntryId,
 
     [string] $VMName = '',
@@ -416,7 +416,7 @@ $defaults = $matrix.Defaults
 Test-BdaRenderMap -MatrixPath $MatrixPath
 
 if ($FromGuest) {
-    . (Join-Path $PSScriptRoot '..\emulator\tools\RigClaim.ps1')
+    . (Join-Path $PSScriptRoot '..\..\emulator\tools\RigClaim.ps1')
     $claim = Enter-RigClaim -VMName $VMName
     try {
         $session = Connect-TestGuest -Guest $claim.Guest -CredentialPath $CredentialPath
