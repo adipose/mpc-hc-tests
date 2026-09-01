@@ -17,8 +17,8 @@ suites/
   dvb/        Digital TV: scripted tuner scans, channel-record and
               /dvb/channels.json assertions against the emulator's encoding
               matrix, rendered-frame pixel probes
-  chromecast/ Cast sender behaviour against the mock receiver (scaffold; see
-              its README)
+  chromecast/ Cast sender behaviour (clsid2/mpc-hc#4128) against the mock
+              receiver (scaffold; see its README)
 ```
 
 The shape generalises: a suite is `suites/<name>/` with a README, driving the
@@ -53,6 +53,12 @@ Each submodule pins a SHA (the reproducibility anchor) and declares in
   nothing else here changes.
 - `emulator` tracks `master` of bda-vtuner.
 - `cast-mock` tracks `main` of castv2-mock-device.
+
+One submodule, one pin: when a suite targets a player branch that is not the
+pinned one (the chromecast suite targets `patch666` / PR #4128 until it
+merges), bump `mpc-hc` to that branch for the run and commit the bump -- two
+suites wanting different player branches simply produce different pairing
+commits.
 
 To move to a branch's current tip: `git submodule update --remote <name>`,
 re-run the affected suites, and commit the bump -- that commit is the record

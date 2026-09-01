@@ -6,21 +6,44 @@ TLS on 8009, CastV2 protobuf framing, and adversarial failure switches — so
 casting behaviour is asserted without Cast hardware, the way the `dvb` suite
 asserts tuner behaviour without broadcast hardware.
 
-Status: scaffold. The mock device is pinned and ready; the player side (Cast
-sender support in MPC-HC) is in development on its own branch and is not yet
-in the pinned `mpc-hc` revision. Test scripts land here once both halves
-exist to connect.
+**Status: scaffold, both halves now exist.** The player side is
+[clsid2/mpc-hc#4128](https://github.com/clsid2/mpc-hc/pull/4128)
+("Add casting to Chromecast and DLNA devices", branch `patch666` on the
+fork), currently open. To run against it before it merges, bump the `mpc-hc`
+submodule to that branch for the run — the commit that bumps it records the
+tested pairing, which is this repository's versioning model. The pinned
+default stays on the dvb suite's branch until casting merges.
 
-What a test here asserts, when it does:
+What the tests assert, keyed to the PR's actual surfaces:
 
-- **Discovery** — the player finds the mock via mDNS and lists it as a target.
-- **Session bring-up** — CONNECT/launch against the mock's receiver, with the
-  handshake visible in the mock's log rather than inferred from the player.
-- **Media control round trips** — load/play/pause/seek/stop echoed by the
-  mock, asserted from its state, not the player's belief about it.
-- **Failure paths** — the mock's adversarial switches (refused connections,
-  dropped sessions, malformed frames) driving the player's error handling,
-  the same declared-expectation style as the dvb suite's fault injection.
+- **Add-by-address, then the saved list.** The PR's Manage Devices dialog
+  supports adding a renderer by address — the deterministic path for tests:
+  register the mock by address (no multicast dependency), then assert the
+  *Cast to Device* submenu lists it instantly from the saved list, since the
+  submenu by design does no discovery.
+- **Discovery in the dialog.** Separately, assert the dialog's scan finds the
+  mock via mDNS where the network allows, and that discovery
+  threads/sockets exist only for the dialog's lifetime (the PR states this;
+  the mock's connection log shows it).
+- **Session bring-up.** Picking the device stops local playback and opens
+  the cast window; CONNECT and default-media-receiver launch are asserted
+  from the mock's log, not the player's belief.
+- **Serving and playback.** The mock fetches the media from the player's
+  local HTTP server; assert byte-range requests arrive and the LOAD carries
+  the right content.
+- **Transport round trips.** Play/pause/seek/stop/volume from the cast
+  window, echoed in the mock's state; seek asserted against the device
+  clock, which is also what the PR writes resume positions from.
+- **Player independence.** While casting, the player is an ordinary stopped
+  player — open and close other files locally and assert the session (and
+  the mock's stream) is undisturbed.
+- **Failure paths.** The mock's adversarial switches — refused TLS, dropped
+  session mid-cast, malformed frames — driving the sender's error handling,
+  declared-expectation style like the dvb suite's fault injection.
+
+Out of scope here: the PR's DLNA/UPnP-AV half, which would want an
+SSDP/SOAP mock of its own (a natural sibling suite or an extension of this
+one).
 
 Run the mock from the submodule (`python ..\..\cast-mock\mock_cast.py`; see
 its README for the switches).
