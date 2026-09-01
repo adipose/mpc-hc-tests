@@ -1,6 +1,8 @@
 [submodule "emulator"]
 	path = emulator
 	url = https://github.com/adipose/bda-vtuner.git
+	branch = master
 [submodule "mpc-hc"]
 	path = mpc-hc
 	url = https://github.com/adipose/mpc-hc.git
+	branch = dvb-json-api

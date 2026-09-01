@@ -30,7 +30,17 @@ started through driver install and stream provisioning, build MPC-HC from
 
 ## Versioning
 
-Bump a submodule to test a new player or emulator revision; the commit that
-bumps it is the record of that pairing. `Test-MpcDecode.ps1` defaults its
-matrix to the pinned emulator, and `harness/BdaRenderMap.ps1` documents which
-MPC-HC JSON spellings the pinned revision emits.
+Each submodule pins a SHA (the reproducibility anchor) and declares in
+`.gitmodules` the branch it tracks (the intent):
+
+- `mpc-hc` tracks `dvb-json-api` on the fork -- the PR branch carrying the
+  enriched `/dvb/channels.json` these tests assert on. **When that PR merges
+  upstream, repoint the submodule to `clsid2/mpc-hc` branch `develop`** (edit
+  `.gitmodules` url+branch, `git submodule sync`, update, commit) and nothing
+  else here changes.
+- `emulator` tracks `master` of bda-vtuner.
+
+To move to a branch's current tip: `git submodule update --remote <name>`,
+re-run the tests, and commit the bump -- that commit is the record of the
+tested pairing. `harness/BdaRenderMap.ps1` documents which MPC-HC JSON
+spellings the pinned revision emits; revisit it on any player bump.
