@@ -58,7 +58,7 @@
 
 .EXAMPLE
     $probes = Get-Content .\subtitle-probes.json -Raw | ConvertFrom-Json
-    .\Test-MpcFrame.ps1 -VMName win10-parity `
+    .\Test-MpcFrame.ps1 -VMName MyTestVM `
         -ExpectedColours @(@{R=255;G=0;B=0}, @{R=0;G=128;B=0}) `
         -SubtitleProbes ($probes | Where-Object Channel -eq 'Test Channel 1').ProbePoints
 #>
