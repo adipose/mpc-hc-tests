@@ -72,7 +72,9 @@
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="test_AudioParser.cpp" />
     <ClCompile Include="test_Harness.cpp" />
+    <ClCompile Include="test_HdmvClipInfo.cpp" />
     <ClCompile Include="test_SubRipAndSSA.cpp" />
     <ClCompile Include="test_BitmapSubs.cpp" />
     <ClCompile Include="test_DSUtilText.cpp" />
