@@ -130,7 +130,7 @@ try {
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
-    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -280,6 +280,8 @@ try {
         elseif ($c.R -gt 180 -and $c.G -lt 90 -and $c.B -lt 90) { 'red' }
         elseif ($c.G -gt 180 -and $c.R -lt 90 -and $c.B -lt 90) { 'green' }
         elseif ($c.B -gt 180 -and $c.R -lt 90 -and $c.G -lt 90) { 'blue' }
+        elseif ($c.R -gt 180 -and $c.B -gt 180 -and $c.G -lt 90) { 'magenta' }
+        elseif ($c.G -gt 180 -and $c.B -gt 180 -and $c.R -lt 90) { 'cyan' }
         elseif ($c.R -lt 40 -and $c.G -lt 40 -and $c.B -lt 40) { 'black' }
         else { "($($c.R),$($c.G),$($c.B))" }
     }
@@ -306,6 +308,17 @@ try {
             if ($wrong) { return ($wrong -join '; ') }
             return $null
         } finally { $bmp.Dispose() }
+    }
+
+    # The colour at the centre of the captured frame, where the subtitle clips draw their band.
+    function Test-CentreBand {
+        param([string] $Png, [string] $Expected, [hashtable] $Meaning = @{})
+        if (-not $Png) { return 'no frame was captured' }
+        $bmp = [System.Drawing.Bitmap]::FromFile($Png)
+        try { $got = Get-ColourName $bmp.GetPixel([int]($bmp.Width / 2), [int]($bmp.Height / 2)) } finally { $bmp.Dispose() }
+        if ($got -eq $Expected) { return $null }
+        if ($Meaning.ContainsKey($got)) { return "centre is $got, expected ${Expected}: $($Meaning[$got])" }
+        return "centre is $got, expected ${Expected}: no subtitle band was rendered there"
     }
 
     function Complete-Case {
@@ -412,6 +425,28 @@ try {
         $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds)
     }
     Complete-Case 'next-file-in-folder' $problems
+
+    # 8. The container's default flag picks the subtitle track: track 2's cyan band at the centre, not track 1's
+    #    magenta one, with the internal renderer. (#1551, #2452, #2876, #3283, #3914.)
+    $subs = $clips.clips.'subs.mkv'
+    $defaultSub = @($subs.subtitles | Where-Object default)[0]
+    $otherSub = @($subs.subtitles | Where-Object { -not $_.default })[0]
+    $c = Invoke-PlayerCase -Name 'default-subtitle-track' -Clip 'subs.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+    Complete-Case 'default-subtitle-track' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-Picture $c.Png $subs.picture),
+        (Test-CentreBand $c.Png $defaultSub.band @{ $otherSub.band = "track $($otherSub.track) was rendered, which is not the default" })
+    )
+
+    # 9. A subtitle file beside the clip, same base name, is loaded by itself and shown. (#1121, #1164, #1894,
+    #    #3152.)
+    $ext = $clips.clips.'ext.mkv'
+    $c = Invoke-PlayerCase -Name 'external-subtitle-autoload' -Clip 'ext.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+    Complete-Case 'external-subtitle-autoload' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-Picture $c.Png $ext.picture),
+        (Test-CentreBand $c.Png $ext.sidecar.band)
+    )
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

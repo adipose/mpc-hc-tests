@@ -84,6 +84,41 @@ Invoke-FFmpeg $twotracks @(
     '-disposition:a:0', '0', '-disposition:a:1', 'default'
 )
 
+# --- subs.mkv: two ASS subtitle tracks; the SECOND carries the default flag. -
+# Each track draws one solid band across the centre of the picture, magenta
+# for track 1 and cyan for track 2, so the colour at the centre of a captured
+# frame says which track was rendered (and the quadrant corners stay clear).
+# ext.mkv + ext.ass: the same band as a sidecar file, for autoload.
+function Write-BandAss {
+    param([string] $Path, [string] $ColourAABBGGRR)
+    $ass = @(
+        '[Script Info]', 'ScriptType: v4.00+', 'PlayResX: 1280', 'PlayResY: 720', '',
+        '[V4+ Styles]',
+        'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+        "Style: Band,Arial,40,&H$ColourAABBGGRR,&H$ColourAABBGGRR,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1", '',
+        '[Events]',
+        'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+        'Dialogue: 0,0:00:00.00,0:00:30.00,Band,,0,0,0,,{\an5\pos(640,360)\p1}m -400 -60 l 400 -60 l 400 60 l -400 60{\p0}'
+    )
+    [IO.File]::WriteAllLines($Path, $ass, [Text.UTF8Encoding]::new($false))
+}
+$magenta = Join-Path $OutDir 'band-magenta.ass'   # AABBGGRR: B ff, G 00, R ff
+$cyan    = Join-Path $OutDir 'band-cyan.ass'      # B ff, G ff, R 00
+Write-BandAss $magenta '00FF00FF'
+Write-BandAss $cyan    '00FFFF00'
+
+$subs = Join-Path $OutDir 'subs.mkv'
+Invoke-FFmpeg $subs @(
+    '-f', 'lavfi', '-i', (Tone 440), '-f', 'lavfi', '-i', (Tone 880), '-i', $magenta, '-i', $cyan,
+    '-filter_complex', "$quad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]', '-map', '2:s', '-map', '3:s',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le', '-c:s', 'ass',
+    '-metadata:s:s:0', 'language=eng', '-metadata:s:s:1', 'language=ger',
+    '-disposition:s:0', '0', '-disposition:s:1', 'default'
+)
+Copy-Item $stereo (Join-Path $OutDir 'ext.mkv') -Force
+Copy-Item $magenta (Join-Path $OutDir 'ext.ass') -Force
+
 # --- rotated90.mp4: the quadrant picture with 90 degrees of display rotation -
 # ffmpeg's own autorotation is taken as the reference for what "rotated
 # correctly" means; reference-rotated90.png is that rendering.
@@ -142,6 +177,19 @@ $clips = [ordered]@{
                 [ordered]@{ track = 1; language = 'eng'; default = $false; tones = @(600, 600) }
                 [ordered]@{ track = 2; language = 'ger'; default = $true;  tones = @(1200, 1200) }
             )
+        }
+        'subs.mkv' = [ordered]@{
+            picture   = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio     = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+            subtitles = @(
+                [ordered]@{ track = 1; language = 'eng'; default = $false; band = 'magenta' }
+                [ordered]@{ track = 2; language = 'ger'; default = $true;  band = 'cyan' }
+            )
+        }
+        'ext.mkv' = [ordered]@{
+            picture   = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio     = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+            sidecar   = [ordered]@{ file = 'ext.ass'; band = 'magenta' }
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
