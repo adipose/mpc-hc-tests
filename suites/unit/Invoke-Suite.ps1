@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     A thin wrapper over ..\..\unit\Invoke-UnitTests.ps1: it builds the native
-    test executable (which pulls in the player's DSUtil, Subtitles and SubPic
-    static libraries as project references) and runs it, translating the exe's
-    JSON result into the orchestrator's pass/fail counts.
+    GoogleTest executable (which pulls in the player's DSUtil, Subtitles and
+    SubPic static libraries as project references) and runs it, translating
+    the exe's JSON result into the orchestrator's pass/fail counts.
 
     This tier runs no player and needs no test rig, so the probe reports
     NeedsRig = $false and the orchestrator claims no guest on its behalf. It is
@@ -75,7 +75,7 @@ foreach ($t in @($r.tests | Where-Object { $_.status -eq 'failed' -or $_.status 
     Note Red "FAIL $($t.name): $first"
 }
 foreach ($t in @($r.tests | Where-Object { $_.status -eq 'expected-failure' })) {
-    Note DarkGray "documents a current bug: $($t.name) -- $($t.expectedFailure)"
+    Note DarkGray "expected failure: $($t.name) -- $($t.expectedFailure)"
 }
 
 [pscustomobject]@{ Suite = 'unit'; Passed = $passed; Failed = $failed; Skipped = $skipped; Notes = $notes }

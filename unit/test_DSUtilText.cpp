@@ -33,220 +33,220 @@ using namespace testutil;
 
 // --- ISOLang ----------------------------------------------------------------
 
-TEST_CASE(ISOLang_TwoAndThreeLetterCodes)
+TEST(ISOLang, TwoAndThreeLetterCodes)
 {
-    CHECK_EQ(ISOLang::ISO6391ToLanguage("en"), L"English");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("eng"), L"English");
-    CHECK_EQ(ISOLang::ISO6391ToLanguage("fr"), L"French");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("deu"), L"German"); // ISO 639-2/T
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("ger"), L"German"); // ISO 639-2/B
-    CHECK_EQ(ISOLang::ISO6391ToLcid("en"), MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT), SORT_DEFAULT));
-    CHECK_EQ(ISOLang::ISO6392ToLcid("fre"), MAKELCID(MAKELANGID(LANG_FRENCH, SUBLANG_DEFAULT), SORT_DEFAULT));
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage("en"), L"English");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("eng"), L"English");
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage("fr"), L"French");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("deu"), L"German"); // ISO 639-2/T
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("ger"), L"German"); // ISO 639-2/B
+    EXPECT_EQ(ISOLang::ISO6391ToLcid("en"), MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT), SORT_DEFAULT));
+    EXPECT_EQ(ISOLang::ISO6392ToLcid("fre"), MAKELCID(MAKELANGID(LANG_FRENCH, SUBLANG_DEFAULT), SORT_DEFAULT));
 }
 
-TEST_CASE(ISOLang_UnknownCode)
+TEST(ISOLang, UnknownCode)
 {
-    CHECK_EQ(ISOLang::ISO6391ToLanguage("xx"), L"");
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage("xx"), L"");
     // ISO6392ToLanguage echoes the input when it has no entry
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("xyz"), L"xyz");
-    CHECK_EQ(ISOLang::ISO6391ToLcid("xx"), (LCID)0);
-    CHECK_EQ(ISOLang::ISO6392ToLcid("xyz"), (LCID)0);
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("xyz"), L"xyz");
+    EXPECT_EQ(ISOLang::ISO6391ToLcid("xx"), (LCID)0);
+    EXPECT_EQ(ISOLang::ISO6392ToLcid("xyz"), (LCID)0);
 }
 
 // #632: a truncated BCP-47 code (639-1 with a region, e.g. "en-US") should
 // fall back to the 639-1 lookup rather than fail.
-TEST_CASE(ISOLang_TruncatedBcp47FallsBackTo6391)
+TEST(ISOLang, TruncatedBcp47FallsBackTo6391)
 {
-    CHECK_EQ(ISOLang::ISO6392ToLcid("en-"), MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT), SORT_DEFAULT));
-    CHECK_EQ(ISOLang::ISO639XToLanguage("en-"), L"English");
-    CHECK_EQ(ISOLang::ISO639XToLanguage("fr"), L"French");
-    CHECK_EQ(ISOLang::ISO639XToLanguage("eng"), L"English");
+    EXPECT_EQ(ISOLang::ISO6392ToLcid("en-"), MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT), SORT_DEFAULT));
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("en-"), L"English");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("fr"), L"French");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("eng"), L"English");
 }
 
 // #927: the Traditional/Simplified region tags
-TEST_CASE(ISOLang_ChineseRegionTags)
+TEST(ISOLang, ChineseRegionTags)
 {
-    CHECK_EQ(ISOLang::ISO639XToLanguage("zh-CN"), L"Chinese (Simplified)");
-    CHECK_EQ(ISOLang::ISO639XToLanguage("zh-TW"), L"Chinese (Traditional)");
-    CHECK_EQ(ISOLang::ISO639XToLanguage("pt-BR"), L"Portuguese (Brazil)");
-    CHECK_EQ(ISOLang::ISO639XToLanguage("pt-PT"), L"Portuguese");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("zh-CN"), L"Chinese (Simplified)");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("zh-TW"), L"Chinese (Traditional)");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("pt-BR"), L"Portuguese (Brazil)");
+    EXPECT_EQ(ISOLang::ISO639XToLanguage("pt-PT"), L"Portuguese");
 }
 
 // #3452: bare "zh" is just "Chinese", not "Chinese (Simplified)"
-TEST_CASE(ISOLang_BareChineseIsNotSimplified)
+TEST(ISOLang, BareChineseIsNotSimplified)
 {
-    CHECK_EQ(ISOLang::ISO6391ToLanguage("zh"), L"Chinese");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("chi"), L"Chinese");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("zho"), L"Chinese");
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage("zh"), L"Chinese");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("chi"), L"Chinese");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("zho"), L"Chinese");
 }
 
 // #3321: "srp" is Serbian, not Croatian
-TEST_CASE(ISOLang_SerbianAndCroatianAreDistinct)
+TEST(ISOLang, SerbianAndCroatianAreDistinct)
 {
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("srp"), L"Serbian");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("scc"), L"Serbian");
-    CHECK_EQ(ISOLang::ISO6392ToLanguage("hrv"), L"Croatian");
-    CHECK_NE(ISOLang::ISO6392ToLcid("srp"), ISOLang::ISO6392ToLcid("hrv"));
-    CHECK_EQ(PRIMARYLANGID(LANGIDFROMLCID(ISOLang::ISO6392ToLcid("srp"))), (WORD)LANG_SERBIAN);
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("srp"), L"Serbian");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("scc"), L"Serbian");
+    EXPECT_EQ(ISOLang::ISO6392ToLanguage("hrv"), L"Croatian");
+    EXPECT_NE(ISOLang::ISO6392ToLcid("srp"), ISOLang::ISO6392ToLcid("hrv"));
+    EXPECT_EQ(PRIMARYLANGID(LANGIDFROMLCID(ISOLang::ISO6392ToLcid("srp"))), (WORD)LANG_SERBIAN);
 }
 
-TEST_CASE(ISOLang_RoundTripThrough6391And6392)
+TEST(ISOLang, RoundTripThrough6391And6392)
 {
-    CHECK_EQ(ISOLang::ISO6391To6392("en"), "eng");
-    CHECK_EQ(ISOLang::ISO6392To6391("eng"), L"en");
-    CHECK(ISOLang::IsISO6391("en"));
-    CHECK(ISOLang::IsISO6392("eng"));
-    CHECK_FALSE(ISOLang::IsISO6392("en"));
+    EXPECT_EQ(ISOLang::ISO6391To6392("en"), "eng");
+    EXPECT_EQ(ISOLang::ISO6392To6391("eng"), L"en");
+    EXPECT_TRUE(ISOLang::IsISO6391("en"));
+    EXPECT_TRUE(ISOLang::IsISO6392("eng"));
+    EXPECT_FALSE(ISOLang::IsISO6392("en"));
 }
 
 // --- PathUtils --------------------------------------------------------------
 
-TEST_CASE(PathUtils_NameAndExtension)
+TEST(PathUtils, NameAndExtension)
 {
     // BaseName keeps the extension, FileName drops it
-    CHECK_EQ(PathUtils::BaseName(L"C:\\movies\\clip.mkv"), L"clip.mkv");
-    CHECK_EQ(PathUtils::FileName(L"C:\\movies\\clip.mkv"), L"clip");
-    CHECK_EQ(PathUtils::FileExt(L"C:\\movies\\clip.mkv"), L".mkv");
-    CHECK_EQ(PathUtils::DirName(L"C:\\movies\\clip.mkv"), L"C:\\movies");
+    EXPECT_EQ(PathUtils::BaseName(L"C:\\movies\\clip.mkv"), L"clip.mkv");
+    EXPECT_EQ(PathUtils::FileName(L"C:\\movies\\clip.mkv"), L"clip");
+    EXPECT_EQ(PathUtils::FileExt(L"C:\\movies\\clip.mkv"), L".mkv");
+    EXPECT_EQ(PathUtils::DirName(L"C:\\movies\\clip.mkv"), L"C:\\movies");
 }
 
 // #2612: control characters are not valid in a filename either
-TEST_CASE(PathUtils_FilterInvalidChars)
+TEST(PathUtils, FilterInvalidChars)
 {
-    CHECK_EQ(PathUtils::FilterInvalidCharsFromFileName(L"a<b>c:d\"e/f\\g|h?i*j"), L"a_b_c_d_e_f_g_h_i_j");
-    CHECK_EQ(PathUtils::FilterInvalidCharsFromFileName(L"tab\tnewline\r\nhere"), L"tab_newline__here");
-    CHECK_EQ(PathUtils::FilterInvalidCharsFromFileName(L"perfectly.valid_name"), L"perfectly.valid_name");
-    CHECK_EQ(PathUtils::FilterInvalidCharsFromFileName(L"x/y", L'-'), L"x-y");
+    EXPECT_EQ(PathUtils::FilterInvalidCharsFromFileName(L"a<b>c:d\"e/f\\g|h?i*j"), L"a_b_c_d_e_f_g_h_i_j");
+    EXPECT_EQ(PathUtils::FilterInvalidCharsFromFileName(L"tab\tnewline\r\nhere"), L"tab_newline__here");
+    EXPECT_EQ(PathUtils::FilterInvalidCharsFromFileName(L"perfectly.valid_name"), L"perfectly.valid_name");
+    EXPECT_EQ(PathUtils::FilterInvalidCharsFromFileName(L"x/y", L'-'), L"x-y");
 }
 
 // #2525: a trailing backslash must not become a double one when combined
-TEST_CASE(PathUtils_CombineWithTrailingBackslash)
+TEST(PathUtils, CombineWithTrailingBackslash)
 {
-    CHECK_EQ(PathUtils::CombinePaths(L"\\\\NAS\\share\\", L"BDMV\\index.bdmv"), L"\\\\NAS\\share\\BDMV\\index.bdmv");
-    CHECK_EQ(PathUtils::CombinePaths(L"C:\\dir", L"file.txt"), L"C:\\dir\\file.txt");
-    CHECK_EQ(PathUtils::CombinePaths(L"C:\\dir\\", L"file.txt"), L"C:\\dir\\file.txt");
+    EXPECT_EQ(PathUtils::CombinePaths(L"\\\\NAS\\share\\", L"BDMV\\index.bdmv"), L"\\\\NAS\\share\\BDMV\\index.bdmv");
+    EXPECT_EQ(PathUtils::CombinePaths(L"C:\\dir", L"file.txt"), L"C:\\dir\\file.txt");
+    EXPECT_EQ(PathUtils::CombinePaths(L"C:\\dir\\", L"file.txt"), L"C:\\dir\\file.txt");
 }
 
-TEST_CASE(PathUtils_UrlAndFullPathClassification)
+TEST(PathUtils, UrlAndFullPathClassification)
 {
     CString http = L"http://example.com/a.mkv";
     CString unc = L"\\\\server\\share\\a.mkv";
     CString drive = L"C:\\a.mkv";
     CString rel = L"sub\\a.mkv";
     CString fileUrl = L"file://server/a.mkv";
-    CHECK(PathUtils::IsURL(http));
-    CHECK_FALSE(PathUtils::IsURL(drive));
-    CHECK_FALSE(PathUtils::IsURL(fileUrl)); // file: is a local path, not a remote URL
-    CHECK(PathUtils::IsFullFilePath(drive));
-    CHECK(PathUtils::IsFullFilePath(unc));
-    CHECK_FALSE(PathUtils::IsFullFilePath(rel));
-    CHECK_FALSE(PathUtils::IsFullFilePath(http));
+    EXPECT_TRUE(PathUtils::IsURL(http));
+    EXPECT_FALSE(PathUtils::IsURL(drive));
+    EXPECT_FALSE(PathUtils::IsURL(fileUrl)); // file: is a local path, not a remote URL
+    EXPECT_TRUE(PathUtils::IsFullFilePath(drive));
+    EXPECT_TRUE(PathUtils::IsFullFilePath(unc));
+    EXPECT_FALSE(PathUtils::IsFullFilePath(rel));
+    EXPECT_FALSE(PathUtils::IsFullFilePath(http));
 }
 
 // #1717, #3766, #3992: long paths get the \\?\ prefix, URLs do not
-TEST_CASE(PathUtils_ExtendMaxPathLength)
+TEST(PathUtils, ExtendMaxPathLength)
 {
     CString shortPath = L"C:\\short\\path.mkv";
     ExtendMaxPathLengthIfNeeded(shortPath);
-    CHECK_EQ(shortPath, L"C:\\short\\path.mkv");
+    EXPECT_EQ(shortPath, L"C:\\short\\path.mkv");
 
     CString longPath = L"C:\\";
     longPath.Append(CString('a', 300));
     longPath += L"\\file.mkv";
     ExtendMaxPathLengthIfNeeded(longPath);
-    CHECK_EQ(longPath.Left(4), L"\\\\?\\");
+    EXPECT_EQ(longPath.Left(4), L"\\\\?\\");
 
     CString longUnc = L"\\\\server\\share\\";
     longUnc.Append(CString('b', 300));
     ExtendMaxPathLengthIfNeeded(longUnc);
-    CHECK_EQ(longUnc.Left(8), L"\\\\?\\UNC\\");
+    EXPECT_EQ(longUnc.Left(8), L"\\\\?\\UNC\\");
 
     CString url = L"http://example.com/";
     url.Append(CString('c', 300));
     ExtendMaxPathLengthIfNeeded(url);
-    CHECK_EQ(url.Left(4), L"http");
+    EXPECT_EQ(url.Left(4), L"http");
 }
 
-TEST_CASE(PathUtils_StripPathOrUrl)
+TEST(PathUtils, StripPathOrUrl)
 {
-    CHECK_EQ(PathUtils::StripPathOrUrl(L"C:\\movies\\clip.mkv"), L"clip.mkv");
-    CHECK_EQ(PathUtils::StripPathOrUrl(L"http://example.com/path/clip%20one.mkv"), L"clip one.mkv");
+    EXPECT_EQ(PathUtils::StripPathOrUrl(L"C:\\movies\\clip.mkv"), L"clip.mkv");
+    EXPECT_EQ(PathUtils::StripPathOrUrl(L"http://example.com/path/clip%20one.mkv"), L"clip one.mkv");
 }
 
 // --- text.cpp / DSUtil.cpp --------------------------------------------------
 
-TEST_CASE(Text_UrlEncodeDecodeRoundTrip)
+TEST(Text, UrlEncodeDecodeRoundTrip)
 {
     CStringA plain = "a b&c=d/e?f";
     CStringA encoded = UrlEncode(plain);
-    CHECK(encoded.Find(' ') < 0);
-    CHECK_EQ(UrlDecode(encoded), plain);
-    CHECK_EQ(UrlDecode("%20%26%3D"), " &=");
+    EXPECT_TRUE(encoded.Find(' ') < 0);
+    EXPECT_EQ(UrlDecode(encoded), plain);
+    EXPECT_EQ(UrlDecode("%20%26%3D"), " &=");
 }
 
 // #591: '+' means space, and the result is decoded as UTF-8
-TEST_CASE(Text_UrlDecodeWithUtf8)
+TEST(Text, UrlDecodeWithUtf8)
 {
-    CHECK_EQ(UrlDecodeWithUTF8(L"one+two"), L"one two");
-    CHECK_EQ(UrlDecodeWithUTF8(L"caf%C3%A9"), L"caf\x00e9");
-    CHECK_EQ(UrlDecodeWithUTF8(L"%E6%97%A5%E6%9C%AC"), L"\x65e5\x672c");
+    EXPECT_EQ(UrlDecodeWithUTF8(L"one+two"), L"one two");
+    EXPECT_EQ(UrlDecodeWithUTF8(L"caf%C3%A9"), L"caf\x00e9");
+    EXPECT_EQ(UrlDecodeWithUTF8(L"%E6%97%A5%E6%9C%AC"), L"\x65e5\x672c");
 }
 
-TEST_CASE(Text_UrlGetHostName)
+TEST(Text, UrlGetHostName)
 {
-    CHECK_EQ(URLGetHostName(L"https://www.example.com/path/to/x"), L"example.com");
-    CHECK_EQ(URLGetHostName(L"http://host.local:8080/a"), L"host.local:8080");
+    EXPECT_EQ(URLGetHostName(L"https://www.example.com/path/to/x"), L"example.com");
+    EXPECT_EQ(URLGetHostName(L"http://host.local:8080/a"), L"host.local:8080");
 }
 
 // #334, #1376: UTF-8 to UTF-16, including sequences beyond the BMP
-TEST_CASE(Text_Utf8To16)
+TEST(Text, Utf8To16)
 {
-    CHECK_EQ(UTF8To16("plain ascii"), L"plain ascii");
-    CHECK_EQ(UTF8To16("caf\xC3\xA9"), L"caf\x00e9");
-    CHECK_EQ(UTF8To16("\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E"), L"\x65e5\x672c\x8a9e");
-    CHECK_EQ(UTF8To16("emoji \xF0\x9F\x98\x80"), L"emoji \xd83d\xde00");
-    CHECK_EQ(UTF8To16(""), L"");
+    EXPECT_EQ(UTF8To16("plain ascii"), L"plain ascii");
+    EXPECT_EQ(UTF8To16("caf\xC3\xA9"), L"caf\x00e9");
+    EXPECT_EQ(UTF8To16("\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E"), L"\x65e5\x672c\x8a9e");
+    EXPECT_EQ(UTF8To16("emoji \xF0\x9F\x98\x80"), L"emoji \xd83d\xde00");
+    EXPECT_EQ(UTF8To16(""), L"");
 }
 
-TEST_CASE(Text_HtmlSpecialCharsDecode)
+TEST(Text, HtmlSpecialCharsDecode)
 {
-    CHECK_EQ(HtmlSpecialCharsDecode("Tom &amp; Jerry &lt;3 &gt; 2 &quot;q&quot;"), "Tom & Jerry <3 > 2 \"q\"");
+    EXPECT_EQ(HtmlSpecialCharsDecode("Tom &amp; Jerry &lt;3 &gt; 2 &quot;q&quot;"), "Tom & Jerry <3 > 2 \"q\"");
 }
 
-TEST_CASE(Text_StartsEndsWith)
+TEST(Text, StartsEndsWith)
 {
-    CHECK(StartsWith(L"hello world", L"hello"));
-    CHECK_FALSE(StartsWith(L"hello", L"world"));
-    CHECK(EndsWith(L"clip.mkv", L".mkv"));
-    CHECK(EndsWithNoCase(L"CLIP.MKV", L".mkv"));
-    CHECK_FALSE(EndsWith(L"CLIP.MKV", L".mkv"));
+    EXPECT_TRUE(StartsWith(L"hello world", L"hello"));
+    EXPECT_FALSE(StartsWith(L"hello", L"world"));
+    EXPECT_TRUE(EndsWith(L"clip.mkv", L".mkv"));
+    EXPECT_TRUE(EndsWithNoCase(L"CLIP.MKV", L".mkv"));
+    EXPECT_FALSE(EndsWith(L"CLIP.MKV", L".mkv"));
 }
 
-TEST_CASE(Text_ExplodeRespectsLimitAndTrims)
+TEST(Text, ExplodeRespectsLimitAndTrims)
 {
     CAtlList<CString> parts;
     Explode(CString(L" a , b , c "), parts, L',');
-    REQUIRE_EQ(parts.GetCount(), (size_t)3);
-    CHECK_EQ(parts.GetHead(), L"a");
-    CHECK_EQ(parts.GetTail(), L"c");
+    ASSERT_EQ(parts.GetCount(), (size_t)3);
+    EXPECT_EQ(parts.GetHead(), L"a");
+    EXPECT_EQ(parts.GetTail(), L"c");
 
     CAtlList<CString> limited;
     Explode(CString(L"a=b=c"), limited, L'=', 2);
-    REQUIRE_EQ(limited.GetCount(), (size_t)2);
-    CHECK_EQ(limited.GetHead(), L"a");
-    CHECK_EQ(limited.GetTail(), L"b=c"); // the rest is left intact
+    ASSERT_EQ(limited.GetCount(), (size_t)2);
+    EXPECT_EQ(limited.GetHead(), L"a");
+    EXPECT_EQ(limited.GetTail(), L"b=c"); // the rest is left intact
 }
 
 // #4130: menu labels made from untrusted names
-TEST_CASE(Text_SanitizeMenuLabel)
+TEST(Text, SanitizeMenuLabel)
 {
-    CHECK_EQ(SanitizeMenuLabel(L"Fish & Chips"), L"Fish && Chips");
-    CHECK_EQ(SanitizeMenuLabel(L"tab\tseparated"), L"tab separated");
-    CHECK_EQ(SanitizeMenuLabel(L"  spaced  "), L"spaced");
-    CHECK_EQ(SanitizeMenuLabel(L""), L" "); // never empty: an item needs something to measure
+    EXPECT_EQ(SanitizeMenuLabel(L"Fish & Chips"), L"Fish && Chips");
+    EXPECT_EQ(SanitizeMenuLabel(L"tab\tseparated"), L"tab separated");
+    EXPECT_EQ(SanitizeMenuLabel(L"  spaced  "), L"spaced");
+    EXPECT_EQ(SanitizeMenuLabel(L""), L" "); // never empty: an item needs something to measure
 
     CStringW longName(L'x', 400);
     CStringW label = SanitizeMenuLabel(longName);
-    CHECK(label.GetLength() <= MENU_NAME_MAX);
-    CHECK_EQ(label.Right(1), L"\x2026"); // truncated with a horizontal-ellipsis character
+    EXPECT_TRUE(label.GetLength() <= MENU_NAME_MAX);
+    EXPECT_EQ(label.Right(1), L"\x2026"); // truncated with a horizontal-ellipsis character
 }

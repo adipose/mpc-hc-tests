@@ -14,3 +14,6 @@
 	path = vdisplay
 	url = https://github.com/adipose/idd-vdisplay.git
 	branch = main
+[submodule "unit/googletest"]
+	path = unit/googletest
+	url = https://github.com/google/googletest.git

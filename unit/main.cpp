@@ -20,8 +20,7 @@
 
 #include "stdafx.h"
 
-#define MPCTEST_MAIN
-#include "MpcTest.h"
+#include "MpcGtest.h"
 
 // The libraries under test are MFC-static; give them the application object
 // and module state they expect, the way an MFC console application does.

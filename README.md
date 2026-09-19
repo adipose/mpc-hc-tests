@@ -21,9 +21,10 @@ Invoke-MpcTests.ps1   the orchestrator: probes every suite, claims a test
 unit/                 native unit tests: a console exe linking the player's
                       DSUtil/Subtitles/SubPic static libraries and exercising
                       pure logic (parsers, path/text/language helpers) with
-                      fixture input -- no player, no rig, runs in seconds. A
-                      small in-tree harness (MpcTest.h), a fixture corpus, and
-                      Invoke-UnitTests.ps1 to build and run it
+                      fixture input -- no player, no rig, runs in seconds.
+                      GoogleTest (submodule unit/googletest) plus MpcGtest.h
+                      for expected failures and isolated tests, a fixture
+                      corpus, and Invoke-UnitTests.ps1 to build and run it
 emulator/             bda-vtuner (submodule): virtual DVB/ATSC BDA tuner
                       driver, generated transport streams, encoding matrix,
                       and the host-to-target transport every suite uses
@@ -68,8 +69,11 @@ and needs no rig, so it is the one tier that works on a bare bench.
 
 It needs a Visual Studio with the C++ toolset and `nasm.exe` on `PATH` (libass
 assembles its kernels with it), the same as the player's own build. The build
-step fetches the submodules the linked libraries need. Tests, fixtures and the
-harness live in `tests\unit`; the orchestrator wrapper is `suites\unit`.
+step fetches the submodules the linked libraries need, and GoogleTest, which is
+compiled into the executable. Tests, fixtures and `MpcGtest.h` live in
+`tests\unit`; the orchestrator wrapper is `suites\unit`. The executable is a
+GoogleTest binary, so Visual Studio's Test Explorer finds the tests in
+`MpcUnitTests.vcxproj` as they are, and every `--gtest_*` option works.
 
 A suite is `suites/<name>/` with a README and an `Invoke-Suite.ps1`
 implementing the contract documented in `Invoke-MpcTests.ps1`: `-Probe`

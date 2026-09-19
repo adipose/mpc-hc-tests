@@ -48,7 +48,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\include;..\..\src;..\..\src\DSUtil;..\..\src\thirdparty;..\..\src\thirdparty\freetype2\freetype2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>googletest\googletest\include;googletest\googletest;..\..\include;..\..\src;..\..\src\DSUtil;..\..\src\thirdparty;..\..\src\thirdparty\freetype2\freetype2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -59,8 +59,16 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <!-- GoogleTest compiled into the executable: no CMake, no prebuilt
+         library, and the runtime and toolset are the project's own. -->
+    <ClCompile Include="googletest\googletest\src\gtest-all.cc">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
     <ClCompile Include="HostHooks.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="MpcGtest.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -73,7 +81,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="HostHooks.h" />
-    <ClInclude Include="MpcTest.h" />
+    <ClInclude Include="MpcGtest.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="SubtitleTestUtil.h" />
     <ClInclude Include="TestUtil.h" />

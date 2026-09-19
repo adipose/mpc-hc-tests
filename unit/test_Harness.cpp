@@ -18,25 +18,75 @@
  *
  */
 
+
 #include "stdafx.h"
 
-// The harness checking itself: the comparisons the other files lean on.
+// The framework checking itself: the printing the other files lean on, and
+// the two macros this file adds to GoogleTest.
 
-TEST_CASE(Harness_StringComparisonsCompareContent)
+TEST(Harness, StringComparisonsCompareContent)
 {
     CStringW w = L"abc";
     CStringA a = "abc";
-    CHECK_EQ(w, L"abc");
-    CHECK_EQ(a, "abc");
-    CHECK_NE(w, L"abd");
-    CHECK_EQ(std::string("x"), "x");
+    EXPECT_EQ(w, L"abc");
+    EXPECT_EQ(a, "abc");
+    EXPECT_NE(w, L"abd");
+    EXPECT_EQ(std::string("x"), "x");
 }
 
-TEST_CASE(Harness_FixtureAndTempDirsExist)
+TEST(Harness, StringsPrintAsEscapedCodeUnits)
 {
-    CHECK(GetFileAttributesW(mpctest::FixtureDir()) != INVALID_FILE_ATTRIBUTES);
+    EXPECT_EQ(::testing::PrintToString(CStringW(L"a\tb\x00e9")), "L\"a\\tb\\x00e9\"");
+    EXPECT_EQ(::testing::PrintToString(CStringA("a\"b\xff")), "\"a\\\"b\\xff\"");
+}
+
+TEST(Harness, FixtureAndTempDirsExist)
+{
+    EXPECT_TRUE(GetFileAttributesW(mpctest::FixtureDir()) != INVALID_FILE_ATTRIBUTES);
     CStringW p = testutil::WriteTemp(L"harness.bin", std::string("\x01\x02\x03"));
     auto bytes = testutil::ReadAll(p);
-    REQUIRE_EQ(bytes.size(), (size_t)3);
-    CHECK_EQ(bytes[2], 3);
+    ASSERT_EQ(bytes.size(), (size_t)3);
+    EXPECT_EQ(bytes[2], 3);
+}
+
+// A failing body is what the marker expects: the test passes and carries
+// the reason as a property.
+TEST_EXPECTED_FAILURE(Harness, ExpectedFailurePassesWhenTheBodyFails, "the harness's own check that a marked failure is not a failure")
+{
+    EXPECT_EQ(1, 2);
+    ASSERT_TRUE(false) << "and a fatal one after it";
+}
+
+// A passing body under the marker is the failure, and says so.
+TEST(Harness, ExpectedFailureFailsWhenTheBodyPasses)
+{
+    EXPECT_NONFATAL_FAILURE({
+        MPCTEST_CAPTURED_(EXPECT_EQ(1, 1), "a marker on a test that no longer fails");
+    }, "remove the marker");
+}
+
+// The isolated body runs in a child process: a crash there is a failure of
+// this test, reported with the exit status, and the run carries on.
+TEST_ISOLATED(Harness, IsolatedBodyThatPassesPasses)
+{
+    EXPECT_EQ(2 + 2, 4);
+}
+
+TEST(Harness, IsolatedBodyThatFailsFails)
+{
+    EXPECT_NONFATAL_FAILURE(
+        EXPECT_EXIT(::mpctest::RunIsolatedBody([] { EXPECT_EQ(1, 2); }), ::testing::ExitedWithCode(0), ""),
+        "Exited with exit status 1");
+}
+
+TEST(Harness, IsolatedBodyThatCrashesFails)
+{
+    EXPECT_NONFATAL_FAILURE(
+        EXPECT_EXIT(::mpctest::RunIsolatedBody([] { *(volatile int*)nullptr = 1; }), ::testing::ExitedWithCode(0), ""),
+        "structured exception 0xc0000005");
+}
+
+TEST_ISOLATED_EXPECTED_FAILURE(Harness, IsolatedExpectedFailureCoversACrash, "the harness's own check that an isolated marked crash is not a failure")
+{
+    *(volatile int*)nullptr = 1;
 }

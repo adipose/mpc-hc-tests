@@ -62,17 +62,17 @@ namespace
     }
 }
 
-TEST_CASE(VobSub_GetPacketInfoValidRect)
+TEST(VobSub, GetPacketInfoValidRect)
 {
     Bytes packet = VobSubPacket(8, 0, 4, 0, 0, 16, 12);
     GuardedBuffer buf(packet);
     CVobSubImage img;
-    REQUIRE(img.GetPacketInfo(buf.data(), buf.size(), 8));
-    CHECK_EQ(img.rect.Width(), 16);
-    CHECK_EQ(img.rect.Height(), 12);
+    ASSERT_TRUE(img.GetPacketInfo(buf.data(), buf.size(), 8));
+    EXPECT_EQ(img.rect.Width(), 16);
+    EXPECT_EQ(img.rect.Height(), 12);
 }
 
-TEST_CASE(VobSub_DecodeValidPacketDoesNotCrash)
+TEST(VobSub, DecodeValidPacketDoesNotCrash)
 {
     // A tiny well-formed RLE area: the decoder walks it without reading past
     // dataSize. We only assert it returns and produces the declared size.
@@ -88,7 +88,7 @@ TEST_CASE(VobSub_DecodeValidPacketDoesNotCrash)
     CVobSubImage img;
     RGBQUAD pal[16] = {}, cuspal[4] = {};
     bool ok = img.Decode(buf.data(), buf.size(), rle.size(), INT_MAX, false, 0, pal, cuspal, false);
-    CHECK(ok || !ok); // the assertion is "it returned without crashing or hanging"
+    EXPECT_TRUE(ok || !ok); // the assertion is "it returned without crashing or hanging"
 }
 
 // #4192: the next-control-block offset comes from the packet. Here the first
@@ -96,7 +96,7 @@ TEST_CASE(VobSub_DecodeValidPacketDoesNotCrash)
 // that block's 4-byte header runs off the end.
 // #4192: GetPacketInfo read a control block's date and next-offset without
 // checking i + 4 against packetSize.
-TEST_CASE(VobSub_GetPacketInfoTruncatedControlBlock)
+TEST(VobSub, GetPacketInfoTruncatedControlBlock)
 {
     Bytes b;
     b.fill(4, 0x00);           // data area, dataSize = 4
@@ -114,18 +114,18 @@ TEST_CASE(VobSub_GetPacketInfoTruncatedControlBlock)
 
     GuardedBuffer buf(b);
     CVobSubImage img;
-    CHECK_FALSE(img.GetPacketInfo(buf.data(), buf.size(), 4));
+    EXPECT_FALSE(img.GetPacketInfo(buf.data(), buf.size(), 4));
 }
 
 // #4192: plane offsets from the packet drive the RLE read in Decode, and
 // were once trusted as far as dataSize without a check.
-TEST_CASE(VobSub_DecodeRejectsOutOfRangeOffsets)
+TEST(VobSub, DecodeRejectsOutOfRangeOffsets)
 {
     Bytes packet = VobSubPacket(8, 0, 0x7000, 0, 0, 2, 2); // nOffset[1] far past dataSize
     GuardedBuffer buf(packet);
     CVobSubImage img;
     RGBQUAD pal[16] = {}, cuspal[4] = {};
-    CHECK_FALSE(img.Decode(buf.data(), buf.size(), 8, INT_MAX, false, 0, pal, cuspal, false));
+    EXPECT_FALSE(img.Decode(buf.data(), buf.size(), 8, INT_MAX, false, 0, pal, cuspal, false));
 }
 
 // --- PGS --------------------------------------------------------------------
@@ -152,25 +152,25 @@ namespace
     }
 }
 
-TEST_CASE(PGS_ValidPaletteSegmentParses)
+TEST(PGS, ValidPaletteSegmentParses)
 {
     CCritSec lock;
     CPGSSub pgs(&lock, L"test", 0);
     Bytes sample = PgsPalette(16);
     GuardedBuffer buf(sample);
-    CHECK_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
+    EXPECT_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
 }
 
-TEST_CASE(PGS_FullPalette256Entries)
+TEST(PGS, FullPalette256Entries)
 {
     CCritSec lock;
     CPGSSub pgs(&lock, L"test", 0);
     Bytes sample = PgsPalette(256);
     GuardedBuffer buf(sample);
-    CHECK_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
+    EXPECT_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
 }
 
-TEST_CASE(PGS_EmptyAndTruncatedSamples)
+TEST(PGS, EmptyAndTruncatedSamples)
 {
     CCritSec lock;
     CPGSSub pgs(&lock, L"test", 0);
@@ -179,7 +179,7 @@ TEST_CASE(PGS_EmptyAndTruncatedSamples)
     Bytes shortSample;
     shortSample.u8(0x14).u16(500).u8(0).u8(0);
     GuardedBuffer buf(shortSample);
-    CHECK_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
+    EXPECT_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
 }
 
 // #4187: a palette segment shorter than its two-byte header. Pre-fix this
@@ -187,14 +187,14 @@ TEST_CASE(PGS_EmptyAndTruncatedSamples)
 // own large palette arrays, so it corrupts silently rather than crashing and
 // cannot be caught at unit level without the fix. What is checkable is that
 // the input itself is not over-read and the call returns.
-TEST_CASE(PGS_ShortPaletteSegment)
+TEST(PGS, ShortPaletteSegment)
 {
     CCritSec lock;
     CPGSSub pgs(&lock, L"test", 0);
     Bytes sample;
     sample.u8(0x14).u16(2).u8(0).u8(0); // palette segment, length 2 (header only, zero entries)
     GuardedBuffer buf(sample);
-    CHECK_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
+    EXPECT_EQ(pgs.ParseSample(0, 0, buf.data(), buf.size()), S_OK);
 }
 
 // --- DVB --------------------------------------------------------------------
@@ -240,7 +240,7 @@ namespace
     }
 }
 
-TEST_CASE(DVB_ValidPageAndClutParse)
+TEST(DVB, ValidPageAndClutParse)
 {
     CCritSec lock;
     CDVBSub dvb(&lock, L"test", 0);
@@ -249,10 +249,10 @@ TEST_CASE(DVB_ValidPageAndClutParse)
     Bytes sample = DvbStream(segments);
     GuardedBuffer buf(sample);
     HRESULT hr = dvb.ParseSample(0, 0, buf.data(), buf.size());
-    CHECK(hr == S_OK || hr == S_FALSE);
+    EXPECT_TRUE(hr == S_OK || hr == S_FALSE);
 }
 
-TEST_CASE(DVB_TruncatedSegmentIsHeldNotOverRead)
+TEST(DVB, TruncatedSegmentIsHeldNotOverRead)
 {
     CCritSec lock;
     CDVBSub dvb(&lock, L"test", 0);
@@ -262,10 +262,10 @@ TEST_CASE(DVB_TruncatedSegmentIsHeldNotOverRead)
     Bytes sample = DvbStream(seg);
     GuardedBuffer buf(sample);
     HRESULT hr = dvb.ParseSample(0, 0, buf.data(), buf.size());
-    CHECK(hr == S_OK || hr == S_FALSE);
+    EXPECT_TRUE(hr == S_OK || hr == S_FALSE);
 }
 
-TEST_CASE(DVB_GarbageSampleIsRejectedWithoutOverRead)
+TEST(DVB, GarbageSampleIsRejectedWithoutOverRead)
 {
     CCritSec lock;
     CDVBSub dvb(&lock, L"test", 0);
@@ -275,5 +275,5 @@ TEST_CASE(DVB_GarbageSampleIsRejectedWithoutOverRead)
     // AddToBuffer only accepts data starting with the DVB marker, so this is
     // dropped; the point is that it does not read past the sample.
     HRESULT hr = dvb.ParseSample(0, 0, buf.data(), buf.size());
-    CHECK(hr == S_OK || hr == S_FALSE || FAILED(hr));
+    EXPECT_TRUE(hr == S_OK || hr == S_FALSE || FAILED(hr));
 }

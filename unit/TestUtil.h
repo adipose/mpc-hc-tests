@@ -20,8 +20,9 @@
 
 #pragma once
 
-#include "MpcTest.h"
+#include "MpcGtest.h"
 #include <initializer_list>
+#include <stdexcept>
 #include <vector>
 
 // Helpers shared by the test files: fixture paths, scratch files, byte builders.
@@ -39,8 +40,7 @@ namespace testutil
         CStringW path = mpctest::TempDir() + name;
         HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            FAIL("cannot create scratch file " + mpctest::ToUtf8(path));
-            throw mpctest::AbortTest();
+            throw std::runtime_error("cannot create scratch file " + mpctest::ToUtf8(path));
         }
         DWORD written = 0;
         WriteFile(h, data, (DWORD)size, &written, nullptr);
@@ -63,8 +63,7 @@ namespace testutil
         std::vector<BYTE> out;
         HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            FAIL("cannot open " + mpctest::ToUtf8(path));
-            throw mpctest::AbortTest();
+            throw std::runtime_error("cannot open " + mpctest::ToUtf8(path));
         }
         out.resize(GetFileSize(h, nullptr));
         DWORD read = 0;
@@ -94,8 +93,7 @@ namespace testutil
             const size_t pages = (m_size + page - 1) / page + 1; // at least one, plus the guard
             m_base = (BYTE*)VirtualAlloc(nullptr, pages * page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
             if (!m_base) {
-                FAIL("VirtualAlloc failed");
-                throw mpctest::AbortTest();
+                throw std::runtime_error("VirtualAlloc failed");
             }
             DWORD old;
             VirtualProtect(m_base + (pages - 1) * page, page, PAGE_NOACCESS, &old);

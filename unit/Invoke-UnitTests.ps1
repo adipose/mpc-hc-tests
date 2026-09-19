@@ -3,10 +3,11 @@
     Build and run the native unit tests.
 
 .DESCRIPTION
-    Builds MpcUnitTests.vcxproj -- and, through its project references, the
-    player's own static libraries (DSUtil, Subtitles, SubPic, BaseClasses and
-    the libass chain) -- then runs the resulting console executable and writes
-    its results as JSON. No player process, no test rig, no GPU.
+    Builds MpcUnitTests.vcxproj -- GoogleTest compiled in, and, through the
+    project references, the player's own static libraries (DSUtil, Subtitles,
+    SubPic, BaseClasses and the libass chain) -- then runs the resulting
+    console executable and writes its results as JSON. No player process, no
+    test rig, no GPU.
 
     The project is deliberately not in mpc-hc.sln. It reuses src\platform.props
     and src\common.props, so toolset, MFC-static and runtime settings match
@@ -24,10 +25,17 @@
       src/thirdparty/libunibreak/libunibreak
       src/thirdparty/tinyxml2/library   src/thirdparty/stb
     and nasm.exe on PATH (libass assembles its x86 kernels with it), as the
-    player's own build does.
+    player's own build does. GoogleTest is this repository's own submodule,
+    unit/googletest, fetched the same way.
 
 .PARAMETER Filter
-    Run only the tests whose name contains one of these strings.
+    Run only the tests whose Suite.Name contains one of these strings
+    (case-sensitive). For anything finer pass a --gtest_filter= pattern
+    through -ExeArgs.
+
+.PARAMETER ExeArgs
+    Further arguments for the executable, e.g. --gtest_repeat=3 or
+    --gtest_break_on_failure. --gtest_help lists them.
 
 .PARAMETER NoBuild
     Run the executable that is already there.
@@ -42,6 +50,7 @@
 .EXAMPLE
     .\Invoke-UnitTests.ps1
     .\Invoke-UnitTests.ps1 -Filter WebVTT, TextFile
+    .\Invoke-UnitTests.ps1 -NoBuild -ExeArgs '--gtest_filter=WebVTT.Style*'
     .\Invoke-UnitTests.ps1 -NoBuild -List
 #>
 [CmdletBinding()]
@@ -54,6 +63,7 @@ param(
     [switch]   $NoBuild,
     [switch]   $List,
     [switch]   $InitSubmodules,
+    [string[]] $ExeArgs,
     [switch]   $PassThru
 )
 
@@ -93,6 +103,43 @@ function Find-MSBuild {
     $found
 }
 
+# GoogleTest's JSON, flattened to what the suite wrapper reads: counts and
+# one row per test. The two markers are test properties recorded by
+# MpcGtest.h: a marked test that passed because failures were captured is an
+# expected failure, a marked test that failed (nothing was captured) is an
+# unexpected pass.
+function ConvertFrom-GtestJson {
+    param($Report)
+    function Prop($obj, $name) { $p = $obj.PSObject.Properties[$name]; if ($p) { $p.Value } }
+    $tests = foreach ($suite in @($Report.testsuites)) {
+        foreach ($t in @($suite.testsuite)) {
+            $failures = @(Prop $t 'failures' | ForEach-Object { $_.failure })
+            $reason   = Prop $t 'expected_failure'
+            $captured = Prop $t 'captured_failures'
+            $status = if ($failures.Count -eq 0 -and $captured) { 'expected-failure' }
+                      elseif ($failures.Count -and $reason)    { 'unexpected-pass' }
+                      elseif ($failures.Count)                 { 'failed' }
+                      elseif ($t.result -eq 'SKIPPED')         { 'skipped' }
+                      else                                     { 'passed' }
+            [pscustomobject]@{
+                name = "$($suite.name).$($t.name)"; status = $status; durationMs = [double]($t.time -replace 's$') * 1000
+                file = $t.file; line = $t.line; expectedFailure = $reason; failures = @($failures | ForEach-Object { @{ message = $_ } })
+            }
+        }
+    }
+    $tests = @($tests)
+    [pscustomobject]@{
+        total            = $tests.Count
+        passed           = @($tests | Where-Object status -eq 'passed').Count
+        failed           = @($tests | Where-Object status -eq 'failed').Count
+        expectedFailures = @($tests | Where-Object status -eq 'expected-failure').Count
+        unexpectedPasses = @($tests | Where-Object status -eq 'unexpected-pass').Count
+        skipped          = @($tests | Where-Object status -eq 'skipped').Count
+        durationMs       = [double]($Report.time -replace 's$') * 1000
+        tests            = $tests
+    }
+}
+
 if (-not $NoBuild) {
     $missing = @($Submodules | Where-Object { -not (Get-ChildItem (Join-Path $RepoRoot $_) -Force -ErrorAction SilentlyContinue | Select-Object -First 1) })
     if ($missing -and $InitSubmodules) {
@@ -104,6 +151,12 @@ if (-not $NoBuild) {
     }
     if (-not (Get-Command nasm.exe -ErrorAction SilentlyContinue)) {
         throw 'nasm.exe is not on PATH; libass needs it (see docs\Compilation.md).'
+    }
+    if (-not (Test-Path (Join-Path $UnitRoot 'googletest\googletest\src\gtest-all.cc'))) {
+        if (-not $InitSubmodules) { throw "GoogleTest not initialised. Re-run with -InitSubmodules, or: git -C $UnitRoot submodule update --init googletest" }
+        Write-Host 'Initialising submodule: unit/googletest' -ForegroundColor Cyan
+        & git -C $UnitRoot submodule update --init --depth 1 googletest | Out-Host
+        if ($LASTEXITCODE) { throw 'git submodule update failed.' }
     }
 
     $msbuild = Find-MSBuild
@@ -154,6 +207,7 @@ $json = Join-Path $OutDir 'unit-results.json'
 
 $exeArgs = @('--json', $json, '--fixtures', (Join-Path $UnitRoot 'fixtures'))
 if ($Filter) { $exeArgs += $Filter }
+if ($ExeArgs) { $exeArgs += $ExeArgs }
 # Show the exe's output and save it, but keep it out of the pipeline so that
 # -PassThru returns only the result object.
 & $Exe @exeArgs | Tee-Object -FilePath (Join-Path $OutDir 'unit-output.txt') | Out-Host
@@ -161,7 +215,7 @@ $code = $LASTEXITCODE
 Write-Host "Results in $json" -ForegroundColor DarkGray
 
 if ($PassThru) {
-    $parsed = if (Test-Path $json) { Get-Content $json -Raw | ConvertFrom-Json } else { $null }
+    $parsed = if (Test-Path $json) { ConvertFrom-GtestJson (Get-Content $json -Raw | ConvertFrom-Json) } else { $null }
     return [pscustomobject]@{ ExitCode = $code; Results = $parsed; Json = $json }
 }
 exit $code

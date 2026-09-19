@@ -46,5 +46,5 @@
 #include <string>
 #include <vector>
 
-#include "MpcTest.h"
+#include "MpcGtest.h"
 #include "TestUtil.h"
