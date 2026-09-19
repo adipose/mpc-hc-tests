@@ -1,0 +1,16 @@
+[submodule "emulator"]
+	path = emulator
+	url = https://github.com/adipose/bda-vtuner.git
+	branch = master
+[submodule "cast-mock"]
+	path = cast-mock
+	url = https://github.com/adipose/castv2-mock-device.git
+	branch = main
+[submodule "vaudio"]
+	path = vaudio
+	url = https://github.com/adipose/vaudio-endpoint.git
+	branch = main
+[submodule "vdisplay"]
+	path = vdisplay
+	url = https://github.com/adipose/idd-vdisplay.git
+	branch = main

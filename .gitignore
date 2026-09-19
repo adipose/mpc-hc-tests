@@ -1,0 +1,5 @@
+testbed.config.psd1
+results/
+unit/results/
+suites/*/results/
+suites/playback/media/

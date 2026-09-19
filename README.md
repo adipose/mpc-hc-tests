@@ -1,10 +1,18 @@
 # MPC-HC test framework
 
-Integration tests for MPC-HC, run against the build from this repository.
-The framework lives in the tree so tests and player change together: a fix
-and the test that proves it share a commit. It is this directory and four
-optional submodules; nothing under `src/` depends on it, and a checkout
-that never initialises the submodules is unaffected by it.
+Integration tests for MPC-HC, run against the build of whichever branch this
+repository is mounted in. It is mounted as the `tests\` submodule of an MPC-HC
+checkout; nothing under `src/` depends on it, and a branch that never
+initialises it is unaffected. Four submodules of its own carry the test
+devices. The few player-side additions the suites drive live under `hooks\`
+until they are upstream.
+
+```powershell
+# in any MPC-HC branch
+git submodule add https://github.com/adipose/mpc-hc-tests.git tests
+git submodule update --init --recursive tests
+.\tests\hooks\Apply-TestHooks.ps1        # the player changes the suites need, as commits
+```
 
 ```
 Invoke-MpcTests.ps1   the orchestrator: probes every suite, claims a test
@@ -85,10 +93,30 @@ control API, recorded observation) the framework asserts through, the
 coverage map, and the smallest steps that complete the `dvb` and
 `chromecast` suites.
 
+## Hooks: what the player has to have
+
+The suites reach the player through its command line and its `/slave`
+API. A handful of verbs are additions for testing, small enough to be
+proposed upstream one at a time (`/dvbscan` from #4138 already is). Until
+each is merged it is a patch under `hooks\`, one commit each, exported from
+the fork's `test-hooks` branch (upstream develop plus the hooks, rebased as
+develop moves):
+
+| Hook | Adds | Upstream |
+|---|---|---|
+| `0001-add-dvbscansave-…` | `/dvbscansave`: the headless scan stores the channels it found | clsid2/mpc-hc#4143 |
+| `0002-make-a-headless-scan-…` | exit code 1 and no modal box when a headless scan cannot run | clsid2/mpc-hc#4143 |
+
+`hooks\Apply-TestHooks.ps1 -Check` says which the checkout already has;
+without `-Check` it applies the missing ones with `git am`. A branch that
+would rather not carry the commits can merge `test-hooks` instead, or run
+without them: every suite probes the built binary for the verb it needs and
+reports itself not ready rather than failing.
+
 ## Setup
 
 ```powershell
-git submodule update --init tests/emulator tests/cast-mock tests/vaudio tests/vdisplay
+git submodule update --init --recursive tests
 .\tests\emulator\tools\Install-TestBed.ps1    # WDK ISO, TSDuck, ffmpeg, config
 ```
 
@@ -104,9 +132,11 @@ provisioning, build MPC-HC per this repository's own docs, and:
 
 ## Versioning
 
-The player under test is this checkout -- there is no player pin, because
-the tests ride the branch. The submodules pin their dependencies:
-`emulator` tracks `master` of bda-vtuner, `cast-mock` tracks `main` of
-castv2-mock-device; a bump commit is the record of the tested pairing.
+The player under test is the checkout this repository is mounted in --
+there is no player pin. The branch's submodule commit pins the tests, and
+this repository's own submodules pin the devices: `emulator` tracks
+`master` of bda-vtuner, `cast-mock`, `vaudio` and `vdisplay` track `main`
+of castv2-mock-device, vaudio-endpoint and idd-vdisplay. A bump commit is
+the record of the tested pairing.
 `suites/dvb/BdaRenderMap.ps1` documents which channel-record spellings the
 player emits; revisit it when the JSON format changes.

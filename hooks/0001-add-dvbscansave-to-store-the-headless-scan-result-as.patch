@@ -1,0 +1,126 @@
+From 2b8ca8c8aa57130b6f8fa8e52a9e289dbe1a60a0 Mon Sep 17 00:00:00 2001
+From: adipose <3324395+adipose@users.noreply.github.com>
+Date: Thu, 17 Sep 2026 16:29:17 -0700
+Subject: [PATCH 1/2] add /dvbscansave to store the headless scan result as the
+ saved channel list
+
+---
+ src/mpc-hc/AppSettings.cpp    |  5 +++++
+ src/mpc-hc/AppSettings.h      |  1 +
+ src/mpc-hc/CmdLineHelpDlg.cpp |  2 +-
+ src/mpc-hc/MainFrm.cpp        | 16 +++++++++++++++-
+ src/mpc-hc/mpc-hc.rc          |  2 ++
+ src/mpc-hc/resource.h         |  2 ++
+ 6 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/src/mpc-hc/AppSettings.cpp b/src/mpc-hc/AppSettings.cpp
+index 7321e01adc..9bfe8e574e 100644
+--- a/src/mpc-hc/AppSettings.cpp
++++ b/src/mpc-hc/AppSettings.cpp
+@@ -2729,6 +2729,7 @@ void CAppSettings::ParseCommandLine(CAtlList<CString>& cmdln)
+     cmdlnDVBScan.ulBandwidth = 0;
+     cmdlnDVBScan.ulSymbolRate = 0;
+     cmdlnDVBScan.strOutputPath.Empty();
++    cmdlnDVBScan.bSaveChannels = false;
+ 
+     POSITION pos = cmdln.GetHeadPosition();
+     while (pos) {
+@@ -2899,6 +2900,10 @@ void CAppSettings::ParseCommandLine(CAtlList<CString>& cmdln)
+                 cmdlnDVBScan.ulBandwidth = _tcstoul(cmdln.GetNext(pos), nullptr, 10);
+             } else if (sw == _T("dvbsymbolrate") && pos) {
+                 cmdlnDVBScan.ulSymbolRate = _tcstoul(cmdln.GetNext(pos), nullptr, 10);
++            } else if (sw == _T("dvbscansave")) {
++                // Only means anything together with /dvbscan; see
++                // CMainFrame::FinishHeadlessDVBScan for what gets stored.
++                cmdlnDVBScan.bSaveChannels = true;
+             } else if (sw == _T("debug")) {
+                 fShowDebugInfo = true;
+             } else if (sw == _T("nocrashreporter")) {
+diff --git a/src/mpc-hc/AppSettings.h b/src/mpc-hc/AppSettings.h
+index cab7337379..0bddbab1db 100644
+--- a/src/mpc-hc/AppSettings.h
++++ b/src/mpc-hc/AppSettings.h
+@@ -806,6 +806,7 @@ public:
+         ULONG   ulBandwidth;        // kHz; 0 means use iBDABandwidth
+         ULONG   ulSymbolRate;       // 0 means use iBDASymbolRate
+         CString strOutputPath;      // where the JSON is written
++        bool    bSaveChannels;      // /dvbscansave: the result becomes the saved channel list
+     } cmdlnDVBScan;
+ 
+     // Internal Filters
+diff --git a/src/mpc-hc/CmdLineHelpDlg.cpp b/src/mpc-hc/CmdLineHelpDlg.cpp
+index e4ce780f7b..4f3d8b63ef 100644
+--- a/src/mpc-hc/CmdLineHelpDlg.cpp
++++ b/src/mpc-hc/CmdLineHelpDlg.cpp
+@@ -61,7 +61,7 @@ BOOL CmdLineHelpDlg::OnInitDialog()
+     constexpr int cmdArgs[] = {
+         IDS_CMD_PATHNAME, IDS_CMD_DUB, IDS_CMD_DUBDELAY, IDS_CMD_D3DFS, IDS_CMD_SUB,
+         IDS_CMD_FILTER, IDS_CMD_DVD, IDS_CMD_DVDPOS_TC, IDS_CMD_DVDPOS_TIME, IDS_CMD_CD,
+-        IDS_CMD_DEVICE, IDS_CMD_OPEN, IDS_CMD_PLAY, IDS_CMD_CLOSE, IDS_CMD_SHUTDOWN,
++        IDS_CMD_DEVICE, IDS_CMD_DVBSCAN, IDS_CMD_DVBSCANSAVE, IDS_CMD_OPEN, IDS_CMD_PLAY, IDS_CMD_CLOSE, IDS_CMD_SHUTDOWN,
+         IDS_CMD_STANDBY, IDS_CMD_HIBERNATE, IDS_CMD_LOGOFF, IDS_CMD_LOCK, IDS_CMD_MONITOROFF,
+         IDS_CMD_PLAYNEXT, IDS_CMD_FULLSCREEN, IDS_CMD_VIEWPRESET, IDS_CMD_MINIMIZED, IDS_CMD_NEW,
+         IDS_CMD_ADD, IDS_CMD_RANDOMIZE, IDS_CMD_VOLUME, IDS_CMD_REGVID, IDS_CMD_REGAUD, IDS_CMD_REGPL,
+diff --git a/src/mpc-hc/MainFrm.cpp b/src/mpc-hc/MainFrm.cpp
+index f877778adb..641f037a66 100644
+--- a/src/mpc-hc/MainFrm.cpp
++++ b/src/mpc-hc/MainFrm.cpp
+@@ -21481,7 +21481,7 @@ LRESULT CMainFrame::OnHeadlessScanEnd(WPARAM wParam, LPARAM lParam)
+ 
+ void CMainFrame::FinishHeadlessDVBScan()
+ {
+-    const CAppSettings& s = AfxGetAppSettings();
++    CAppSettings& s = AfxGetAppSettings();
+ 
+     // The serializer the web interface uses, not a second copy of it: whatever
+     // /dvb/channels.json would say about these channels, this file says too.
+@@ -21510,6 +21510,20 @@ void CMainFrame::FinishHeadlessDVBScan()
+               s.cmdlnDVBScan.strOutputPath.GetString());
+     }
+ 
++    // /dvbscansave: the scan result becomes the saved channel list, so that a
++    // following /device run has something to tune. It replaces the list rather
++    // than merging into it the way CTunerScanDlg::OnBnClickedSave does, because
++    // a headless run should give the same result whatever was saved before. The
++    // pref numbers are already 0..n-1 in scan order, and the first channel is
++    // made the last watched one, which is the one /device tunes. An empty scan
++    // leaves the saved list alone. Nothing points into the old list here:
++    // StartTunerScan reset the DVB state. The profile itself is written by
++    // SaveSettings on the way out, like every other setting.
++    if (s.cmdlnDVBScan.bSaveChannels && !m_headlessDVBScanChannels.empty()) {
++        s.m_DVBChannels = m_headlessDVBScanChannels;
++        s.nDVBLastChannel = s.m_DVBChannels.front().GetPrefNumber();
++    }
++
+     m_bHeadlessDVBScan = false;
+     PostMessage(WM_CLOSE);
+ }
+diff --git a/src/mpc-hc/mpc-hc.rc b/src/mpc-hc/mpc-hc.rc
+index 708ddea809..6aca26ef2c 100644
+--- a/src/mpc-hc/mpc-hc.rc
++++ b/src/mpc-hc/mpc-hc.rc
+@@ -4135,6 +4135,8 @@ BEGIN
+     IDS_OSD_AUTOCOPY_SUBTITLE_ON "Auto-Copy Subtitle to Clipboard: On"
+     IDS_OSD_AUTOCOPY_SUBTITLE_OFF "Auto-Copy Subtitle to Clipboard: Off"
+     IDS_SUBTITLES_SECONDARY_BAD_FORMAT "This subtitle format cannot be used as a secondary subtitle track. Only simple text formats such as SRT are supported."
++    IDS_CMD_DVBSCAN         "/dvbscan start-stop	Scan the default digital capture device from start to stop (kHz) without the scan dialog, then exit. /dvbscanout ""file"" writes the found channels as JSON, /dvbbandwidth kHz and /dvbsymbolrate N override the saved scan settings"
++    IDS_CMD_DVBSCANSAVE     "/dvbscansave	With /dvbscan, replace the saved channel list with the channels found and make the first one the current channel. The saved list is kept when nothing is found"
+ END
+ 
+ STRINGTABLE
+diff --git a/src/mpc-hc/resource.h b/src/mpc-hc/resource.h
+index 8c747661ba..0bdcbd242c 100644
+--- a/src/mpc-hc/resource.h
++++ b/src/mpc-hc/resource.h
+@@ -1806,6 +1806,8 @@
+ #define IDS_OSD_AUTOCOPY_SUBTITLE_ON    57656
+ #define IDS_OSD_AUTOCOPY_SUBTITLE_OFF   57657
+ #define IDS_SUBTITLES_SECONDARY_BAD_FORMAT 57658
++#define IDS_CMD_DVBSCAN                 57659
++#define IDS_CMD_DVBSCANSAVE             57660
+ // MPC Audio Renderer
+ #define IDS_FILTER_RESET_SETTINGS       57700
+ #define IDS_ARS_WASAPI_MODE             57701
+-- 
+2.53.0.windows.2
+

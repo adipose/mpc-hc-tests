@@ -1,0 +1,172 @@
+From 86c8edae40ccd2c70a37c40c42f80ceb4852094a Mon Sep 17 00:00:00 2001
+From: adipose <3324395+adipose@users.noreply.github.com>
+Date: Thu, 17 Sep 2026 16:30:06 -0700
+Subject: [PATCH 2/2] make a headless scan that cannot run close the player
+ with a non-zero exit code
+
+---
+ src/mpc-hc/FGManagerBDA.cpp | 27 +++++++++++++++++++--------
+ src/mpc-hc/MainFrm.cpp      | 16 +++++++++++++---
+ src/mpc-hc/mplayerc.cpp     |  3 ++-
+ src/mpc-hc/mplayerc.h       |  3 +++
+ 4 files changed, 37 insertions(+), 12 deletions(-)
+
+diff --git a/src/mpc-hc/FGManagerBDA.cpp b/src/mpc-hc/FGManagerBDA.cpp
+index a6ec00cf2f..df39d00f01 100644
+--- a/src/mpc-hc/FGManagerBDA.cpp
++++ b/src/mpc-hc/FGManagerBDA.cpp
+@@ -553,6 +553,17 @@ HRESULT CFGManagerBDA::ConnectFilters(IBaseFilter* pOutFilter, IBaseFilter* pInF
+     return hr;
+ }
+ 
++// Report a failure to build the BDA graph. A headless /dvbscan has nobody to
++// dismiss a message box, and until it is dismissed the open cannot fail and the
++// player cannot close, so that run gets the TRACE/LOG lines only.
++static void BDAErrorBox(const CString& text)
++{
++    if (AfxGetAppSettings().nCLSwitches & CLSW_DVBSCAN) {
++        return;
++    }
++    MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, text, ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++}
++
+ STDMETHODIMP CFGManagerBDA::RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayList)
+ {
+     HRESULT hr;
+@@ -564,14 +575,14 @@ STDMETHODIMP CFGManagerBDA::RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayL
+     LOG(_T("Creating BDA filters..."));
+     CheckAndLogBDA(CreateKSFilterFN(&pNetwork, KSCATEGORY_BDA_NETWORK_PROVIDER, _T("Microsoft Network Provider")), _T("Network provider creation"));
+     if (FAILED(hr = CreateKSFilter(&pTuner, KSCATEGORY_BDA_NETWORK_TUNER, s.strBDATuner))) {
+-        MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_CREATE_TUNER), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++        BDAErrorBox(ResStr(IDS_BDA_ERROR_CREATE_TUNER));
+         TRACE(_T("BDA: Network tuner creation: 0x%08x\n"), hr);
+         LOG(_T("Network tuner creation: 0x%08x"), hr);
+         return hr;
+     }
+ 
+     if (FAILED(hr = ConnectFilters(pNetwork, pTuner))) {
+-        MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_CONNECT_TUNER), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++        BDAErrorBox(ResStr(IDS_BDA_ERROR_CONNECT_TUNER));
+         TRACE(_T("BDA: Network <-> Tuner: 0x%08x\n"), hr);
+         LOG(_T("Network <-> Tuner: 0x%08x"), hr);
+         return hr;
+@@ -579,7 +590,7 @@ STDMETHODIMP CFGManagerBDA::RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayL
+     m_pBDAControl = pTuner;
+ 
+     if (FAILED(hr = SearchIBDATopology(pTuner, m_pBDAFreq))) {
+-        MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, _T("IBDA_FrequencyFilter topology failed."), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++        BDAErrorBox(_T("IBDA_FrequencyFilter topology failed."));
+         LOG(_T("IBDA_FrequencyFilter topology failed."));
+         return hr;
+     }
+@@ -600,7 +611,7 @@ STDMETHODIMP CFGManagerBDA::RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayL
+             LOG(_T("No statistics interface on the RF node --> using the statistics from the demodulator node only."));
+             m_pBDATunerStats = m_pBDADemodStats;
+         } else { // if (!m_pBDATunerStats && !m_pBDADemodStats)
+-            MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, _T("No statistics interface available."), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++            BDAErrorBox(_T("No statistics interface available."));
+             TRACE(_T("BDA: Not statistics interface available\n"));
+             LOG(_T("Not statistics interface available."));
+             return E_NOINTERFACE;
+@@ -619,24 +630,24 @@ STDMETHODIMP CFGManagerBDA::RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayL
+     }
+ 
+     if (FAILED(hr = m_pDemux.CoCreateInstance(CLSID_MPEG2Demultiplexer, nullptr, CLSCTX_INPROC_SERVER))) {
+-        MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_DEMULTIPLEXER), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++        BDAErrorBox(ResStr(IDS_BDA_ERROR_DEMULTIPLEXER));
+         TRACE(_T("BDA: Microsoft demux creation: 0x%08x\n"), hr);
+         return hr;
+     }
+     CheckNoLog(AddFilter(m_pDemux, _T("MPEG-2 Demultiplexer")));
+     if (FAILED(ConnectFilters(pTuner, m_pDemux))) { // Separate receiver is required
+         if (FAILED(hr = CreateKSFilter(&pReceiver, KSCATEGORY_BDA_RECEIVER_COMPONENT, s.strBDAReceiver))) {
+-            MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_CREATE_RECEIVER), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++            BDAErrorBox(ResStr(IDS_BDA_ERROR_CREATE_RECEIVER));
+             TRACE(_T("BDA: Receiver creation: 0x%08x\n"), hr);
+             return hr;
+         }
+         if (FAILED(hr = ConnectFilters(pTuner, pReceiver))) {
+-            MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_CONNECT_TUNER_REC), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++            BDAErrorBox(ResStr(IDS_BDA_ERROR_CONNECT_TUNER_REC));
+             TRACE(_T("BDA: Tuner <-> Receiver: 0x%08x\n"), hr);
+             return hr;
+         }
+         if (FAILED(ConnectFilters(pReceiver, m_pDemux))) {
+-            MessageBox(AfxGetMyApp()->GetMainWnd()->m_hWnd, ResStr(IDS_BDA_ERROR_DEMULTIPLEXER), ResStr(IDS_BDA_ERROR), MB_ICONERROR | MB_OK);
++            BDAErrorBox(ResStr(IDS_BDA_ERROR_DEMULTIPLEXER));
+             TRACE(_T("BDA: Receiver <-> Demux: 0x%08x\n"), hr);
+             return hr;
+         }
+diff --git a/src/mpc-hc/MainFrm.cpp b/src/mpc-hc/MainFrm.cpp
+index 641f037a66..10dd62a8f8 100644
+--- a/src/mpc-hc/MainFrm.cpp
++++ b/src/mpc-hc/MainFrm.cpp
+@@ -4513,10 +4513,18 @@ LRESULT CMainFrame::OnFilePostOpenmedia(WPARAM wParam, LPARAM lParam)
+ 
+     // The device is open now, which is the one precondition DoTunerScan has.
+     // Consume the switch so a later open cannot start a second scan.
+-    if ((s.nCLSwitches & CLSW_DVBSCAN) && GetPlaybackMode() == PM_DIGITAL_CAPTURE) {
++    if (s.nCLSwitches & CLSW_DVBSCAN) {
+         s.nCLSwitches &= ~CLSW_DVBSCAN;
+-        m_bHeadlessDVBScan = true;
+-        StartHeadlessDVBScan();
++        if (GetPlaybackMode() == PM_DIGITAL_CAPTURE) {
++            m_bHeadlessDVBScan = true;
++            StartHeadlessDVBScan();
++        } else {
++            // The default device is an analog one. It opened, but there is
++            // nothing to scan and nothing else would ever close the player.
++            TRACE(_T("/dvbscan: the capture device is not a digital one, abandoning the scan\n"));
++            AfxGetMyApp()->m_nExitCode = 1;
++            PostMessage(WM_CLOSE);
++        }
+     }
+ 
+     return 0;
+@@ -4540,6 +4548,7 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
+     if (AfxGetAppSettings().nCLSwitches & CLSW_DVBSCAN) {
+         TRACE(_T("/dvbscan: the capture device failed to open, abandoning the scan\n"));
+         AfxGetAppSettings().nCLSwitches &= ~CLSW_DVBSCAN;
++        AfxGetMyApp()->m_nExitCode = 1;
+         PostMessage(WM_CLOSE);
+     }
+ 
+@@ -5373,6 +5382,7 @@ void CMainFrame::ProcessCommandLine(CAtlList<CString>& cmdln, ULONGLONG tArrived
+                 s.strAnalogVideo == L"dummy" && s.strAnalogAudio == L"dummy") {
+             TRACE(_T("/dvbscan: no capture device configured, nothing to scan\n"));
+             s.nCLSwitches &= ~CLSW_DVBSCAN;
++            AfxGetMyApp()->m_nExitCode = 1;
+             PostMessage(WM_CLOSE);
+         } else {
+             // /dvbscan implies opening the capture device, because DoTunerScan
+diff --git a/src/mpc-hc/mplayerc.cpp b/src/mpc-hc/mplayerc.cpp
+index eba474141d..5d2ca894e6 100644
+--- a/src/mpc-hc/mplayerc.cpp
++++ b/src/mpc-hc/mplayerc.cpp
+@@ -2671,7 +2671,8 @@ int CMPlayerCApp::ExitInstance()
+     m_shellDropTargetServer.Revoke();
+     OleUninitialize();
+ 
+-    return CWinAppEx::ExitInstance();
++    const int nRet = CWinAppEx::ExitInstance();
++    return m_nExitCode ? m_nExitCode : nRet;
+ }
+ 
+ BOOL CMPlayerCApp::SaveAllModified()
+diff --git a/src/mpc-hc/mplayerc.h b/src/mpc-hc/mplayerc.h
+index a1bd2743e6..881ea25e5f 100644
+--- a/src/mpc-hc/mplayerc.h
++++ b/src/mpc-hc/mplayerc.h
+@@ -242,6 +242,9 @@ public:
+     bool GetPlaylistSavePath(CString& path);
+ 
+     bool m_fClosingState;
++    // Process exit code. Stays 0 except for a /dvbscan run that could not scan,
++    // which has no other way to tell its caller.
++    int m_nExitCode = 0;
+     bool m_bThemeLoaded;
+     CRenderersData m_Renderers;
+     CString     m_strVersion;
+-- 
+2.53.0.windows.2
+
