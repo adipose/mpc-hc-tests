@@ -131,7 +131,15 @@ try {
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
     Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
-    Invoke-Command -Session $session { Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force }
+    Invoke-Command -Session $session {
+        Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
+        # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
+        # twotracks.mkv (its default track is 1200 Hz), and nothing else is in there.
+        if (Test-Path 'C:\mpc-test\media\folder') { Remove-Item 'C:\mpc-test\media\folder' -Recurse -Force }
+        New-Item -ItemType Directory 'C:\mpc-test\media\folder' | Out-Null
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\folder\a.mkv'
+        Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\folder\b.mkv'
+    }
 
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\player\mpc-hc64.exe').VersionInfo.ProductVersion }
     Note Gray "player under test: $version from $playerDir"
@@ -245,11 +253,12 @@ try {
     }
 
     function Test-Audio {
-        param([string] $Wav, [int[]] $Tones, [double] $Seconds, [double] $Tolerance = 0.4)
+        param([string] $Wav, [int[]] $Tones, [double] $Seconds, [double] $Tolerance = 0.4, [double] $SkipSeconds = 0.1)
         if (-not $Wav) { return 'no audio reached the endpoint' }
         # Shared mode: the engine resamples to the mix format, so rate and depth are the engine's, not the
         # clip's. The player starting and stopping the graph costs a little at each end, hence the tolerance.
-        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav --expect ($Tones -join ',') --seconds $Seconds --duration-tolerance $Tolerance 2>&1
+        # The tones are read from one second starting -SkipSeconds into the signal.
+        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav --expect ($Tones -join ',') --seconds $Seconds --duration-tolerance $Tolerance --skip-seconds $SkipSeconds 2>&1
         if ($LASTEXITCODE -eq 0) { return $null }
         return (($output | Where-Object { "$_" -match '^FAIL' }) -join '; ')
     }
@@ -366,6 +375,29 @@ try {
     Complete-Case 'remember-position-off-starts-over' @(
         (Get-ProcessProblem $c.Run),
         (Test-Audio $c.Wav $long.audio[0].tones ([double]$long.seconds) 1.0)
+    )
+
+    # 6. Repeat forever, per file: the 4 s clip is still playing when the window is closed at 10 s, and it is the
+    #    same tones on the second time round. (#1691, #1850, #2488, #3324, #3738.)
+    $stereo = $clips.clips.'stereo.mkv'
+    $c = Invoke-PlayerCase -Name 'repeat-file-forever' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ Loop = 1; LoopMode = 0 } -CloseAtSec 10
+    Complete-Case 'repeat-file-forever' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0),
+        (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0 -SkipSeconds 6)
+    )
+
+    # 7. After playback: play the next file in the folder. a.mkv (440/880) is followed by b.mkv (1200 on its
+    #    default track); with nothing after b the player closes the file and waits, and the window is closed at
+    #    12 s. About 8 s of sound, the first clip's tones early on and the second's late. The setting is used
+    #    rather than /playnext because it is the option the reports are about, and /close would outrank it.
+    #    (#414, #697, #1419, #2200, #2209, #2579.)
+    $c = Invoke-PlayerCase -Name 'next-file-in-folder' -Clip 'folder\a.mkv' -Switches '/play' -Settings @{ AfterPlayback = 1 } -CloseAtSec 12
+    $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
+    Complete-Case 'next-file-in-folder' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-Audio $c.Wav $stereo.audio[0].tones (2 * $seconds) 1.2),
+        (Test-Audio $c.Wav $second.tones (2 * $seconds) 1.2 -SkipSeconds 6)
     )
 }
 finally {
