@@ -310,15 +310,28 @@ try {
         } finally { $bmp.Dispose() }
     }
 
-    # The colour at the centre of the captured frame, where the subtitle clips draw their band.
-    function Test-CentreBand {
+    # Which subtitle band is in the captured frame. The subtitle clips draw one solid magenta or cyan band; the
+    # frame is scanned for those two colours (the quadrant picture has neither) rather than sampled at one point,
+    # because where the renderer puts a drawing is not what this case is about.
+    function Test-Band {
         param([string] $Png, [string] $Expected, [hashtable] $Meaning = @{})
         if (-not $Png) { return 'no frame was captured' }
         $bmp = [System.Drawing.Bitmap]::FromFile($Png)
-        try { $got = Get-ColourName $bmp.GetPixel([int]($bmp.Width / 2), [int]($bmp.Height / 2)) } finally { $bmp.Dispose() }
-        if ($got -eq $Expected) { return $null }
-        if ($Meaning.ContainsKey($got)) { return "centre is $got, expected ${Expected}: $($Meaning[$got])" }
-        return "centre is $got, expected ${Expected}: no subtitle band was rendered there"
+        $count = @{ magenta = 0; cyan = 0 }
+        try {
+            for ($y = 0; $y -lt $bmp.Height; $y += 6) {
+                for ($x = 0; $x -lt $bmp.Width; $x += 6) {
+                    $name = Get-ColourName $bmp.GetPixel($x, $y)
+                    if ($count.ContainsKey($name)) { $count[$name]++ }
+                }
+            }
+        } finally { $bmp.Dispose() }
+        $found = @($count.Keys | Where-Object { $count[$_] -ge 200 })   # 200 samples at step 6 is 7200 px, a band is far more
+        if ($found -contains $Expected) { return $null }
+        if ($found.Count -eq 0) { return "no subtitle band in the frame, expected $Expected" }
+        $other = $found[0]
+        if ($Meaning.ContainsKey($other)) { return "the band is $other, expected ${Expected}: $($Meaning[$other])" }
+        return "the band is $other, expected $Expected"
     }
 
     function Complete-Case {
@@ -435,7 +448,7 @@ try {
     Complete-Case 'default-subtitle-track' @(
         (Get-ProcessProblem $c.Run),
         (Test-Picture $c.Png $subs.picture),
-        (Test-CentreBand $c.Png $defaultSub.band @{ $otherSub.band = "track $($otherSub.track) was rendered, which is not the default" })
+        (Test-Band $c.Png $defaultSub.band @{ $otherSub.band = "track $($otherSub.track) was rendered, which is not the default" })
     )
 
     # 9. A subtitle file beside the clip, same base name, is loaded by itself and shown. (#1121, #1164, #1894,
@@ -445,7 +458,7 @@ try {
     Complete-Case 'external-subtitle-autoload' @(
         (Get-ProcessProblem $c.Run),
         (Test-Picture $c.Png $ext.picture),
-        (Test-CentreBand $c.Png $ext.sidecar.band)
+        (Test-Band $c.Png $ext.sidecar.band)
     )
 }
 finally {
