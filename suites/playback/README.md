@@ -36,7 +36,15 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
 
 The clips are built so that content identifies itself: four flat colour
 quadrants (orientation), a different sine per channel and per audio track
-(which track, which channel). Nothing is compared against a stored image.
+(which track, which channel), and a subtitle track that draws one solid
+band in a colour of its own (which track was rendered). Nothing is compared
+against a stored image.
+
+One observation from writing the subtitle cases, not asserted: the internal
+renderer put the ASS drawing (`{n5\pos(640,360)\p1}`, an 800x120 box
+around the origin) with its bottom-right corner at the position, scaled 1.2x
+horizontally and 1.5x vertically on a 1920x1080 screen, where libass would
+centre the box there. The band cases only ask which colour is present.
 
 ## Cases
 
@@ -51,6 +59,8 @@ quadrants (orientation), a different sine per channel and per audio track
 | `remember-position-off-starts-over` | with the option off and the position still on file, the whole 20 s plays | same |
 | `repeat-file-forever` | `Loop=1 LoopMode=0`: the 4 s clip is still sounding, same tones, when the window is closed at 10 s | #1691, #1850, #2488, #3324, #3738 |
 | `next-file-in-folder` | `AfterPlayback=1`: a.mkv is followed by b.mkv from the same folder, two captures with the two clips' tones | #414, #697, #1419, #2200, #2209, #2579 |
+| `default-subtitle-track` | of two ASS tracks, the one flagged default is rendered: its cyan band is in the frame, not track 1's magenta one | #1551, #2452, #2876, #3283, #3914 |
+| `external-subtitle-autoload` | `ext.ass` beside `ext.mkv` is loaded unasked and rendered (magenta band) | #1121, #1164, #1894, #3152 |
 
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
