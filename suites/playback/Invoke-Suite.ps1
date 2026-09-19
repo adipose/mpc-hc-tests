@@ -220,23 +220,33 @@ try {
         $run = $guest.Json | ConvertFrom-Json
         Set-Content (Join-Path $OutDir "$Name.guest.json") $guest.Json
 
-        # The audio capture for this case: written by the driver between the case's start and finish.
+        # The audio captures for this case: written by the driver between the case's start and finish, one per
+        # render stream. A case that plays one file has one; a case whose player opens another file (next file in
+        # folder) has one per file, in time order. Wav is the largest, Wavs all of them oldest first.
         $from = [datetime]$run.started; $to = ([datetime]$run.finished).AddSeconds(1)
-        $wav = $null
-        $hit = Invoke-Command -Session $session -ArgumentList $from, $to {
+        $wav = $null; $wavs = @()
+        $hits = @(Invoke-Command -Session $session -ArgumentList $from, $to {
             param($from, $to)
             Get-ChildItem 'C:\Windows\System32\drivers\DriverData\Audio_Samples\SimpleAudioSample' -Filter *.wav -ErrorAction SilentlyContinue |
                 Where-Object { $_.Length -gt 1000 -and $_.LastWriteTime -ge $from -and $_.LastWriteTime -le $to } |
-                Sort-Object Length | Select-Object -Last 1 -ExpandProperty FullName
+                Sort-Object LastWriteTime | Select-Object FullName, Length
+        })
+        for ($i = 0; $i -lt $hits.Count; $i++) {
+            $local = Join-Path $OutDir ('{0}.{1}.wav' -f $Name, $i + 1)
+            Copy-Item -FromSession $session $hits[$i].FullName $local -Force
+            $wavs += $local
         }
-        if ($hit) { $wav = Join-Path $OutDir "$Name.wav"; Copy-Item -FromSession $session $hit $wav -Force }
+        if ($hits.Count) {
+            $largest = $hits | Sort-Object Length | Select-Object -Last 1
+            $wav = $wavs[[array]::IndexOf(@($hits.FullName), $largest.FullName)]
+        }
 
         $png = $null
         if ($guest.HasPng) { $png = Join-Path $OutDir "$Name.png"; Copy-Item -FromSession $session $guestPng $png -Force }
 
         if ($guest.History) { Set-Content (Join-Path $OutDir "$Name.history.ini") $guest.History }
 
-        [pscustomobject]@{ Run = $run; Wav = $wav; Png = $png; Plug = $guest.Plug; History = $guest.History }
+        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History }
     }
 
     # The position the history file holds for a clip, in seconds; $null when there is no entry. An entry is a
@@ -389,15 +399,18 @@ try {
 
     # 7. After playback: play the next file in the folder. a.mkv (440/880) is followed by b.mkv (1200 on its
     #    default track); with nothing after b the player closes the file and waits, and the window is closed at
-    #    12 s. About 8 s of sound, the first clip's tones early on and the second's late. The setting is used
-    #    rather than /playnext because it is the option the reports are about, and /close would outrank it.
-    #    (#414, #697, #1419, #2200, #2209, #2579.)
+    #    12 s. Each file is its own graph, so its own render stream and its own capture: two, in that order,
+    #    each the whole clip. The setting is used rather than /playnext because it is the option the reports
+    #    are about, and /close would outrank it. (#414, #697, #1419, #2200, #2209, #2579.)
     $c = Invoke-PlayerCase -Name 'next-file-in-folder' -Clip 'folder\a.mkv' -Switches '/play' -Settings @{ AfterPlayback = 1 } -CloseAtSec 12
     $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
     Complete-Case 'next-file-in-folder' @(
         (Get-ProcessProblem $c.Run),
-        (Test-Audio $c.Wav $stereo.audio[0].tones (2 * $seconds) 1.2),
-        (Test-Audio $c.Wav $second.tones (2 * $seconds) 1.2 -SkipSeconds 6)
+        $(if ($c.Wavs.Count -ne 2) { "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)" }
+          else {
+              (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds),
+              (Test-Audio $c.Wavs[1] $second.tones $seconds)
+          })
     )
 }
 finally {
