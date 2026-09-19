@@ -193,7 +193,13 @@ try {
             Unregister-ScheduledTask -TaskName 'MpcPlaybackCase' -Confirm:$false
             Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
 
-            if ($plugModes) { & 'C:\vdisplay\vdisplayctl.exe' unplug 0 | Out-Null }
+            if ($plugModes) {
+                & 'C:\vdisplay\vdisplayctl.exe' unplug 0 | Out-Null
+                # Windows plays its device-disconnect chord for the unplug. It opens the shared engine stream, and
+                # the next case's player would join that same stream and have the chord at the start of its
+                # capture. Let it finish and the stream close first.
+                Start-Sleep -Seconds 4
+            }
 
             [pscustomobject]@{
                 Json = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
