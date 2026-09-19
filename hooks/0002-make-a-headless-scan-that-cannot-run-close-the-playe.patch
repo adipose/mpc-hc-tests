@@ -1,15 +1,9 @@
 From 86c8edae40ccd2c70a37c40c42f80ceb4852094a Mon Sep 17 00:00:00 2001
 From: adipose <3324395+adipose@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 16:30:06 -0700
-Subject: [PATCH 2/2] make a headless scan that cannot run close the player
- with a non-zero exit code
+Subject: [PATCH] make a headless scan that cannot run close the player with a
+ non-zero exit code
 
----
- src/mpc-hc/FGManagerBDA.cpp | 27 +++++++++++++++++++--------
- src/mpc-hc/MainFrm.cpp      | 16 +++++++++++++---
- src/mpc-hc/mplayerc.cpp     |  3 ++-
- src/mpc-hc/mplayerc.h       |  3 +++
- 4 files changed, 37 insertions(+), 12 deletions(-)
 
 diff --git a/src/mpc-hc/FGManagerBDA.cpp b/src/mpc-hc/FGManagerBDA.cpp
 index a6ec00cf2f..df39d00f01 100644

@@ -1,17 +1,9 @@
 From 2b8ca8c8aa57130b6f8fa8e52a9e289dbe1a60a0 Mon Sep 17 00:00:00 2001
 From: adipose <3324395+adipose@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 16:29:17 -0700
-Subject: [PATCH 1/2] add /dvbscansave to store the headless scan result as the
+Subject: [PATCH] add /dvbscansave to store the headless scan result as the
  saved channel list
 
----
- src/mpc-hc/AppSettings.cpp    |  5 +++++
- src/mpc-hc/AppSettings.h      |  1 +
- src/mpc-hc/CmdLineHelpDlg.cpp |  2 +-
- src/mpc-hc/MainFrm.cpp        | 16 +++++++++++++++-
- src/mpc-hc/mpc-hc.rc          |  2 ++
- src/mpc-hc/resource.h         |  2 ++
- 6 files changed, 26 insertions(+), 2 deletions(-)
 
 diff --git a/src/mpc-hc/AppSettings.cpp b/src/mpc-hc/AppSettings.cpp
 index 7321e01adc..9bfe8e574e 100644
