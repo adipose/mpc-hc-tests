@@ -74,6 +74,7 @@
     </ClCompile>
     <ClCompile Include="test_AudioParser.cpp" />
     <ClCompile Include="test_Harness.cpp" />
+    <ClCompile Include="test_GolombBuffer.cpp" />
     <ClCompile Include="test_HdmvClipInfo.cpp" />
     <ClCompile Include="test_SubRipAndSSA.cpp" />
     <ClCompile Include="test_BitmapSubs.cpp" />
