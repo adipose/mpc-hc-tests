@@ -404,14 +404,14 @@ try {
     #    are about, and /close would outrank it. (#414, #697, #1419, #2200, #2209, #2579.)
     $c = Invoke-PlayerCase -Name 'next-file-in-folder' -Clip 'folder\a.mkv' -Switches '/play' -Settings @{ AfterPlayback = 1 } -CloseAtSec 12
     $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
-    Complete-Case 'next-file-in-folder' @(
-        (Get-ProcessProblem $c.Run),
-        $(if ($c.Wavs.Count -ne 2) { "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)" }
-          else {
-              (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds),
-              (Test-Audio $c.Wavs[1] $second.tones $seconds)
-          })
-    )
+    $problems = @((Get-ProcessProblem $c.Run))
+    if ($c.Wavs.Count -ne 2) {
+        $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)"
+    } else {
+        $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds)
+        $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds)
+    }
+    Complete-Case 'next-file-in-folder' $problems
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
