@@ -48,13 +48,26 @@ function Invoke-FFmpeg {
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed producing $Target" }
 }
 
-function Tone { param([int] $Hz) "sine=frequency=${Hz}:sample_rate=48000:duration=$seconds" }
+function Tone { param([int] $Hz, [int] $Duration = $seconds) "sine=frequency=${Hz}:sample_rate=48000:duration=$Duration" }
 
 # --- stereo.mkv: the baseline. Left 440 Hz, right 880 Hz. -------------------
 $stereo = Join-Path $OutDir 'stereo.mkv'
 Invoke-FFmpeg $stereo @(
     '-f', 'lavfi', '-i', (Tone 440), '-f', 'lavfi', '-i', (Tone 880),
     '-filter_complex', "$quad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
+# --- long.mkv: stereo.mkv's content for 20 seconds, for the cases that stop --
+# part-way and come back (remembered position). Long enough that a resume
+# point is well clear of the 5 s end-of-file margin the player applies.
+$longSeconds = 20
+$longQuad = $quad.Replace("d=$seconds", "d=$longSeconds")
+$long = Join-Path $OutDir 'long.mkv'
+Invoke-FFmpeg $long @(
+    '-f', 'lavfi', '-i', (Tone 440 $longSeconds), '-f', 'lavfi', '-i', (Tone 880 $longSeconds),
+    '-filter_complex', "$longQuad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
     '-map', '[v]', '-map', '[a]',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
 )
@@ -115,6 +128,11 @@ $clips = [ordered]@{
     seconds   = $seconds
     clips     = [ordered]@{
         'stereo.mkv' = [ordered]@{
+            picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio   = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+        }
+        'long.mkv' = [ordered]@{
+            seconds = $longSeconds
             picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
             audio   = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
         }

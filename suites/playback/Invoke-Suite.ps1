@@ -145,7 +145,9 @@ try {
             [string] $Switches = '/play /close',
             [hashtable] $Settings = @{},
             [string] $PlugModes = '',          # non-empty: plug the virtual monitor with these modes for the case
-            [double] $CaptureAtSec = 0
+            [double] $CaptureAtSec = 0,
+            [double] $CloseAtSec = 0,          # non-zero: close the player's window at this time instead of /close
+            [switch] $KeepProfile              # keep the history file of the previous case: this case is its second run
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
         $guestOut = "C:\mpc-test\out\$tag.json"
@@ -159,13 +161,17 @@ try {
         $iniText = "[Settings]`r`n" + (($ini.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
 
         $argumentLine = ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim()
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $consoleUser {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $user)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, [bool]$KeepProfile, $consoleUser {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
             Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
-            Get-ChildItem 'C:\mpc-test\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            # The settings are always this case's own; the history (mpc-hc64.history.ini, where positions and
+            # track choices live) is kept only when the case says it is a second run.
+            Get-ChildItem 'C:\mpc-test\player' -Filter '*.ini' |
+                Where-Object { -not ($keepProfile -and $_.Name -like '*.history.ini') } |
+                ForEach-Object { [IO.File]::Delete($_.FullName) }
             [IO.File]::WriteAllText('C:\mpc-test\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
 
             $plug = $null
@@ -177,7 +183,7 @@ try {
                 Start-Sleep -Seconds 2      # let the shell settle on the new desktop before a window is placed on it
             }
 
-            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-PlayerCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -ArgumentLine `"$($argumentLine.Replace('"','\"'))`" -Out $out -CaptureAtSec $captureAt -CapturePath $png"
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-PlayerCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -ArgumentLine `"$($argumentLine.Replace('"','\"'))`" -Out $out -CaptureAtSec $captureAt -CapturePath $png -CloseAtSec $closeAt"
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -193,6 +199,7 @@ try {
                 Json = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
                 Plug = $plug
                 HasPng = Test-Path $png
+                History = if (Test-Path 'C:\mpc-test\player\mpc-hc64.history.ini') { Get-Content 'C:\mpc-test\player\mpc-hc64.history.ini' -Raw } else { $null }
             }
         }
         if (-not $guest.Json) { throw "case $Name produced no result on the guest" }
@@ -213,15 +220,30 @@ try {
         $png = $null
         if ($guest.HasPng) { $png = Join-Path $OutDir "$Name.png"; Copy-Item -FromSession $session $guestPng $png -Force }
 
-        [pscustomobject]@{ Run = $run; Wav = $wav; Png = $png; Plug = $guest.Plug }
+        if ($guest.History) { Set-Content (Join-Path $OutDir "$Name.history.ini") $guest.History }
+
+        [pscustomobject]@{ Run = $run; Wav = $wav; Png = $png; Plug = $guest.Plug; History = $guest.History }
+    }
+
+    # The position the history file holds for a clip, in seconds; $null when there is no entry. An entry is a
+    # section with a Filename line ending in the clip's name and a FilePosition line in milliseconds.
+    function Get-RememberedPosition {
+        param([string] $History, [string] $Clip)
+        if (-not $History) { return $null }
+        foreach ($section in ($History -split '(?m)^\[')) {
+            if ($section -match ('(?m)^Filename=.*\\' + [regex]::Escape($Clip) + '\s*$') -and $section -match '(?m)^FilePosition=(\d+)') {
+                return [int]$Matches[1] / 1000.0
+            }
+        }
+        $null
     }
 
     function Test-Audio {
-        param([string] $Wav, [int[]] $Tones, [double] $Seconds)
+        param([string] $Wav, [int[]] $Tones, [double] $Seconds, [double] $Tolerance = 0.4)
         if (-not $Wav) { return 'no audio reached the endpoint' }
         # Shared mode: the engine resamples to the mix format, so rate and depth are the engine's, not the
         # clip's. The player starting and stopping the graph costs a little at each end, hence the tolerance.
-        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav --expect ($Tones -join ',') --seconds $Seconds --duration-tolerance 0.4 2>&1
+        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav --expect ($Tones -join ',') --seconds $Seconds --duration-tolerance $Tolerance 2>&1
         if ($LASTEXITCODE -eq 0) { return $null }
         return (($output | Where-Object { "$_" -match '^FAIL' }) -join '; ')
     }
@@ -309,6 +331,35 @@ try {
     Complete-Case 'rotation-metadata' @(
         (Get-ProcessProblem $c.Run),
         (Test-Picture $c.Png $clips.clips.'rotated90.mp4'.picture)
+    )
+
+    # 5. Remember file position, the most re-reported behaviour in the tracker (#1595, #1805, #2287, #2659,
+    #    #3182, #3352, #3847). Three runs on one profile: play and close the window part-way, so the player's
+    #    own shutdown writes the position; open again, which must resume there; open once more with the
+    #    option off, which must start from the beginning although the position is still on file.
+    $long = $clips.clips.'long.mkv'
+    $remember = @{ RememberFilePos = 1; KeepHistory = 1; RememberPosForLongerThan = 0 }
+    $closeAt = 8.0
+    $a = Invoke-PlayerCase -Name 'remember-position-first-run' -Clip 'long.mkv' -Switches '/play' -Settings $remember -CloseAtSec $closeAt
+    $stored = Get-RememberedPosition $a.History 'long.mkv'
+    Complete-Case 'remember-position-first-run' @(
+        (Get-ProcessProblem $a.Run),
+        $(if (-not $a.Run.closeSent) { 'the close request did not reach a window' }),
+        (Test-Audio $a.Wav $long.audio[0].tones $closeAt 1.0),
+        $(if ($null -eq $stored) { 'no position for the clip in mpc-hc64.history.ini' }
+          elseif ([math]::Abs($stored - $closeAt) -gt 1.5) { "history holds position ${stored}s, closed at ${closeAt}s" })
+    )
+
+    $b = Invoke-PlayerCase -Name 'remember-position-resumes' -Clip 'long.mkv' -Settings $remember -KeepProfile
+    Complete-Case 'remember-position-resumes' @(
+        (Get-ProcessProblem $b.Run),
+        $(if ($null -ne $stored) { Test-Audio $b.Wav $long.audio[0].tones ([double]$long.seconds - $stored) 1.5 } else { 'no stored position to resume from' })
+    )
+
+    $c = Invoke-PlayerCase -Name 'remember-position-off-starts-over' -Clip 'long.mkv' -Settings @{ RememberFilePos = 0; KeepHistory = 1 } -KeepProfile
+    Complete-Case 'remember-position-off-starts-over' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-Audio $c.Wav $long.audio[0].tones ([double]$long.seconds) 1.0)
     )
 }
 finally {

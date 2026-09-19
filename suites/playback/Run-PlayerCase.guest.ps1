@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)] [string] $ArgumentLine,
     [Parameter(Mandatory)] [string] $Out,
     [int] $TimeoutSec = 40,
+    [double] $CloseAtSec = 0,            # 0 = the player exits by itself (/close); else WM_CLOSE to it at this time
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
     [string] $CapturePath = ''
@@ -22,6 +23,14 @@ if ($CaptureAtSec -gt 0) {
     $result.aliveAtCapture = -not $p.HasExited
     $result.capture = (& 'C:\vdisplay\vdisplayctl.exe' capture $CaptureConnector $CapturePath | Out-String).Trim()
     $result.captureExit = $LASTEXITCODE
+}
+
+if ($CloseAtSec -gt 0) {
+    # As the user closing the window: the player's own shutdown runs, which is what writes the last position.
+    $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
+    if ($CloseAtSec -gt $elapsed) { Start-Sleep -Milliseconds ([int](($CloseAtSec - $elapsed) * 1000)) }
+    $result.closeSent = -not $p.HasExited -and $p.CloseMainWindow()
+    $result.closedAt = (Get-Date).ToString('o')
 }
 
 $result.timedOut = -not $p.WaitForExit($TimeoutSec * 1000)
