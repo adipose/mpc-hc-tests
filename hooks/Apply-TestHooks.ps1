@@ -75,7 +75,8 @@ if ($dirty) { throw 'src\ has uncommitted changes; commit or stash them before a
 foreach ($h in $missing) {
     $patch = Join-Path $PSScriptRoot $h.Patch
     Write-Host "Applying $($h.Name) ..." -ForegroundColor Cyan
-    & git -C $RepoRoot am --3way $patch
+    # --keep-cr: the player sources are CRLF and git am would otherwise strip the CRs out of the patch lines
+    & git -C $RepoRoot am --keep-cr --3way $patch
     if ($LASTEXITCODE -ne 0) {
         & git -C $RepoRoot am --abort 2>$null
         throw "$($h.Patch) did not apply to this branch. Merge the fork's test-hooks branch instead, or rebase the hook."
