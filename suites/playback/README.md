@@ -26,7 +26,9 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
    that its own shutdown runs.
 3. Evidence is collected from outside the player:
    - **sound** -- the WAV the virtual audio endpoint wrote while the case
-     ran, checked by `wavcheck.py`: tone per channel, and how long it lasted;
+     ran, checked by `wavcheck.py`: tone per channel, and how long it lasted.
+     One WAV per render stream: a player that opens a second file (next
+     file in folder) leaves two, in order, and a case can assert on each;
    - **picture** -- the frame the virtual monitor was sent, captured by
      `vdisplayctl` part-way through: the colour a quarter of the way in from
      each corner of where the fitted picture should be;
@@ -47,6 +49,8 @@ quadrants (orientation), a different sine per channel and per audio track
 | `remember-position-first-run` | with the option on, closing the window 8 s into a 20 s clip leaves that position in `mpc-hc64.history.ini`, and 8 s of audio was heard | #1595, #1805, #2287, #2659, #3182, #3352, #3847 |
 | `remember-position-resumes` | opening the clip again on the same profile plays the remaining 12 s, not 20 | same |
 | `remember-position-off-starts-over` | with the option off and the position still on file, the whole 20 s plays | same |
+| `repeat-file-forever` | `Loop=1 LoopMode=0`: the 4 s clip is still sounding, same tones, when the window is closed at 10 s | #1691, #1850, #2488, #3324, #3738 |
+| `next-file-in-folder` | `AfterPlayback=1`: a.mkv is followed by b.mkv from the same folder, two captures with the two clips' tones | #414, #697, #1419, #2200, #2209, #2579 |
 
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
