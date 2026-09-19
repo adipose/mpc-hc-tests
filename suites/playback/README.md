@@ -16,9 +16,14 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
 1. A fresh portable profile: `mpc-hc64.ini` is written beside the deployed
    exe, so the player runs in ini mode and nothing carries over from the last
    case or the guest's history. `UpdaterAutoCheck=0` is always in it; without
-   it an unattended player sits behind its first-run prompt.
+   it an unattended player sits behind its first-run prompt. A case that is
+   the second run of a scenario keeps the history file
+   (`mpc-hc64.history.ini`, where positions and track choices live) and
+   rewrites only the settings.
 2. The player is started from the command line in the console session
-   (`<clip> /play /close`, plus whatever the case is about) and left alone.
+   (`<clip> /play /close`, plus whatever the case is about) and left alone,
+   or, for a scenario that ends part-way, sent WM_CLOSE at a given time so
+   that its own shutdown runs.
 3. Evidence is collected from outside the player:
    - **sound** -- the WAV the virtual audio endpoint wrote while the case
      ran, checked by `wavcheck.py`: tone per channel, and how long it lasted;
@@ -39,6 +44,9 @@ quadrants (orientation), a different sine per channel and per audio track
 | `default-audio-track` | of two tracks, the one flagged default in the container plays | #99, #1551, #2093, #2673, #3935 |
 | `fullscreen-second-monitor` | `/fullscreen /monitor 2` fills the second (virtual) monitor, right way up | #1614, #2859, #2892 |
 | `rotation-metadata` | 90 degrees of display rotation is honoured, in the direction ffmpeg's autorotation renders it | #375, #3832, #3909 |
+| `remember-position-first-run` | with the option on, closing the window 8 s into a 20 s clip leaves that position in `mpc-hc64.history.ini`, and 8 s of audio was heard | #1595, #1805, #2287, #2659, #3182, #3352, #3847 |
+| `remember-position-resumes` | opening the clip again on the same profile plays the remaining 12 s, not 20 | same |
+| `remember-position-off-starts-over` | with the option off and the position still on file, the whole 20 s plays | same |
 
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
