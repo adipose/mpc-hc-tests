@@ -52,6 +52,9 @@ suites/
   playback/           Plays generated clips; asserts on the audio and the
                       frames that reached a virtual sound card and a
                       virtual monitor on the target
+  translations/       The checkout's .po files through the Translation
+                      Studio's ruleset (potool, loaded from that sibling
+                      repository); no rig
 ```
 
 ## Unit tests

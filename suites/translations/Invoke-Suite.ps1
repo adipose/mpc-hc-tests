@@ -143,11 +143,12 @@ function Invoke-FitScan {
     # DLL, per language) is the check for translated captions wider than their controls. It has no
     # command-line form yet. When it does, run it here against $poDir and turn each "does not fit" into a
     # failure line: language, dialog, control, rendered px, available px.
-    $exe = if ($studio) { Get-ChildItem (Join-Path $studio 'studio') -Recurse -Filter Studio.exe -ErrorAction SilentlyContinue | Select-Object -First 1 } else { $null }
-    if (-not $exe) { return 'fit scan: no Studio.exe built in the Studio checkout' }
-    $help = & $exe.FullName --help 2>&1 | Out-String
-    if ($help -notmatch 'fit-scan') { return 'fit scan: Studio.exe has no headless --fit-scan yet (asked of the Studio); the rendered-width check is not run' }
-    return $null
+    # Studio.exe is a GUI application that ignores switches it does not know, so it cannot be probed by
+    # running it: the Studio is asked to publish a small `fitscan.cmd` (or similar) next to potool when the
+    # entry point exists, and this looks for that.
+    $entry = if ($studio) { Get-ChildItem (Join-Path $studio 'potool') -Filter 'fitscan.*' -ErrorAction SilentlyContinue | Select-Object -First 1 } else { $null }
+    if (-not $entry) { return 'fit scan: the Studio has no headless entry point yet (asked); the rendered-width check is not run' }
+    return "fit scan: $($entry.Name) found but not wired up here yet"
 }
 $fit = Invoke-FitScan
 if ($fit) { $skipped++; Note Yellow "SKIP $fit" }
