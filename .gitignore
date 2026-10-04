@@ -3,3 +3,4 @@ results/
 unit/results/
 suites/*/results/
 suites/playback/media/
+suites/mouse/combocase/bin/

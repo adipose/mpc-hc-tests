@@ -55,6 +55,9 @@ suites/
   translations/       The checkout's .po files through the Translation
                       Studio's ruleset (potool, loaded from that sibling
                       repository); no rig
+  mouse/              Real mouse input in the target's console session;
+                      asserts on what the screen showed. Hover-driven
+                      behaviour, which posted messages cannot test
 ```
 
 ## Unit tests
