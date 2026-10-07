@@ -8,7 +8,9 @@ New-PlaybackClips.ps1     ffmpeg-synthesised clips and clips.json, the
                           declaration of what each contains (media\, gitignored)
 Invoke-Suite.ps1          the suite: deploy the player, run the cases, assert
 Run-PlayerCase.guest.ps1  target side: start the player in the console session,
-                          grab a frame part-way, wait for it to exit
+                          grab a frame part-way, post menu commands and probe
+                          the playlist's list control at given times, wait for
+                          the player to exit
 ```
 
 ## How a case works
@@ -25,7 +27,9 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
    or, for a scenario that ends part-way, sent WM_CLOSE at a given time so
    that its own shutdown runs. A case can also post menu commands
    (WM_COMMAND) to the player's window at given times; that is how the
-   end-of-file cases seek, change rate and reopen.
+   end-of-file cases seek, change rate and reopen. And a case can probe
+   the player's playlist list control at given times, which is how the
+   playlist cases see the list's state.
 3. Evidence is collected from outside the player:
    - **sound** -- the WAV the virtual audio endpoint wrote while the case
      ran, checked by `wavcheck.py`: tone per channel, and how long it lasted.
@@ -34,6 +38,13 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
    - **picture** -- the frame the virtual monitor was sent, captured by
      `vdisplayctl` part-way through: the colour a quarter of the way in from
      each corner of where the fitted picture should be;
+   - **list state** -- the playlist's list control, read over plain integer
+     list-view messages (safe cross-process): how many entries, which one
+     is selected, the scroll position, and which scrollbars are showing.
+     The control is found by walking the player's windows for a
+     `SysListView32` whose parent chain includes the playlist bar's window
+     (titled `Playlist`, docked or floating) -- the Subresync bar keeps a
+     list view too;
    - **process** -- exited by itself, exit code 0.
 
 The clips are built so that content identifies itself: four flat colour
@@ -78,6 +89,9 @@ centre the box there. The band cases only ask which colour is present.
 | `image-waits-without-duration` | a durationless image (`still.png` through the Generate Still Video filter, `StillVideoDuration=3`) at the head of a playlist does not advance on its own: no audio ever reaches the endpoint | fba51949c1 |
 | `speed-kept-after-end` | a posted `ID_PLAY_INCRATE` (2x) before the end: the replay posted after end-of-stream still runs at 2x — the second capture lasts about 2 s, not 4 | #3595, #3915; fb9f5dd489 |
 | `forced-does-not-outrank-default` | of a forced track and a default track (no languages), the default one plays | #3935; 9b4408c5c8 |
+| `playlist-selection-follows-skip` | next/previous move the list's selection with the playing item: on a three-entry playlist the selection sits at 2, 2 (left behind until it catches up with the playing item), then follows 1, 2, 1 | #3840, #3996; b1741976ea |
+| `playlist-shows-current-after-hidden` | a 30-entry playlist (`list30.mpcpl`) opened at entry 20 (saved playlist position) with the panel hidden: showing the panel scrolls entry 20 fully into view | #4094, #3889; 66d467b094 (#4108) |
+| `playlist-no-horizontal-scrollbar` | a 30-entry playlist restored at startup (`default.mpcpl`, panel shown, no file on the command line): vertical scrollbar present, no horizontal one | #3972; fbcb10020f (#3988) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -140,6 +154,7 @@ the captured PNG, so a failure can be looked at rather than re-run.
 ## Not yet here
 
 Driving a running player goes only as far as posted WM_COMMAND messages
-(seek, play, change rate, reopen); anything that needs a finer hand waits for
+(seek, play, change rate, reopen) and read-only probes of the playlist's
+list control; anything that needs a finer hand waits for
 the `/slave` host described in `..\..\PLAN.md`. HDR cases need a Windows 11
 guest (the virtual monitor does HDR there) and a renderer that outputs HDR.

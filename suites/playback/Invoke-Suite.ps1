@@ -155,6 +155,20 @@ try {
         New-Item -ItemType Directory 'C:\mpc-test\media\folder' | Out-Null
         Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\folder\a.mkv'
         Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\folder\b.mkv'
+        # Thirty copies of stereo.mkv, for the playlist cases: more entries than fit in the list, with
+        # two-character names so no column goes wide. list30.mpcpl lists them; a case that needs the
+        # startup-restore path copies it to C:\mpc-test\player\default.mpcpl for its own run only.
+        if (Test-Path 'C:\mpc-test\media\list30') { Remove-Item 'C:\mpc-test\media\list30' -Recurse -Force }
+        New-Item -ItemType Directory 'C:\mpc-test\media\list30' | Out-Null
+        $mpcpl = [Text.StringBuilder]::new()
+        [void] $mpcpl.AppendLine('MPCPLAYLIST')
+        foreach ($i in 1..30) {
+            $name = '{0:00}.mkv' -f $i
+            Copy-Item 'C:\mpc-test\media\stereo.mkv' "C:\mpc-test\media\list30\$name"
+            [void] $mpcpl.AppendLine("$i,type,0")
+            [void] $mpcpl.AppendLine("$i,filename,C:\mpc-test\media\list30\$name")
+        }
+        [IO.File]::WriteAllText('C:\mpc-test\media\list30.mpcpl', $mpcpl.ToString(), [Text.UTF8Encoding]::new($true))
     }
 
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\player\mpc-hc64.exe').VersionInfo.ProductVersion }
@@ -183,6 +197,9 @@ try {
             [double] $SecondAtSec = 2,
             [string] $PostCommands = '',         # comma-separated <seconds>:<command id>, posted as WM_COMMAND to the
                                                # player's window at each time (e.g. '2:895,8:887')
+            [string] $ProbeAt = '',              # comma-separated seconds: at each, the guest reads the player's
+                                               # playlist list control (count, selection, scroll, scrollbars)
+                                               # into the run's probes array
             [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
@@ -203,14 +220,16 @@ try {
         }
         $rendererJson = if ($Renderer.Count) { $Renderer | ConvertTo-Json -Compress } else { '' }
 
-        $argumentLine = ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim()
+        # An empty Clip runs the player with no file on the command line: a case that needs the playlist
+        # restored at startup must not have a command-line open replace it.
+        $argumentLine = if ($Clip) { ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim() } else { $Switches.Trim() }
         # Each later command line carries quoted paths, and no quoting survives the hand-built task line: each goes
         # over as base64 of the UTF-8 string (nothing but [A-Za-z0-9+/=]), comma-joined, and the guest decodes them.
         $secondEncoded = (@($SecondArgumentLine | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -253,6 +272,7 @@ try {
             }
             # Digits, dots, colons and commas only: survives the hand-built line with plain quoting.
             if ($postCommands) { $taskArgs += (' -PostCommands "{0}"' -f $postCommands) }
+            if ($probeAt) { $taskArgs += (' -ProbeAt "{0}"' -f $probeAt) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -889,6 +909,118 @@ try {
             (Get-ProcessProblem $c.Run),
             (Test-Audio $c.Wav $default.tones $seconds)
         )
+    }
+
+    # 25-27. The playlist's list state, read from outside the player: the guest runner probes the playlist's
+    #    list control at given times (item count, selection, scroll position, scrollbars) and the cases assert
+    #    on what the list shows, not on what the player says. Where a case needs the playlist shown at start it
+    #    sets [ToolBars\Playlist] Visible=1, the key CPlayerPlaylistBar::SaveState writes when the bar was
+    #    visible at exit.
+
+    # 25. Next/previous must move the playlist's selection with the playing item: clsid2/mpc-hc@b1741976ea
+    #    (#3840, #3996). SetNext/SetPrev sync the list's selection to the new position only when the selection
+    #    was on the item that was playing, so the case needs a known selection first. A multi-file command line
+    #    is opened one file at a time (Open, then an Append per further file), and Append selects the first
+    #    item it adds when the list was not empty, so three files leave the selection on the LAST entry while
+    #    the first one plays. The skips at 3 s and 5 s walk the playing item onto that selection (probes at 4
+    #    and 6 s: still 2, left behind, the pre-fix shape -- the sync condition is not met until playing and
+    #    selection coincide); from 7 s on, selection and playing item must move together: back to 1, forward
+    #    to 2, back to 1. On an unfixed player the selection never leaves 2.
+    if (Test-CaseSelected 'playlist-selection-follows-skip') {
+        $c = Invoke-PlayerCase -Name 'playlist-selection-follows-skip' -Clip 'list30\01.mkv' `
+            -Switches '"C:\mpc-test\media\list30\02.mkv" "C:\mpc-test\media\list30\03.mkv" /play' `
+            -Settings @{ LoopMode = 1 } -IniSections @{ 'ToolBars\Playlist' = @{ Visible = 1 } } `
+            -PostCommands '3:922,5:922,7:921,9:922,11:921' -ProbeAt '4,6,8,10,12' -CloseAtSec 13
+        $posts = @($c.Run.posts)
+        $probes = @($c.Run.probes)
+        $expected = @(2, 2, 1, 2, 1)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (@($posts | Where-Object delivered).Count -ne 5) { $problems += 'not every posted skip reached a window' }
+        if ($probes.Count -ne 5 -or @($probes | Where-Object found).Count -ne 5) {
+            $problems += 'the playlist list control was not found at every probe'
+        } else {
+            foreach ($pr in $probes) {
+                if ($pr.count -ne 3) { $problems += "probe at $($pr.at)s: $($pr.count) playlist entries, expected 3" }
+                if (-not $pr.visible) { $problems += "probe at $($pr.at)s: the playlist was not shown at start" }
+            }
+            for ($i = 0; $i -lt $expected.Count; $i++) {
+                if ($probes[$i].selected -ne $expected[$i]) {
+                    $problems += "probe at $($probes[$i].at)s: the selection is on entry $($probes[$i].selected), expected $($expected[$i]) (the playing item)"
+                }
+            }
+        }
+        Complete-Case 'playlist-selection-follows-skip' $problems
+    }
+
+    # 26. Showing a hidden playlist must scroll the playing entry fully into view: clsid2/mpc-hc@66d467b094
+    #    (#4108, of #4094 and #3889). The hidden bar's list has zero height, and LVM_ENSUREVISIBLE
+    #    bottom-aligned the current row into that zero height, leaving the scroll one row past it; the fix
+    #    defers the scroll until the bar is shown. To start at the 20th of 30 entries without twenty posted
+    #    skips (a skip lands only while the player reports LOADED, so they would have to sit seconds apart),
+    #    the case opens list30.mpcpl with a saved playlist position: [PlaylistHistory\<hash>] Position=19,
+    #    where the hash is the first 12 base64 characters of the SHA-1 of the lowercased UTF-16 path
+    #    (getRFEHash in AppSettings.cpp). Append() then puts the playlist position on the saved entry, and
+    #    MainFrm skips its usual SetFirst for a playlist file ("playlists already set first pos (or saved
+    #    pos)"). LoopMode=0 (file) with AfterPlayback=0 keeps the player on entry 20 once the 4 s clip
+    #    ends, so the probe at 5 s cannot race the advance to entry 21: at the default LoopMode=1
+    #    (playlist) the end-of-stream code posts ID_NAVIGATE_SKIPFORWARDFILE before AfterPlayback is ever
+    #    consulted. The playlist is shown at 4 s by
+    #    posting ID_VIEW_PLAYLIST and probed 1 s later. The playing entry (index 19) must lie fully in view
+    #    (perPage counts only fully visible rows), and the list must not be scrolled further than that needs:
+    #    top no greater than max(0, 19 - perPage + 1). Being in view alone does not catch the bug when the
+    #    whole list nearly fits -- 2.8.0 opened at top 2 with 28 rows showing, the "playlist appears from
+    #    number 2" of #4094, where develop opens at top 0.
+    if (Test-CaseSelected 'playlist-shows-current-after-hidden') {
+        $plPath = 'C:\mpc-test\media\list30.mpcpl'
+        $plHash = [Convert]::ToBase64String([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes($plPath.ToLower()))).Substring(0, 12)
+        $c = Invoke-PlayerCase -Name 'playlist-shows-current-after-hidden' -Clip 'list30.mpcpl' -Switches '/play' `
+            -Settings @{ KeepHistory = 1; AfterPlayback = 0; LoopMode = 0 } -IniSections @{ "PlaylistHistory\$plHash" = @{ Position = 19 } } `
+            -PostCommands '4:824' -ProbeAt '5' -CloseAtSec 7
+        $posts = @($c.Run.posts)
+        $listState = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $posts -or -not $posts[0] -or -not $posts[0].delivered) { $problems += 'the posted show-playlist command did not reach a window' }
+        if (-not $listState -or -not $listState.found) {
+            $problems += 'the playlist list control was not found'
+        } else {
+            if ($listState.count -ne 30) { $problems += "$($listState.count) playlist entries, expected 30" }
+            if (-not $listState.visible) { $problems += 'the playlist was not shown by ID_VIEW_PLAYLIST' }
+            $last = $listState.top + $listState.perPage - 1
+            if (19 -lt $listState.top -or 19 -gt $last) { $problems += "the playing entry (index 19) is not fully in view: top $($listState.top), fully visible through $last" }
+            $maxTop = [math]::Max(0, 19 - $listState.perPage + 1)
+            if ($listState.top -gt $maxTop) { $problems += "the list is scrolled to top $($listState.top), further than the playing entry needs (at most $maxTop with $($listState.perPage) rows showing)" }
+        }
+        Complete-Case 'playlist-shows-current-after-hidden' $problems
+    }
+
+    # 27. A playlist restored at startup must not grow a horizontal scrollbar: clsid2/mpc-hc@fbcb10020f
+    #    (#3988, of #3972). LoadPlaylist adds the restored entries with the list's redraw off, and a list view
+    #    does not lay out its scrollbars while redraw is off, so when ResizeListColumn sized the name column
+    #    the client rect still reported the full width and the column ended a vertical scrollbar too wide. The
+    #    repro needs the restore path itself -- a command-line open would replace the restored list -- so the
+    #    player is launched with no file on the command line and default.mpcpl sits next to the exe (in ini
+    #    mode the playlist save path is the exe's folder) with RememberPlaylistItems at its default on. The
+    #    mpcpl is removed again after the case so no later launch restores it.
+    if (Test-CaseSelected 'playlist-no-horizontal-scrollbar') {
+        Invoke-Command -Session $session { Copy-Item 'C:\mpc-test\media\list30.mpcpl' 'C:\mpc-test\player\default.mpcpl' -Force }
+        try {
+            $c = Invoke-PlayerCase -Name 'playlist-no-horizontal-scrollbar' -Clip '' -Switches '' `
+                -IniSections @{ 'ToolBars\Playlist' = @{ Visible = 1 } } -ProbeAt '3' -CloseAtSec 5
+            $listState = @($c.Run.probes)[0]
+            $problems = @((Get-ProcessProblem $c.Run))
+            if (-not $c.Run.closeSent) { $problems += 'the close request did not reach a window' }
+            if (-not $listState -or -not $listState.found) {
+                $problems += 'the playlist list control was not found'
+            } else {
+                if ($listState.count -ne 30) { $problems += "$($listState.count) playlist entries restored, expected 30" }
+                if (-not $listState.visible) { $problems += 'the playlist was not shown at start' }
+                if (-not $listState.vscroll) { $problems += 'no vertical scrollbar on a 30-entry restored playlist' }
+                if ($listState.hscroll) { $problems += 'a horizontal scrollbar appeared on the restored playlist' }
+            }
+            Complete-Case 'playlist-no-horizontal-scrollbar' $problems
+        } finally {
+            Invoke-Command -Session $session { Remove-Item 'C:\mpc-test\player\default.mpcpl' -Force -ErrorAction SilentlyContinue }
+        }
     }
 }
 finally {

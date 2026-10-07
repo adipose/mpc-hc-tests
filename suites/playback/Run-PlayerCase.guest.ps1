@@ -1,10 +1,11 @@
 # Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
 # arguments, optionally captures the virtual monitor part-way through, optionally posts WM_COMMAND messages to
-# the player's window at given times, waits for the player to exit by itself, and kills it if it does not.
+# the player's window at given times, optionally probes the player's playlist list control at given times,
+# waits for the player to exit by itself, and kills it if it does not.
 # Writes one JSON object to -Out; the host does the asserting.
 param(
     [Parameter(Mandatory)] [string] $Exe,
-    [Parameter(Mandatory)] [string] $ArgumentLine,
+    [string] $ArgumentLine = '',
     [Parameter(Mandatory)] [string] $Out,
     [int] $TimeoutSec = 40,
     [double] $CloseAtSec = 0,            # 0 = the player exits by itself (/close); else a close to its window at this time
@@ -24,6 +25,10 @@ param(
                                          # player's main window at that time after start, as a menu accelerator
                                          # the user pressed (digits, dots and colons only, so it survives the
                                          # hand-built task line unencoded)
+    [string] $ProbeAt = '',              # comma-separated seconds after start: at each, read the player's
+                                         # playlist list control from outside (count, selection, scroll
+                                         # position, scrollbars) and record it under "probes" in the JSON
+                                         # (digits, dots and commas only, like PostCommands)
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
     [string] $CapturePath = '',
@@ -33,14 +38,92 @@ param(
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o') }
 
-if ($CloseKind -eq 'SC_CLOSE' -or $PostCommands) {
+if ($CloseKind -eq 'SC_CLOSE' -or $PostCommands -or $ProbeAt) {
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
     # own path since e21c9fcfff, so both ways of closing belong under test. The posted commands are WM_COMMAND,
-    # the same message a menu accelerator sends.
+    # the same message a menu accelerator sends. The probes send the list control plain integer list-view
+    # messages, which are safe cross-process (no pointers, no structs).
     Add-Type -Namespace MpcTest -Name User32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool PostMessageW(System.IntPtr hWnd, uint msg, System.IntPtr wParam, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SendMessageW(System.IntPtr hWnd, uint msg, System.IntPtr wParam, System.IntPtr lParam);
+public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool EnumWindows(EnumWindowsProc callback, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool EnumChildWindows(System.IntPtr hWndParent, EnumWindowsProc callback, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int GetClassNameW(System.IntPtr hWnd, System.Text.StringBuilder className, int maxCount);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int GetWindowTextW(System.IntPtr hWnd, System.Text.StringBuilder text, int maxCount);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindowVisible(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetParent(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+public static extern System.IntPtr GetWindowLongPtrW(System.IntPtr hWnd, int index);
 '@
+}
+
+# The playlist's list control, found from outside the player. The player has several SysListView32 windows
+# (the Subresync bar keeps one too), so a candidate is the playlist's only if its parent chain includes a
+# window titled "Playlist": CPlayerPlaylistBar::Create passes ResStr(IDS_PLAYLIST_CAPTION) as the bar's
+# window name, and the floating mini-frame carries the same caption. Docked or floating decides where the
+# list sits, so the search starts from every top-level window of the player's process and walks down.
+function Find-PlaylistListView {
+    param([int] $ProcessId)
+    $candidates = [System.Collections.Generic.List[IntPtr]]::new()
+    $childCallback = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $className = [Text.StringBuilder]::new(64)
+        [void] [MpcTest.User32]::GetClassNameW($hWnd, $className, $className.Capacity)
+        if ($className.ToString() -eq 'SysListView32') { $candidates.Add($hWnd) }
+        return $true
+    }
+    $topCallback = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $procId = [uint32] 0
+        [void] [MpcTest.User32]::GetWindowThreadProcessId($hWnd, [ref] $procId)
+        if ($procId -eq $ProcessId) { [void] [MpcTest.User32]::EnumChildWindows($hWnd, $childCallback, [IntPtr]::Zero) }
+        return $true
+    }
+    [void] [MpcTest.User32]::EnumWindows($topCallback, [IntPtr]::Zero)
+    foreach ($candidate in $candidates) {
+        $walk = $candidate
+        while ($walk -ne [IntPtr]::Zero) {
+            $title = [Text.StringBuilder]::new(256)
+            [void] [MpcTest.User32]::GetWindowTextW($walk, $title, $title.Capacity)
+            if ($title.ToString() -eq 'Playlist') { return $candidate }
+            $walk = [MpcTest.User32]::GetParent($walk)
+        }
+    }
+    # No parent chain titled Playlist: a sole candidate can only be the playlist's list.
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    [IntPtr]::Zero
+}
+
+# One probe of the playlist's list control: LVM_GETITEMCOUNT, LVM_GETNEXTITEM (first selected, first
+# focused), LVM_GETTOPINDEX, LVM_GETCOUNTPERPAGE, visibility and the scrollbar style bits. A list view
+# sets WS_HSCROLL/WS_VSCROLL while the scrollbar is shown, so the style says whether one is there.
+function Get-PlaylistProbe {
+    param([double] $At, [int] $ProcessId)
+    $h = Find-PlaylistListView $ProcessId
+    $probe = [ordered]@{ at = $At; found = ($h -ne [IntPtr]::Zero) }
+    if ($h -ne [IntPtr]::Zero) {
+        $probe.count    = [MpcTest.User32]::SendMessageW($h, 0x1004, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()         # LVM_GETITEMCOUNT
+        $probe.selected = [MpcTest.User32]::SendMessageW($h, 0x100C, [IntPtr]::new(-1), [IntPtr]::new(2)).ToInt32()  # LVM_GETNEXTITEM, LVNI_SELECTED
+        $probe.focused  = [MpcTest.User32]::SendMessageW($h, 0x100C, [IntPtr]::new(-1), [IntPtr]::new(1)).ToInt32()  # LVM_GETNEXTITEM, LVNI_FOCUSED
+        $probe.top      = [MpcTest.User32]::SendMessageW($h, 0x1027, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()       # LVM_GETTOPINDEX
+        $probe.perPage  = [MpcTest.User32]::SendMessageW($h, 0x1028, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()       # LVM_GETCOUNTPERPAGE
+        $probe.visible  = [MpcTest.User32]::IsWindowVisible($h)
+        $style = [MpcTest.User32]::GetWindowLongPtrW($h, -16).ToInt64()                                              # GWL_STYLE
+        $probe.hscroll  = [bool] ($style -band 0x00100000)                                                           # WS_HSCROLL
+        $probe.vscroll  = [bool] ($style -band 0x00200000)                                                           # WS_VSCROLL
+    }
+    $probe
 }
 
 function Send-Close {
@@ -72,7 +155,9 @@ if ($RendererFile -and (Test-Path $RendererFile)) {
     $result.renderer = ($wanted.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' '
 }
 
-$p = Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru
+# An empty line is a launch with no file at all (a case about what the player restores by itself), and
+# Start-Process refuses an empty -ArgumentList.
+$p = if ($ArgumentLine) { Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru } else { Start-Process -FilePath $Exe -PassThru }
 $result.pid = $p.Id
 
 if ($CaptureAtSec -gt 0) {
@@ -134,23 +219,41 @@ if ($SecondArgumentLine) {
     }
 }
 
-if ($PostCommands) {
-    # Each command is posted at its own time after start. Delivered means a main window existed and
-    # PostMessageW accepted the message; MFC still drops a command whose ON_UPDATE_COMMAND_UI reports it
-    # disabled, which is why cases post only once playback is underway.
-    $posts = @()
-    foreach ($entry in ($PostCommands -split ',')) {
-        $parts = $entry -split ':'
-        $at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture)
-        $id = [int] $parts[1]
-        $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
-        if ($at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($at - $elapsed) * 1000)) }
-        $p.Refresh()
-        $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
-                     [MpcTest.User32]::PostMessageW($p.MainWindowHandle, 0x0111, [IntPtr] $id, [IntPtr]::Zero)
-        $posts += [ordered]@{ at = $at; id = $id; delivered = [bool] $delivered }
+if ($PostCommands -or $ProbeAt) {
+    # Posts and probes are one time-ordered sequence; at the same second the post goes first, so a probe can
+    # observe what its command did. Delivered (for a post) means a main window existed and PostMessageW
+    # accepted the message; MFC still drops a command whose ON_UPDATE_COMMAND_UI reports it disabled, which
+    # is why cases post only once playback is underway.
+    # Events are pscustomobjects, not ordered dictionaries: in Windows PowerShell 5.1 (which this task
+    # runs under) Sort-Object does not sort dictionaries by key - it leaves them in insertion order.
+    $events = @()
+    if ($PostCommands) {
+        foreach ($entry in ($PostCommands -split ',')) {
+            $parts = $entry -split ':'
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = [int] $parts[1]; probe = $false }
+        }
     }
-    $result.posts = $posts
+    if ($ProbeAt) {
+        foreach ($entry in ($ProbeAt -split ',')) {
+            $events += [pscustomobject]@{ at = [double]::Parse($entry, [Globalization.CultureInfo]::InvariantCulture); id = 0; probe = $true }
+        }
+    }
+    $posts = @()
+    $probes = @()
+    foreach ($step in ($events | Sort-Object at, probe)) {
+        $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
+        if ($step.at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($step.at - $elapsed) * 1000)) }
+        if ($step.probe) {
+            $probes += Get-PlaylistProbe $step.at $p.Id
+        } else {
+            $p.Refresh()
+            $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
+                         [MpcTest.User32]::PostMessageW($p.MainWindowHandle, 0x0111, [IntPtr] $step.id, [IntPtr]::Zero)
+            $posts += [ordered]@{ at = $step.at; id = $step.id; delivered = [bool] $delivered }
+        }
+    }
+    if ($PostCommands) { $result.posts = $posts }
+    if ($ProbeAt) { $result.probes = $probes }
 }
 
 $closeWatch = $null
