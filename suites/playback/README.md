@@ -23,7 +23,9 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
 2. The player is started from the command line in the console session
    (`<clip> /play /close`, plus whatever the case is about) and left alone,
    or, for a scenario that ends part-way, sent WM_CLOSE at a given time so
-   that its own shutdown runs.
+   that its own shutdown runs. A case can also post menu commands
+   (WM_COMMAND) to the player's window at given times; that is how the
+   end-of-file cases seek, change rate and reopen.
 3. Evidence is collected from outside the player:
    - **sound** -- the WAV the virtual audio endpoint wrote while the case
      ran, checked by `wavcheck.py`: tone per channel, and how long it lasted.
@@ -72,6 +74,9 @@ centre the box there. The band cases only ask which colour is present.
 | `redirect-start-position` | a redirected open carrying `/start 12000` starts there: the second capture (the redirected clip) lasts about 8 s | bb8bf48324 |
 | `redirect-multi-file-order` | two redirects 300 ms apart (one selection, as Explorer sends it): the first file keeps playing first and the second plays after it: 1600 Hz, then 1200 Hz | #3991, #4168, #4171; 2ac66df928 |
 | `dub-with-add-is-one-entry` | `<video> /dub <audio> /add` adds one playlist entry: after the playing clip ends the dub sounds (300 Hz), and there is no third capture | #4224, #4232; b18fd6036a |
+| `playlist-loops-twice` | `LoopMode=1 LoopNum=2` (counted loop, not forever): a two-entry playlist plays a, b, a, b — four captures, the two tones alternating — then stops | 2df5c77369 |
+| `image-waits-without-duration` | a durationless image (`still.png` through the Generate Still Video filter, `StillVideoDuration=3`) at the head of a playlist does not advance on its own: no audio ever reaches the endpoint | fba51949c1 |
+| `speed-kept-after-end` | a posted `ID_PLAY_INCRATE` (2x) before the end: the replay posted after end-of-stream still runs at 2x — the second capture lasts about 2 s, not 4 | #3595, #3915; fb9f5dd489 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -133,7 +138,7 @@ the captured PNG, so a failure can be looked at rather than re-run.
 
 ## Not yet here
 
-Anything that needs to *drive* a running player (seek, switch track, change
-rate) waits for the `/slave` host described in `..\..\PLAN.md`; these cases
-use only the command line. HDR cases need a Windows 11 guest (the virtual
-monitor does HDR there) and a renderer that outputs HDR.
+Driving a running player goes only as far as posted WM_COMMAND messages
+(seek, play, change rate, reopen); anything that needs a finer hand waits for
+the `/slave` host described in `..\..\PLAN.md`. HDR cases need a Windows 11
+guest (the virtual monitor does HDR there) and a renderer that outputs HDR.

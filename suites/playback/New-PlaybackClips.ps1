@@ -162,6 +162,14 @@ Invoke-FFmpeg $rotated @('-display_rotation', '90', '-i', $plain, '-c', 'copy')
 $reference = Join-Path $OutDir 'reference-rotated90.png'
 Invoke-FFmpeg $reference @('-i', $rotated, '-frames:v', '1', '-update', '1')
 
+# --- still.png: one flat red 640x360 frame and nothing else. For the case ---
+# that an image without a duration must not advance a playlist on its own.
+$still = Join-Path $OutDir 'still.png'
+Invoke-FFmpeg $still @(
+    '-f', 'lavfi', '-i', 'color=c=red:s=640x360:r=30',
+    '-frames:v', '1', '-update', '1'
+)
+
 # Read the reference back: which colour ended up in which corner, and the
 # rotated picture's shape. A quarter of the way in from each corner is well
 # inside a quadrant.
@@ -303,6 +311,9 @@ $clips = [ordered]@{
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
             audio   = @([ordered]@{ track = 1; default = $true; tones = @(440, 440) })
+        }
+        'still.png' = [ordered]@{
+            note = 'a single flat red 640x360 frame; played through the still-image source it has no duration and no audio'
         }
     }
 }

@@ -146,7 +146,7 @@ try {
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
-    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -181,6 +181,8 @@ try {
             [string[]] $SecondArgumentLine = @(), # at SecondAtSec the guest launches one more instance per command line,
                                                # 300 ms apart: close enough to arrive as one selection
             [double] $SecondAtSec = 2,
+            [string] $PostCommands = '',         # comma-separated <seconds>:<command id>, posted as WM_COMMAND to the
+                                               # player's window at each time (e.g. '2:895,8:887')
             [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
@@ -207,8 +209,8 @@ try {
         $secondEncoded = (@($SecondArgumentLine | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -249,6 +251,8 @@ try {
                 $taskArgs += " -SecondArgumentLine $secondEncoded"
                 if ($secondAtSec -ne 2) { $taskArgs += " -SecondAtSec $secondAtSec" }
             }
+            # Digits, dots, colons and commas only: survives the hand-built line with plain quoting.
+            if ($postCommands) { $taskArgs += (' -PostCommands "{0}"' -f $postCommands) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -340,8 +344,11 @@ try {
         if (-not $Wav) { return 'no audio reached the endpoint' }
         # Shared mode: the engine resamples to the mix format, so rate and depth are the engine's, not the
         # clip's. The player starting and stopping the graph costs a little at each end, hence the tolerance.
-        # The tones are read from one second starting -SkipSeconds into the signal.
-        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav --expect ($Tones -join ',') --seconds $Seconds --duration-tolerance $Tolerance --skip-seconds $SkipSeconds 2>&1
+        # The tones are read from one second starting -SkipSeconds into the signal; no tones checks the
+        # duration alone, for a capture whose pitch the case makes no claim about.
+        $checkArgs = @()
+        if ($Tones) { $checkArgs += '--expect', ($Tones -join ',') }
+        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') $Wav @checkArgs --seconds $Seconds --duration-tolerance $Tolerance --skip-seconds $SkipSeconds 2>&1
         if ($LASTEXITCODE -eq 0) { return $null }
         return (($output | Where-Object { "$_" -match '^FAIL' }) -join '; ')
     }
@@ -804,6 +811,71 @@ try {
         if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (stereo.mkv, then the video with its dub)" }
         else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'dub.wav'.audio[0].tones 5 1.5) }
         Complete-Case 'dub-with-add-is-one-entry' $problems
+    }
+
+    # 21-25. The end of a file: what happens when playback runs out. These are the first cases that drive a
+    #    running player, through the guest runner's PostCommands: a WM_COMMAND posted to the player's window at
+    #    a given time after start, the same message a menu accelerator sends. MFC drops a posted command whose
+    #    ON_UPDATE_COMMAND_UI reports it disabled, so the posts are timed at 2 s or later, once playback is
+    #    underway; the runner records per post whether a window took it, and the cases assert the first one
+    #    landed so that a pass cannot come from the commands never arriving.
+
+    # 21. A counted playlist loop plays every entry on every pass, then stops: clsid2/mpc-hc@2df5c77369 made
+    #    GraphEventComplete's skip-to-next a POSTED command, so the OnPlayStop during that skip's close zeroed
+    #    m_nLoops after the count had been read, and a "repeat N times" playlist no longer stopped after N
+    #    passes. folder\a.mkv (440/880) and folder\b.mkv (1200) on the command line are one two-entry playlist,
+    #    LoopMode=1 and LoopNum=2 with Loop=0: the fLoopForever half of the setting would ignore the count
+    #    (GraphEventComplete tests s.fLoopForever first). Four captures, a b a b, each the whole clip; then the
+    #    player stops and the window is closed.
+    if (Test-CaseSelected 'playlist-loops-twice') {
+        $c = Invoke-PlayerCase -Name 'playlist-loops-twice' -Clip 'folder\a.mkv' -Switches '"C:\mpc-test\media\folder\b.mkv" /play' `
+            -Settings @{ LoopMode = 1; LoopNum = 2 } -CloseAtSec 19.5
+        $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]     # folder\b.mkv is a copy of twotracks.mkv
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 4) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 4 (two passes of a two-entry playlist)" }
+        else {
+            for ($i = 0; $i -lt 4; $i++) {
+                $want = if ($i % 2 -eq 0) { $stereo.audio[0].tones } else { $second.tones }
+                $err = Test-Audio $c.Wavs[$i] $want $seconds 1.0
+                if ($err) { $problems += "pass $($i + 1): $err" }
+            }
+        }
+        Complete-Case 'playlist-loops-twice' $problems
+    }
+
+    # 22. An image whose source filter reports no duration must not advance to the next playlist entry on its
+    #    own: clsid2/mpc-hc@fba51949c1. LAV's internal splitter claims only .gif and .webp among the image
+    #    extensions (InsertLAVSplitterSource in FGManager.cpp), so a .png is rendered by DirectShow's Generate
+    #    Still Video filter, which has no duration of its own; MPC-HC bounds it with a stop position
+    #    StillVideoDuration seconds out (default 10, set to 3 here so the wait fits the case) and EC_COMPLETE
+    #    fires when that is reached. The fix returns from GraphEventComplete for such an image instead of
+    #    skipping; without it stereo.mkv would start at about 4 s and be heard before the close at 8.
+    if (Test-CaseSelected 'image-waits-without-duration') {
+        $c = Invoke-PlayerCase -Name 'image-waits-without-duration' -Clip 'still.png' -Switches '"C:\mpc-test\media\stereo.mkv" /play' `
+            -Settings @{ LoopMode = 1; StillVideoDuration = 3 } -CloseAtSec 8
+        Complete-Case 'image-waits-without-duration' @(
+            (Get-ProcessProblem $c.Run),
+            $(if ($c.Wavs.Count -ne 0) { "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected none: the image must sit, not advance to stereo.mkv" })
+        )
+    }
+
+    # 23. The playback rate survives the end of the stream: clsid2/mpc-hc@fb9f5dd489 (#3595, #3915) stopped
+    #    OnPlayStop resetting m_dSpeedRate to 1 when the stop is the end of the file. One press of
+    #    ID_PLAY_INCRATE doubles the rate (SpeedStep defaults to 0, the doubling branch of OnPlayChangeRate),
+    #    so the 4 s clip ends in about half; the replay posted at 8 s must still run at 2x: about 2 s of
+    #    audio. The rate change itself opens a new render stream, so there are three captures: before the
+    #    change, the rest at 2x, and the replay. Only the replay is judged, by its duration: the renderer does
+    #    pitch-shift at 2x (440/880 come out as 880/1760), which is not what this case is about. Measured: the
+    #    replay lasts 2.1 s on develop and 4.1 s, at 440 Hz, on 2.5.4.
+    if (Test-CaseSelected 'speed-kept-after-end') {
+        $c = Invoke-PlayerCase -Name 'speed-kept-after-end' -Clip 'stereo.mkv' -Switches '/play' `
+            -Settings @{ AfterPlayback = 0 } -PostCommands '2:895,8:887' -CloseAtSec 14
+        $posts = @($c.Run.posts)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $posts -or -not $posts[0] -or -not $posts[0].delivered) { $problems += 'the posted rate increase did not reach a window' }
+        if ($c.Wavs.Count -lt 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected the play and then the replay" }
+        else { $problems += (Test-Audio $c.Wavs[-1] @() 2 0.7) }
+        Complete-Case 'speed-kept-after-end' $problems
     }
 }
 finally {

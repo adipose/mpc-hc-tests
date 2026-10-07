@@ -1,6 +1,7 @@
 # Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
-# arguments, optionally captures the virtual monitor part-way through, waits for the player to exit by itself, and
-# kills it if it does not. Writes one JSON object to -Out; the host does the asserting.
+# arguments, optionally captures the virtual monitor part-way through, optionally posts WM_COMMAND messages to
+# the player's window at given times, waits for the player to exit by itself, and kills it if it does not.
+# Writes one JSON object to -Out; the host does the asserting.
 param(
     [Parameter(Mandatory)] [string] $Exe,
     [Parameter(Mandatory)] [string] $ArgumentLine,
@@ -19,6 +20,10 @@ param(
                                          # several, comma-separated, are launched SecondIntervalMs apart
     [double] $SecondAtSec = 2,
     [int] $SecondIntervalMs = 300,
+    [string] $PostCommands = '',         # comma-separated <seconds>:<command id>: a WM_COMMAND posted to the
+                                         # player's main window at that time after start, as a menu accelerator
+                                         # the user pressed (digits, dots and colons only, so it survives the
+                                         # hand-built task line unencoded)
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
     [string] $CapturePath = '',
@@ -28,9 +33,10 @@ param(
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o') }
 
-if ($CloseKind -eq 'SC_CLOSE') {
+if ($CloseKind -eq 'SC_CLOSE' -or $PostCommands) {
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
-    # own path since e21c9fcfff, so both ways of closing belong under test.
+    # own path since e21c9fcfff, so both ways of closing belong under test. The posted commands are WM_COMMAND,
+    # the same message a menu accelerator sends.
     Add-Type -Namespace MpcTest -Name User32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool PostMessageW(System.IntPtr hWnd, uint msg, System.IntPtr wParam, System.IntPtr lParam);
@@ -126,6 +132,25 @@ if ($SecondArgumentLine) {
         if (-not $exited) { $result.secondExited = $false; $result.secondExitCode = $null }
         elseif ($result.secondExitCode -eq 0 -and $inst.ExitCode -ne 0) { $result.secondExitCode = $inst.ExitCode }
     }
+}
+
+if ($PostCommands) {
+    # Each command is posted at its own time after start. Delivered means a main window existed and
+    # PostMessageW accepted the message; MFC still drops a command whose ON_UPDATE_COMMAND_UI reports it
+    # disabled, which is why cases post only once playback is underway.
+    $posts = @()
+    foreach ($entry in ($PostCommands -split ',')) {
+        $parts = $entry -split ':'
+        $at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture)
+        $id = [int] $parts[1]
+        $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
+        if ($at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($at - $elapsed) * 1000)) }
+        $p.Refresh()
+        $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
+                     [MpcTest.User32]::PostMessageW($p.MainWindowHandle, 0x0111, [IntPtr] $id, [IntPtr]::Zero)
+        $posts += [ordered]@{ at = $at; id = $id; delivered = [bool] $delivered }
+    }
+    $result.posts = $posts
 }
 
 $closeWatch = $null
