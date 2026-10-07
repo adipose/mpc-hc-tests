@@ -21,19 +21,17 @@
 #include "stdafx.h"
 #include "TestUtil.h"
 #include "../../src/Subtitles/VobSubImage.h"
+#include "../../src/Subtitles/VobSubFile.h"
 #include "../../src/Subtitles/PGSSub.h"
 #include "../../src/Subtitles/DVBSub.h"
 
 // The bitmap subtitle decoders, fed byte sequences built here. These parse
 // length and offset fields straight from the stream, so the fixtures are
-// deliberately malformed. Modelled on #4187 (PGS/DVB palette bounds) and
-// #4192 (VobSub offset validation): the malformed cases must be rejected, not
-// read out of bounds. Every buffer handed to a decoder is a GuardedBuffer, so
-// a read one byte past the input is an access violation caught as a failure.
-//
-// The #4187/#4192 hardening is not yet on this branch's base, so the tests
-// that feed input a decoder over-reads are marked as expected failures; they
-// pass once the branch is rebased onto develop.
+// deliberately malformed. Modelled on #4187 (PGS/DVB palette bounds), #4183
+// (VobSub trusting sizes from the stream) and #4192 (VobSub offset
+// validation): the malformed cases must be rejected, not read out of bounds.
+// Every buffer handed to a decoder is a GuardedBuffer, so a read one byte
+// past the input is an access violation caught as a failure.
 
 using namespace testutil;
 
@@ -126,6 +124,191 @@ TEST(VobSub, DecodeRejectsOutOfRangeOffsets)
     CVobSubImage img;
     RGBQUAD pal[16] = {}, cuspal[4] = {};
     EXPECT_FALSE(img.Decode(buf.data(), buf.size(), 8, INT_MAX, false, 0, pal, cuspal, false));
+}
+
+// #4183 (55051b9717): a control block with no display command (no
+// start/stop/display-area) used to leave Decode running on an empty rect.
+// GetPacketInfo now reports such a packet as invalid and empties the rect.
+TEST(VobSub, GetPacketInfoRejectsBlockWithoutDisplayCommands)
+{
+    Bytes b;
+    b.fill(4, 0x00);           // data area, dataSize = 4
+    b.u16(0);                  // date
+    b.u16(4);                  // next control block -> self (last block)
+    b.u8(0x03).u16(0x0000);    // set palette -- not a display command
+    b.u8(0xff);                // end of control block
+
+    GuardedBuffer buf(b);
+    CVobSubImage img;
+    EXPECT_FALSE(img.GetPacketInfo(buf.data(), buf.size(), 4));
+    EXPECT_TRUE(img.rect.IsRectEmpty());
+}
+
+// #4183 (55051b9717): a display-area command with zero width or height made
+// Decode allocate and draw a zero-sized image; it now refuses the packet.
+TEST_ISOLATED(VobSub, DecodeRejectsEmptyRect)
+{
+    Bytes packet = VobSubPacket(8, 0, 4, 5, 0, 5, 2); // right == left: width 0
+    GuardedBuffer buf(packet);
+    CVobSubImage img;
+    RGBQUAD pal[16] = {}, cuspal[4] = {};
+    EXPECT_FALSE(img.Decode(buf.data(), buf.size(), 8, INT_MAX, false, 0, pal, cuspal, false));
+}
+
+// The rejection above must not catch a well-formed packet. The packet Add
+// sees starts with its two 16-bit size fields, so the RLE area begins at
+// offset 4 and every offset is absolute to the packet start.
+TEST(VobSub, StreamAddAcceptsWellFormedPacket)
+{
+    CCritSec lock;
+    CVobSubStream vs(&lock);
+    Bytes body = VobSubPacket(8, 4, 8, 0, 0, 2, 2);
+    body[10] = 0; body[11] = 12; // self-pointer, in packet coordinates: the
+                                 // 4 size bytes move the control block to 12
+    Bytes p;
+    p.u16((unsigned)body.size() + 4).u16(12).add(body);
+    GuardedBuffer buf(p);
+    vs.Add(0, 10000000, buf.data(), (int)buf.size());
+    EXPECT_TRUE(vs.GetStartPosition(0, 1.0) != nullptr);
+}
+
+// #4183 (53e911d180): CVobSubStream::Add passed the packet's data size field
+// into GetPacketInfo unchecked, so a packet whose declared data size ran past
+// its end made the parser read out of bounds. It is now rejected before
+// parsing, and nothing is added.
+TEST_ISOLATED(VobSub, StreamAddRejectsDataSizeBeyondPacket)
+{
+    CCritSec lock;
+    CVobSubStream vs(&lock);
+    Bytes p;
+    p.u16(16).u16(100).fill(12, 0x00); // packet size 16, data size far past it
+    GuardedBuffer buf(p);
+    vs.Add(0, 10000000, buf.data(), (int)buf.size());
+    EXPECT_TRUE(vs.GetStartPosition(0, 1.0) == nullptr);
+}
+
+namespace
+{
+    // GetPacket is protected, so drive it through a subclass: the .sub image
+    // lives in m_sub and the index in m_langs, both reachable from here.
+    class CTestVobSubFile : public CVobSubFile
+    {
+    public:
+        explicit CTestVobSubFile(CCritSec* pLock) : CVobSubFile(pLock) {}
+        using CVobSubFile::GetPacket;
+        using CVobSubFile::ReadIdx;
+        CMemFile& SubImage() { return m_sub; }
+    };
+
+    // One 0x800-byte .sub pack for stream 0: pack header, PES header, then
+    // the packet and data size fields GetPacket reads.
+    Bytes VobSubSubPack(unsigned packetSize, unsigned dataSize)
+    {
+        Bytes b;
+        b.fill(0x800, 0x00);
+        BYTE* p = b.data();
+        p[0x02] = 0x01; p[0x03] = 0xba; // pack start code
+        p[0x10] = 0x01; p[0x11] = 0xbd; // PES start code
+        p[0x15] = 0x80;
+        p[0x16] = 0x00;                 // no extra PES header bytes
+        p[0x17] = 0x20;                 // sub-stream id 0
+        p[0x18] = (BYTE)(packetSize >> 8); p[0x19] = (BYTE)packetSize;
+        p[0x1a] = (BYTE)(dataSize >> 8);  p[0x1b] = (BYTE)dataSize;
+        return b;
+    }
+}
+
+// #4183 (d2dcb450d8): the data length in a .sub pack was trusted during
+// packet assembly; a dataSize that runs past packetSize now rejects the
+// packet instead of handing consumers a buffer that ends before its data.
+// Isolated: unfixed, the packet handed back claims data past its own end, and
+// a consumer over-reading it must not take the rest of the run with it.
+TEST_ISOLATED(VobSub, FileGetPacketRejectsDataSizeBeyondPacket)
+{
+    CCritSec lock;
+    CTestVobSubFile vsf(&lock);
+    vsf.m_nLang = 0;
+    CVobSubFile::SubPos pos;
+    vsf.m_langs[0].subpos.Add(pos);      // filepos 0: the malformed pack
+    pos.filepos = 0x800;
+    vsf.m_langs[0].subpos.Add(pos);      // filepos 0x800: a well-formed pack
+
+    Bytes image;
+    image.add(VobSubSubPack(0x10, 0x10))   // dataSize + 4 > packetSize
+         .add(VobSubSubPack(0x20, 0x10));  // fits
+    vsf.SubImage().Write(image.data(), (UINT)image.size());
+
+    size_t packetSize = 0, dataSize = 0;
+    EXPECT_EQ(vsf.GetPacket(0, packetSize, dataSize), nullptr);
+
+    BYTE* good = vsf.GetPacket(1, packetSize, dataSize);
+    ASSERT_NE(good, nullptr);
+    EXPECT_EQ(packetSize, 0x20u);
+    EXPECT_EQ(dataSize, 0x10u);
+    delete[] good;
+}
+
+// #4183 (0332950f11): Open called ReadIdx unguarded, so a throw out of the
+// .idx parse propagated out of Open. ReadIdx has no throw of its own -- a bad
+// version line only sets bError -- so the throw has to come from the file
+// read. CTextFile::Open probes the BOM by asking CStdioFile for 2 bytes, but
+// the CRT fills its whole buffer to serve that, so the probe covers the first
+// few KB, not 2 bytes; ReopenAsText then rereads the file through CStdioFile
+// in text mode, and any later buffered read that fails raises CFileException.
+// To fail such a read we hold an exclusive byte-range lock on the .idx from
+// 16 KB to past the end of the file: locks are per handle, so the player's
+// own handle gets ERROR_LOCK_VIOLATION once its buffered reads walk into the
+// lock, while the probe's first buffer does not reach it. Without the fix the
+// exception escapes Open and fails this test; with it Open catches and
+// returns false.
+TEST(VobSub, OpenWithUnreadableIdxFailsWithoutThrowing)
+{
+    CCritSec lock;
+
+    // A valid-looking .idx: the correct header, no BOM, and enough valid
+    // comment lines that the parse's buffered reads proceed past 16 KB.
+    std::string idx = "# VobSub index file, v7 (do not modify this line!)\r\n";
+    while (idx.size() < 32 * 1024) {
+        idx += "# padding so a later buffered read runs into the lock\r\n";
+    }
+    Bytes sub;
+    sub.u32(0x000001ba).fill(0x7fc, 0x00);
+    WriteTemp(L"vobsub-locked.sub", sub);
+    CStringW idxPath = WriteTemp(L"vobsub-locked.idx", idx);
+
+    // Unlock and close on every path out of the test, ASSERTs included.
+    struct IdxLock {
+        HANDLE h = INVALID_HANDLE_VALUE;
+        OVERLAPPED ov = {};
+        DWORD len = 0;
+        ~IdxLock() {
+            if (h != INVALID_HANDLE_VALUE) {
+                if (len) {
+                    UnlockFileEx(h, 0, len, 0, &ov);
+                }
+                CloseHandle(h);
+            }
+        }
+    } guard;
+
+    guard.h = CreateFileW(idxPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(guard.h, INVALID_HANDLE_VALUE);
+    guard.ov.Offset = 16 * 1024; // past the first buffered read
+    guard.len = 0x100000;        // runs past the end of the file
+    ASSERT_TRUE(LockFileEx(guard.h, LOCKFILE_EXCLUSIVE_LOCK, 0, guard.len, 0, &guard.ov));
+
+    // The input really reaches the throw: ReadIdx itself raises (MFC throws
+    // CFileException pointers; EXPECT_ANY_THROW's catch-all takes it).
+    {
+        CTestVobSubFile vsf(&lock);
+        int ver = 0;
+        EXPECT_ANY_THROW(vsf.ReadIdx(idxPath, ver));
+    }
+
+    // And Open turns that throw into a plain false.
+    CVobSubFile vsf(&lock);
+    EXPECT_FALSE(vsf.Open(idxPath));
 }
 
 // --- PGS --------------------------------------------------------------------
