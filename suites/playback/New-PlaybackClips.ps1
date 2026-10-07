@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Generates the clips the playback suite plays: a few seconds each, with
     content declared here so that a test can say exactly what should come out
@@ -158,6 +158,63 @@ try {
     $rotatedSize = @($w, $h)
 } finally { $bmp.Dispose() }
 
+# Flat fields for the renderer cases: one constant Y over the whole frame, so what should come out
+# of the conversion can be worked out from the file. They are longer than the other clips because
+# the renderer takes several seconds to get going on a guest with no GPU, and the capture has to
+# land well inside playback. Lossless would be truest but decodes too slowly there; a flat field at
+# crf 16 comes back as the same code value, which is checked here rather than assumed.
+function New-FlatField {
+    param([string] $Target, [int] $Y, [int] $Depth, [string] $Transfer, [int] $Seconds = 25)
+    if ((Test-Path $Target) -and -not $Force) { return }
+    $w = 1280; $h = 720
+    $raw = Join-Path ([IO.Path]::GetTempPath()) ('flatfield-{0}.raw' -f [guid]::NewGuid())
+    try {
+        if ($Depth -eq 10) {
+            $luma = [byte[]]::new($w * $h * 2)
+            for ($i = 0; $i -lt $luma.Length; $i += 2) { $luma[$i] = $Y -band 0xFF; $luma[$i + 1] = ($Y -shr 8) -band 0xFF }
+            $chroma = [byte[]]::new($w * $h)      # 512 little endian, neutral
+            for ($i = 0; $i -lt $chroma.Length; $i += 2) { $chroma[$i] = 0; $chroma[$i + 1] = 2 }
+            $pix = 'yuv420p10le'
+            $enc = @('-c:v', 'libx265', '-x265-params',
+                     "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:crf=16:range=limited")
+        } else {
+            $luma = [byte[]]::new($w * $h)
+            for ($i = 0; $i -lt $luma.Length; $i++) { $luma[$i] = $Y }
+            $chroma = [byte[]]::new($w * $h / 2)
+            for ($i = 0; $i -lt $chroma.Length; $i++) { $chroma[$i] = 128 }
+            $pix = 'yuv420p'
+            $enc = @('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-x264-params',
+                     'colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv')
+        }
+        $fs = [IO.File]::Create($raw)
+        $fs.Write($luma, 0, $luma.Length); $fs.Write($chroma, 0, $chroma.Length)
+        $fs.Close()
+
+        & $ffmpeg -hide_banner -loglevel error -y -f rawvideo -pix_fmt $pix -s "${w}x${h}" -r 24 `
+            -color_range tv -stream_loop -1 -t $Seconds -i $raw @enc -pix_fmt $pix -color_range tv $Target
+        if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed producing $Target" }
+
+        # It is not the clip you asked for until it decodes back to the same value. ffmpeg writes the
+        # frame to a file rather than through a pipe: PowerShell's redirection is text oriented, and it
+        # loses the second byte of every 10 bit sample, which reads as a clip holding the wrong value.
+        & $ffmpeg -hide_banner -loglevel error -y -i $Target -frames:v 1 -f rawvideo -pix_fmt $pix "$raw.chk"
+        if ($LASTEXITCODE -ne 0) { throw "ffmpeg could not read back $Target" }
+        $bytes = [IO.File]::ReadAllBytes("$raw.chk")
+        # [int] on both: -bor with a byte on the left gives a byte back, and 633 truncates to 121
+        $got = if ($Depth -eq 10) { ([int]$bytes[0]) -bor ([int]$bytes[1] -shl 8) } else { [int]$bytes[0] }
+        if ($got -ne $Y) { throw "$Target holds Y $got, not the $Y it was given" }
+        Write-Host ("  {0}: Y {1}, {2} bit {3}" -f (Split-Path $Target -Leaf), $Y, $Depth, $Transfer)
+    } finally {
+        Remove-Item $raw, "$raw.chk" -ErrorAction SilentlyContinue
+    }
+}
+
+# 10 bit limited range code for a PQ level, and 8 bit for the SDR one
+$pq = { param([double] $v) [int][math]::Round($v * (940 - 64) + 64) }
+New-FlatField (Join-Path $OutDir 'flat_sdr.mkv')   128          8  'bt709'
+New-FlatField (Join-Path $OutDir 'flat_pq065.mkv') (& $pq 0.65) 10 'pq'
+New-FlatField (Join-Path $OutDir 'flat_pq025.mkv') (& $pq 0.25) 10 'pq'
+
 $clips = [ordered]@{
     generated = (Get-Date).ToString('o')
     seconds   = $seconds
@@ -190,6 +247,18 @@ $clips = [ordered]@{
             picture   = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
             audio     = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
             sidecar   = [ordered]@{ file = 'ext.ass'; band = 'magenta' }
+        }
+        'flat_sdr.mkv' = [ordered]@{
+            seconds = 25
+            field   = [ordered]@{ code = 128; depth = 8; range = 'limited'; transfer = 'bt709' }
+        }
+        'flat_pq065.mkv' = [ordered]@{
+            seconds = 25
+            field   = [ordered]@{ code = (& $pq 0.65); depth = 10; range = 'limited'; transfer = 'pq'; pq = 0.65 }
+        }
+        'flat_pq025.mkv' = [ordered]@{
+            seconds = 25
+            field   = [ordered]@{ code = (& $pq 0.25); depth = 10; range = 'limited'; transfer = 'pq'; pq = 0.25 }
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
