@@ -1131,12 +1131,14 @@ try {
         Complete-Case 'toolbar-layout-without-movable-buttons-is-kept' $problems
     }
 
-    # 30. A layout saved before ButtonLayoutRevision existed must not show a button twice: #3829, two Stop
-    #    buttons, fixed by #3839 (a0968dc305), which discards such a layout and loads the defaults. The
-    #    sequence is byte for byte what 2.5.5 itself saves for this order (measured: it reads the seed and
-    #    writes it back unchanged): leftsep, play, pause, stop, skipforward, framestep, skipback, dummysep,
-    #    volume, with no revision key. 2.6.1 and 2.6.4 show Stop twice from it; develop shows the defaults.
-    #    The user's custom order is not kept on develop, by #3839's choice, so it is not asserted.
+    # 30. A layout saved before ButtonLayoutRevision existed must not show a button twice, and must keep
+    #    its order: #3829, two Stop buttons. The sequence is byte for byte what 2.5.5 itself saves for this
+    #    order (measured: it reads the seed and writes it back unchanged): leftsep, play, pause, stop,
+    #    skipforward, framestep, skipback, dummysep, volume, with no revision key. Revision 0 saved
+    #    play/pause/stop after the left separator, so the movable part starts at index 4, but
+    #    IsValidButtonLayout and PlaceButtons started at 3: 2.6.1 and 2.6.4 show Stop twice from it, and
+    #    after #3839 (a0968dc305) the saved Stop counts as a duplicate, the layout is discarded and the
+    #    defaults load instead (skipback, decrate, incrate, skipforward, framestep). Fixed on patch759.
     if (Test-CaseSelected 'toolbar-old-layout-has-no-duplicates') {
         $layout = Get-ButtonSequenceIni @(957, 887, 888, 890, 922, 891, 921, 945, 909)
         $c = Invoke-PlayerCase -Name 'toolbar-old-layout-has-no-duplicates' -Clip 'stereo.mkv' `
@@ -1151,6 +1153,9 @@ try {
                 $n = @($ids | Where-Object { $_ -eq $id }).Count
                 if ($n -ne 1) { $problems += "button $id is on the toolbar $n times, expected once ($($ids -join ','))" }
             }
+            $buttonsInOrder = @($ids | Where-Object { $_ -ne 957 -and $_ -ne 945 }) -join ','
+            $saved = '887,888,890,922,891,921,909'
+            if ($buttonsInOrder -ne $saved) { $problems += "the saved layout was not kept: buttons $buttonsInOrder, saved $saved ($($ids -join ','))" }
         }
         Complete-Case 'toolbar-old-layout-has-no-duplicates' $problems
     }
