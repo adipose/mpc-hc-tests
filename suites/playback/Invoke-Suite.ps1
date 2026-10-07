@@ -261,6 +261,8 @@ try {
                 Plug = $plug
                 HasPng = Test-Path $png
                 History = if (Test-Path 'C:\mpc-test\player\mpc-hc64.history.ini') { Get-Content 'C:\mpc-test\player\mpc-hc64.history.ini' -Raw } else { $null }
+                # The settings as the player's own shutdown left them; ReadAllText detects the UTF-16 BOM.
+                Ini = if (Test-Path 'C:\mpc-test\player\mpc-hc64.ini') { [IO.File]::ReadAllText('C:\mpc-test\player\mpc-hc64.ini') } else { $null }
             }
         }
         if (-not $guest.Json) { throw "case $Name produced no result on the guest" }
@@ -292,8 +294,22 @@ try {
         if ($guest.HasPng) { $png = Join-Path $OutDir "$Name.png"; Copy-Item -FromSession $session $guestPng $png -Force }
 
         if ($guest.History) { Set-Content (Join-Path $OutDir "$Name.history.ini") $guest.History }
+        if ($guest.Ini) { Set-Content (Join-Path $OutDir "$Name.ini") $guest.Ini }
 
-        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History }
+        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History; Ini = $guest.Ini }
+    }
+
+    # The value of a key in one section of an ini read as text; $null when the ini, the section or the key
+    # is absent. Split on the section headers like Get-RememberedPosition does.
+    function Get-IniValue {
+        param([string] $Ini, [string] $Section, [string] $Key)
+        if (-not $Ini) { return $null }
+        foreach ($s in ($Ini -split '(?m)^\[')) {
+            if ($s -match ('^' + [regex]::Escape($Section) + '\]') -and $s -match ('(?m)^' + [regex]::Escape($Key) + '=(.*)$')) {
+                return $Matches[1].Trim()
+            }
+        }
+        $null
     }
 
     # The position the history file holds for a clip, in seconds; $null when there is no entry. An entry is a
@@ -659,6 +675,39 @@ try {
         Complete-Case 'mpcvr-hdr-to-sdr-dark' @(
             (Get-ProcessProblem $c.Run),
             (Test-FlatField $c.Png $field 200)
+        )
+    }
+
+    # 14-15. clsid2/mpc-hc@a0735130e "Reset internal filters to enabled (once)": UpdateSettings, on loading a
+    #    profile at SettingsVersion 8, re-enables every internal source and transform filter once and writes
+    #    the profile at APPSETTINGS_VERSION (9 in AppSettings.h); a profile already there is left alone, so a
+    #    filter a user turns off after the upgrade stays off. SRC_FLV and TRA_MPEG2 stand in for the two
+    #    lists (SrcFiltersKeys/TraFiltersKeys in AppSettings.cpp, both defaulting to 1); they were chosen
+    #    because stereo.mkv uses neither, so a filter left off cannot stop the clip playing. They are set
+    #    to 0 in [Internal Filters], and what matters is what the player's own exit writes back. The first
+    #    case guards the reset itself, the second that it does not run on every launch.
+    $filterSection = [ordered]@{ SRC_FLV = 0; TRA_MPEG2 = 0 }
+    if (Test-CaseSelected 'filters-reset-once-from-version-8') {
+        $c = Invoke-PlayerCase -Name 'filters-reset-once-from-version-8' -Clip 'stereo.mkv' -Settings @{ SettingsVersion = 8 } -IniSections @{ 'Internal Filters' = $filterSection }
+        $version = Get-IniValue $c.Ini 'Settings' 'SettingsVersion'
+        $src = Get-IniValue $c.Ini 'Internal Filters' 'SRC_FLV'
+        $tra = Get-IniValue $c.Ini 'Internal Filters' 'TRA_MPEG2'
+        Complete-Case 'filters-reset-once-from-version-8' @(
+            (Get-ProcessProblem $c.Run),
+            $(if ($null -eq $c.Ini) { 'no mpc-hc64.ini came back from the guest' }),
+            $(if ($c.Ini -and $version -ne '9') { "SettingsVersion is $version, expected 9 (APPSETTINGS_VERSION in AppSettings.h)" }),
+            $(if ($c.Ini -and ($src -ne '1' -or $tra -ne '1')) { "filters set to 0 came back SRC_FLV=$src TRA_MPEG2=$tra, both expected 1" })
+        )
+    }
+
+    if (Test-CaseSelected 'filters-kept-off-at-version-9') {
+        $c = Invoke-PlayerCase -Name 'filters-kept-off-at-version-9' -Clip 'stereo.mkv' -Settings @{ SettingsVersion = 9 } -IniSections @{ 'Internal Filters' = $filterSection }
+        $src = Get-IniValue $c.Ini 'Internal Filters' 'SRC_FLV'
+        $tra = Get-IniValue $c.Ini 'Internal Filters' 'TRA_MPEG2'
+        Complete-Case 'filters-kept-off-at-version-9' @(
+            (Get-ProcessProblem $c.Run),
+            $(if ($null -eq $c.Ini) { 'no mpc-hc64.ini came back from the guest' }
+              elseif ($src -ne '0' -or $tra -ne '0') { "filters set to 0 came back SRC_FLV=$src TRA_MPEG2=$tra, both expected to stay 0" })
         )
     }
 }

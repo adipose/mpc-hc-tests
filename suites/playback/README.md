@@ -65,6 +65,8 @@ centre the box there. The band cases only ask which colour is present.
 | `mpcvr-hdr-to-sdr-125` | 10 bit PQ 0.65 converted to SDR for a 125 nit display comes out at 233.3 | |
 | `mpcvr-hdr-to-sdr-200` | the same clip for a 200 nit display comes out at 206.7, and not at the 125 nit level | |
 | `mpcvr-hdr-to-sdr-dark` | 10 bit PQ 0.25 for a 200 nit display comes out at 35.2 | |
+| `filters-reset-once-from-version-8` | a profile at `SettingsVersion=8` with two internal filters set to 0 comes back at version 9 with both re-enabled | a0735130e |
+| `filters-kept-off-at-version-9` | the same profile at the current version keeps both filters at 0: the reset runs once, not on every launch | a0735130e |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
