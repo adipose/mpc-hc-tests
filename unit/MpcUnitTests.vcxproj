@@ -81,6 +81,20 @@
     <ClCompile Include="test_DSUtilText.cpp" />
     <ClCompile Include="test_TextFile.cpp" />
     <ClCompile Include="test_WebVTT.cpp" />
+    <!-- CProfile lives in the exe project, so it is compiled in directly. Its
+         #include "stdafx.h" is the /Yu boundary: the exe's own stdafx.h (which
+         needs the sizecbar/ResizableLib submodules, absent here) is never
+         opened, and the unit PCH supplies everything else it uses - MFC,
+         atlbase.h/CRegKey and Shlwapi.h/PathFileExistsW via atlcoll.h, DSUtil.h.
+         The one exception is _SH_SECURE, which the CRT defines only in
+         <share.h>; pass it exactly as corecrt_share.h does. The symbols it
+         links (GetModulePath, StrToInt32/UInt32/Int64/Double,
+         StrHexToUInt32, StartsWithNoCase) all come from DSUtil.lib, already a
+         project reference; Base64::decode is header-inline. -->
+    <ClCompile Include="..\..\src\mpc-hc\Profile.cpp">
+      <PreprocessorDefinitions>_SH_SECURE=0x80;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="test_Profile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="HostHooks.h" />
