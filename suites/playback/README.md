@@ -77,6 +77,7 @@ centre the box there. The band cases only ask which colour is present.
 | `playlist-loops-twice` | `LoopMode=1 LoopNum=2` (counted loop, not forever): a two-entry playlist plays a, b, a, b — four captures, the two tones alternating — then stops | 2df5c77369 |
 | `image-waits-without-duration` | a durationless image (`still.png` through the Generate Still Video filter, `StillVideoDuration=3`) at the head of a playlist does not advance on its own: no audio ever reaches the endpoint | fba51949c1 |
 | `speed-kept-after-end` | a posted `ID_PLAY_INCRATE` (2x) before the end: the replay posted after end-of-stream still runs at 2x — the second capture lasts about 2 s, not 4 | #3595, #3915; fb9f5dd489 |
+| `forced-does-not-outrank-default` | of a forced track and a default track (no languages), the default one plays | #3935; 9b4408c5c8 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

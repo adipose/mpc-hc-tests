@@ -112,6 +112,20 @@ Invoke-FFmpeg $twotracks @(
     '-disposition:a:0', '0', '-disposition:a:1', 'default'
 )
 
+# --- forced.mkv: two audio tracks; the FIRST is forced, the SECOND default. -
+# Track 1: 600 Hz both channels, forced and NOT default. Track 2: 1200 Hz,
+# default and NOT forced. Neither carries a language, so no language
+# preference in the profile can decide it instead: 9b4408c5c8 rates [default]
+# over [forced] in SetupAudioStreams (#3935).
+$forced = Join-Path $OutDir 'forced.mkv'
+Invoke-FFmpeg $forced @(
+    '-f', 'lavfi', '-i', (Tone 600), '-f', 'lavfi', '-i', (Tone 1200),
+    '-filter_complex', "$quad;[0:a]aformat=channel_layouts=stereo,volume=0.5[a1];[1:a]aformat=channel_layouts=stereo,volume=0.5[a2]",
+    '-map', '[v]', '-map', '[a1]', '-map', '[a2]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le',
+    '-disposition:a:0', 'forced', '-disposition:a:1', 'default'
+)
+
 # --- subs.mkv: two ASS subtitle tracks; the SECOND carries the default flag. -
 # Each track draws one solid band across the centre of the picture, magenta
 # for track 1 and cyan for track 2, so the colour at the centre of a captured
@@ -269,6 +283,13 @@ $clips = [ordered]@{
             audio   = @(
                 [ordered]@{ track = 1; language = 'eng'; default = $false; tones = @(600, 600) }
                 [ordered]@{ track = 2; language = 'ger'; default = $true;  tones = @(1200, 1200) }
+            )
+        }
+        'forced.mkv' = [ordered]@{
+            picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio   = @(
+                [ordered]@{ track = 1; default = $false; forced = $true;  tones = @(600, 600) }
+                [ordered]@{ track = 2; default = $true;  forced = $false; tones = @(1200, 1200) }
             )
         }
         'third.mkv' = [ordered]@{

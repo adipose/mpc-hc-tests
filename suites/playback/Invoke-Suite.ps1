@@ -813,7 +813,7 @@ try {
         Complete-Case 'dub-with-add-is-one-entry' $problems
     }
 
-    # 21-25. The end of a file: what happens when playback runs out. These are the first cases that drive a
+    # 21-23. The end of a file: what happens when playback runs out. These are the first cases that drive a
     #    running player, through the guest runner's PostCommands: a WM_COMMAND posted to the player's window at
     #    a given time after start, the same message a menu accelerator sends. MFC drops a posted command whose
     #    ON_UPDATE_COMMAND_UI reports it disabled, so the posts are timed at 2 s or later, once playback is
@@ -876,6 +876,19 @@ try {
         if ($c.Wavs.Count -lt 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected the play and then the replay" }
         else { $problems += (Test-Audio $c.Wavs[-1] @() 2 0.7) }
         Complete-Case 'speed-kept-after-end' $problems
+    }
+
+    # 24. The default flag outranks the forced flag: clsid2/mpc-hc@9b4408c5c8 swapped the weights in
+    #    SetupAudioStreams, so [default] adds 4 and [forced] 2 (#3935). forced.mkv's track 1 is forced and
+    #    track 2 is default; neither has a language, so no language preference can decide it instead. Like
+    #    default-audio-track, what sounds must be the default track's tones.
+    if (Test-CaseSelected 'forced-does-not-outrank-default') {
+        $c = Invoke-PlayerCase -Name 'forced-does-not-outrank-default' -Clip 'forced.mkv'
+        $default = @($clips.clips.'forced.mkv'.audio | Where-Object default)[0]
+        Complete-Case 'forced-does-not-outrank-default' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $default.tones $seconds)
+        )
     }
 }
 finally {
