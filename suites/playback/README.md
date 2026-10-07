@@ -10,7 +10,9 @@ Invoke-Suite.ps1          the suite: deploy the player, run the cases, assert
 Run-PlayerCase.guest.ps1  target side: start the player in the console session,
                           grab a frame part-way, post menu commands and probe
                           the playlist's list control and the toolbar at given
-                          times, wait for the player to exit
+                          times, make timed HTTP requests to the player's web
+                          server (and close dialogs they raise), wait for the
+                          player to exit
 ```
 
 ## How a case works
@@ -50,6 +52,12 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
      `ReadProcessMemory`, and the toolbar is the `ToolbarWindow32` whose
      first button is `ID_LEFTSEPARATOR` -- PlaceButtons adds it before
      anything else;
+   - **web answers** -- for a case with the web interface on, timed HTTP
+     requests to `http://127.0.0.1:<port>` (the server binds IPv4 only):
+     status, elapsed ms, and the body (saved as `http-<n>.bin`). A
+     4xx/5xx is an answer; a refused connection is status 0. A case can
+     also close a dialog a web command raised (WM_CLOSE, then IDCANCEL,
+     to the dialog window) so the player can still be closed;
    - **process** -- exited by itself, exit code 0.
 
 The clips are built so that content identifies itself: four flat colour
@@ -100,6 +108,9 @@ centre the box there. The band cases only ask which colour is present.
 | `toolbar-layout-with-duplicates-is-discarded` | a saved revision-1 layout naming Stop twice is discarded: the probed toolbar has no duplicate button and holds the default buttons | #3829; a0968dc305 (#3839) |
 | `toolbar-layout-without-movable-buttons-is-kept` | a saved revision-1 layout with every movable button removed (just the separators and the volume button) is honoured: no play/pause/stop on the probed toolbar | #4220; 90d2b12d68 |
 | `toolbar-old-layout-has-no-duplicates` | a layout as 2.5.5 saved it (no ButtonLayoutRevision) does not put Play, Pause or Stop on the toolbar twice | #3829; #3839 |
+| `web-modal-command-does-not-freeze` | a `wm_command=815` (Options) POST holds the web thread for the 5 s SendMessageTimeout, so the GET after it goes out at ~8 s with Options still open and answers 200 within 3000 ms (unfixed: the thread stays stuck behind the modal, status 0); the overdue dialog and player closes follow | #4053; a77c59b537 |
+| `web-playlist-click-with-chapters` | the remote's playlist click (`wm_command=-3&index=1`) on chaptered media opens playlist entry 2: a second capture with twotracks.mkv's 1200 Hz, not a chapter jump | #4078, #4093; 4802b44e4b |
+| `web-status-json-escapes-paths` | `/status.json` parses, and its `path` field equals the real path of `json test\it's ünïcode & co.mkv` exactly | #4053; a77c59b537 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -161,9 +172,10 @@ the captured PNG, so a failure can be looked at rather than re-run.
 
 ## Not yet here
 
-Driving a running player goes only as far as posted WM_COMMAND messages
-(seek, play, change rate, reopen) and read-only probes of the playlist's
-list control and the main toolbar's buttons; anything that needs a finer
-hand waits for the `/slave` host described in `..\..\PLAN.md`. HDR cases
+Driving a running player goes as far as posted WM_COMMAND messages
+(seek, play, change rate, reopen), read-only probes of the playlist's
+list control and the main toolbar's buttons, and HTTP requests against
+the web interface; anything that needs a finer hand waits for the
+`/slave` host described in `..\..\PLAN.md`. HDR cases
 need a Windows 11 guest (the virtual monitor does HDR there) and a
 renderer that outputs HDR.

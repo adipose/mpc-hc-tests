@@ -72,6 +72,29 @@ Invoke-FFmpeg $long @(
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
 )
 
+# --- chapters.mkv: stereo.mkv's content for 12 seconds, with three chapters --
+# at 0, 4 and 8 s, written by ffmpeg from an ffmetadata file. For the web remote
+# case: a playlist click on chaptered media must open the playlist entry, not
+# jump to a chapter.
+$chapterSeconds = 12
+$chapterQuad = $quad.Replace("d=$seconds", "d=$chapterSeconds")
+$chaptersMeta = Join-Path $OutDir 'chapters.ffmetadata'
+$ffmetadata = @(
+    'FFMETADATA1',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=0',    'END=4000',  'title=one',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=4000', 'END=8000',  'title=two',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=8000', 'END=12000', 'title=three'
+)
+[IO.File]::WriteAllLines($chaptersMeta, $ffmetadata, [Text.UTF8Encoding]::new($false))
+$chapters = Join-Path $OutDir 'chapters.mkv'
+Invoke-FFmpeg $chapters @(
+    '-f', 'lavfi', '-i', (Tone 440 $chapterSeconds), '-f', 'lavfi', '-i', (Tone 880 $chapterSeconds),
+    '-f', 'ffmetadata', '-i', $chaptersMeta, '-map_chapters', '2',
+    '-filter_complex', "$chapterQuad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
 # --- third.mkv: stereo.mkv's picture with a tone of its own, 1600 Hz on ----
 # both channels, so three clips are told apart by tone: stereo.mkv 440/880,
 # twotracks.mkv (default track) 1200, third.mkv 1600. For the case that checks
@@ -290,6 +313,16 @@ $clips = [ordered]@{
             audio   = @(
                 [ordered]@{ track = 1; default = $false; forced = $true;  tones = @(600, 600) }
                 [ordered]@{ track = 2; default = $true;  forced = $false; tones = @(1200, 1200) }
+            )
+        }
+        'chapters.mkv' = [ordered]@{
+            seconds  = $chapterSeconds
+            picture  = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio    = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+            chapters = @(
+                [ordered]@{ start = 0; end = 4 }
+                [ordered]@{ start = 4; end = 8 }
+                [ordered]@{ start = 8; end = 12 }
             )
         }
         'third.mkv' = [ordered]@{

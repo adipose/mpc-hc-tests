@@ -1,7 +1,8 @@
 # Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
 # arguments, optionally captures the virtual monitor part-way through, optionally posts WM_COMMAND messages to
 # the player's window at given times, optionally probes the player's playlist list control and main toolbar at
-# given times, waits for the player to exit by itself, and kills it if it does not.
+# given times, optionally makes timed HTTP requests to the player's web server and dismisses dialogs those
+# requests raised, waits for the player to exit by itself, and kills it if it does not.
 # Writes one JSON object to -Out; the host does the asserting.
 param(
     [Parameter(Mandatory)] [string] $Exe,
@@ -33,13 +34,27 @@ param(
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
     [string] $CapturePath = '',
-    [string] $RendererFile = ''          # json of renderer settings to apply for this case, and put back after
+    [string] $RendererFile = '',         # json of renderer settings to apply for this case, and put back after
+    [string] $HttpAt = '',               # comma-separated base64 entries, each the UTF-8 of
+                                         # <sec>|<method>|<path>|<body> (body may be empty, POST bodies are
+                                         # application/x-www-form-urlencoded): at that time after start,
+                                         # request http://127.0.0.1:<HttpPort><path> (the web server binds
+                                         # IPv4 only, so never localhost) with a 5 s timeout and record
+                                         # {at, path, status, ms, length, bodyText, file} under "http" in
+                                         # the JSON; every body is saved to http-<n>.bin beside -Out.
+                                         # A 4xx/5xx is a status, not an exception; a refused connection
+                                         # is status 0.
+    [int] $HttpPort = 0,
+    [string] $CloseDialogAt = ''         # comma-separated <sec>:<window title>: at that time, find a
+                                         # top-level window of the player's process with this title (a modal
+                                         # it raised) and post it IDCANCEL, so the player can still be
+                                         # closed afterwards. Titles may not contain commas or colons.
 )
 
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o') }
 
-if ($CloseKind -eq 'SC_CLOSE' -or $PostCommands -or $ProbeAt) {
+if ($true) {   # always: Send-Close finds the player's frame by class for every close, not only these options
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
     # own path since e21c9fcfff, so both ways of closing belong under test. The posted commands are WM_COMMAND,
     # the same message a menu accelerator sends. The playlist probe sends the list control plain integer
@@ -211,6 +226,96 @@ function Get-PlaylistProbe {
     $probe
 }
 
+# One request to the player's web server. A 4xx/5xx is an answer with a status, not an exception;
+# a refused connection (or a timeout while the server is stuck) leaves the status 0. Every body is
+# written to http-<Index>.bin beside the result JSON; a text body is also quoted (first 4000 chars)
+# in the entry itself.
+function Send-WebProbe {
+    param([double] $At, [string] $Method, [string] $Path, [string] $Body, [int] $Port, [string] $OutDir, [int] $Index)
+    $entry = [ordered]@{ at = $At; path = $Path; status = 0; ms = 0; length = 0; bodyText = $null; file = $null }
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $response = $null
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port$Path")
+        $request.Method = $Method
+        $request.Timeout = 5000
+        $request.ReadWriteTimeout = 5000
+        # The answer itself is the evidence: a 301/404 from a not-yet-ready server must be
+        # recorded, not silently followed into a redirect loop.
+        $request.AllowAutoRedirect = $false
+        if ($Method -eq 'POST') {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+            $request.ContentType = 'application/x-www-form-urlencoded'
+            $request.ContentLength = $bytes.Length
+            $stream = $request.GetRequestStream()
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Close()
+        }
+        try {
+            $response = $request.GetResponse()
+        } catch [System.Net.WebException] {
+            $response = $_.Exception.Response   # an error status still carries a response
+        }
+    } catch { }
+    $entry.ms = [int] $watch.ElapsedMilliseconds
+    if ($response) {
+        $entry.status = [int] $response.StatusCode
+        $isText = $response.ContentType -match '^(text/|application/json)'
+        $memory = New-Object System.IO.MemoryStream
+        $response.GetResponseStream().CopyTo($memory)
+        $bytes = $memory.ToArray()
+        $response.Close()
+        $entry.length = $bytes.Length
+        if ($Index -gt 0) {   # index 0 is a poll probe, whose body nobody keeps
+            $entry.file = "http-$Index.bin"
+            [System.IO.File]::WriteAllBytes((Join-Path $OutDir $entry.file), $bytes)
+        }
+        if ($isText) {
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            if ($text.Length -gt 4000) { $text = $text.Substring(0, 4000) }
+            $entry.bodyText = $text
+        }
+    }
+    $entry
+}
+
+# A modal dialog the player raised (e.g. Options from a web command) belongs to the player's process
+# as a top-level window. Posting IDCANCEL is what the Cancel button does; closing it matters because a
+# modal can leave the main window's WM_CLOSE unanswered.
+function Find-ProcessWindow {
+    param([int] $ProcessId, [string] $Title = $null, [string] $Class = $null)
+    $found = [System.Collections.Generic.List[IntPtr]]::new()
+    $callback = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $procId = [uint32] 0
+        [void] [MpcTest.User32]::GetWindowThreadProcessId($hWnd, [ref] $procId)
+        if ($procId -eq $ProcessId) {
+            $text = [Text.StringBuilder]::new(256)
+            if ($Title) { [void] [MpcTest.User32]::GetWindowTextW($hWnd, $text, $text.Capacity) }
+            else { [void] [MpcTest.User32]::GetClassNameW($hWnd, $text, $text.Capacity) }
+            if ($text.ToString() -eq $(if ($Title) { $Title } else { $Class })) { $found.Add($hWnd); return $false }
+        }
+        return $true
+    }
+    [void] [MpcTest.User32]::EnumWindows($callback, [IntPtr]::Zero)
+    if ($found.Count) { $found[0] } else { [IntPtr]::Zero }
+}
+
+# Returns whether the dialog is gone afterwards. WM_CLOSE first (a property sheet's frame acts on it);
+# IDCANCEL if it is still there.
+function Close-PlayerDialog {
+    param([int] $ProcessId, [string] $Title)
+    $dlg = Find-ProcessWindow -ProcessId $ProcessId -Title $Title
+    if ($dlg -eq [IntPtr]::Zero) { return $false }
+    [void] [MpcTest.User32]::PostMessageW($dlg, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)   # WM_CLOSE
+    Start-Sleep -Milliseconds 500
+    if ((Find-ProcessWindow -ProcessId $ProcessId -Title $Title) -ne [IntPtr]::Zero) {
+        [void] [MpcTest.User32]::PostMessageW($dlg, 0x0111, [IntPtr] 2, [IntPtr]::Zero)   # WM_COMMAND, IDCANCEL
+        Start-Sleep -Milliseconds 500
+    }
+    return ((Find-ProcessWindow -ProcessId $ProcessId -Title $Title) -eq [IntPtr]::Zero)
+}
+
 function Send-Close {
     param($Process, [string] $Kind)
     if ($Kind -eq 'SC_CLOSE') {
@@ -218,7 +323,13 @@ function Send-Close {
         if ($Process.HasExited -or $Process.MainWindowHandle -eq [IntPtr]::Zero) { return $false }
         return [MpcTest.User32]::PostMessageW($Process.MainWindowHandle, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)
     }
-    return (-not $Process.HasExited) -and $Process.CloseMainWindow()
+    if ($Process.HasExited) { return $false }
+    # The player's own frame, by class: Process.MainWindowHandle is cached and, after a modal dialog, can
+    # name nothing (measured: the close after an Options dialog reached no window).
+    $main = Find-ProcessWindow -ProcessId $Process.Id -Class 'MediaPlayerClassicW'
+    if ($main -ne [IntPtr]::Zero) { return [bool] [MpcTest.User32]::PostMessageW($main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }   # WM_CLOSE
+    $Process.Refresh()
+    return $Process.CloseMainWindow()
 }
 
 # MPC Video Renderer keeps its settings in the registry rather than in the player's ini, and under
@@ -304,32 +415,55 @@ if ($SecondArgumentLine) {
     }
 }
 
-if ($PostCommands -or $ProbeAt) {
-    # Posts and probes are one time-ordered sequence; at the same second the post goes first, so a probe can
-    # observe what its command did. Delivered (for a post) means a main window existed and PostMessageW
-    # accepted the message; MFC still drops a command whose ON_UPDATE_COMMAND_UI reports it disabled, which
-    # is why cases post only once playback is underway.
+if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
+    # Posts, probes, web requests and dialog closes are one time-ordered sequence; at the same
+    # second the post goes first, so a probe can observe what its command did. Delivered (for a
+    # post) means a main window existed and PostMessageW accepted the message; MFC still drops a
+    # command whose ON_UPDATE_COMMAND_UI reports it disabled, which is why cases post only once
+    # playback is underway.
     # Events are pscustomobjects, not ordered dictionaries: in Windows PowerShell 5.1 (which this task
     # runs under) Sort-Object does not sort dictionaries by key - it leaves them in insertion order.
     $events = @()
     if ($PostCommands) {
         foreach ($entry in ($PostCommands -split ',')) {
             $parts = $entry -split ':'
-            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = [int] $parts[1]; probe = $false }
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = [int] $parts[1]; kind = 'post' }
         }
     }
     if ($ProbeAt) {
         foreach ($entry in ($ProbeAt -split ',')) {
-            $events += [pscustomobject]@{ at = [double]::Parse($entry, [Globalization.CultureInfo]::InvariantCulture); id = 0; probe = $true }
+            $events += [pscustomobject]@{ at = [double]::Parse($entry, [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'probe' }
         }
     }
+    if ($HttpAt) {
+        $httpIndex = 0
+        foreach ($encoded in ($HttpAt -split ',')) {
+            $httpIndex++
+            $parts = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) -split '\|', 4
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = $httpIndex; kind = 'http'; method = $parts[1]; path = $parts[2]; body = $parts[3] }
+        }
+    }
+    if ($CloseDialogAt) {
+        foreach ($entry in ($CloseDialogAt -split ',')) {
+            $parts = $entry -split ':', 2
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'dialog'; title = $parts[1] }
+        }
+    }
+    # At the same second: post first, then http, then dialog close, then probe (the probe sees the rest).
+    $kindOrder = @{ post = 0; http = 1; dialog = 2; probe = 3 }
     $posts = @()
     $probes = @()
-    foreach ($step in ($events | Sort-Object at, probe)) {
+    $webAnswers = @()
+    $dialogCloses = @()
+    foreach ($step in ($events | Sort-Object at, { $kindOrder[$_.kind] })) {
         $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
         if ($step.at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($step.at - $elapsed) * 1000)) }
-        if ($step.probe) {
+        if ($step.kind -eq 'probe') {
             $probes += Get-PlaylistProbe $step.at $p.Id
+        } elseif ($step.kind -eq 'http') {
+            $webAnswers += Send-WebProbe -At $step.at -Method $step.method -Path $step.path -Body $step.body -Port $HttpPort -OutDir (Split-Path $Out) -Index $step.id
+        } elseif ($step.kind -eq 'dialog') {
+            $dialogCloses += [ordered]@{ at = $step.at; title = $step.title; delivered = (Close-PlayerDialog $p.Id $step.title) }
         } else {
             $p.Refresh()
             $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
@@ -339,6 +473,8 @@ if ($PostCommands -or $ProbeAt) {
     }
     if ($PostCommands) { $result.posts = $posts }
     if ($ProbeAt) { $result.probes = $probes }
+    if ($HttpAt) { $result.http = $webAnswers }
+    if ($CloseDialogAt) { $result.dialogCloses = $dialogCloses }
 }
 
 $closeWatch = $null
