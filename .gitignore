@@ -3,4 +3,5 @@ results/
 unit/results/
 suites/*/results/
 suites/playback/media/
+suites/osd/media/
 suites/mouse/combocase/bin/

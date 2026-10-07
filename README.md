@@ -58,6 +58,9 @@ suites/
   mouse/              Real mouse input in the target's console session;
                       asserts on what the screen showed. Hover-driven
                       behaviour, which posted messages cannot test
+  osd/                The fullscreen OSD message with the docked panels up
+                      and without them must be the same size; EVR-CP as the
+                      control, MPC Video Renderer as the case (#4277)
 ```
 
 ## Unit tests
