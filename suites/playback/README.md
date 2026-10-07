@@ -61,6 +61,10 @@ centre the box there. The band cases only ask which colour is present.
 | `next-file-in-folder` | `AfterPlayback=1`: a.mkv is followed by b.mkv from the same folder, two captures with the two clips' tones | #414, #697, #1419, #2200, #2209, #2579 |
 | `default-subtitle-track` | of two ASS tracks, the one flagged default is rendered: its cyan band is in the frame, not track 1's magenta one | #1551, #2452, #2876, #3283, #3914 |
 | `external-subtitle-autoload` | `ext.ass` beside `ext.mkv` is loaded unasked and rendered (magenta band) | #1121, #1164, #1894, #3152 |
+| `mpcvr-sdr-range` | MPC Video Renderer: 8 bit BT.709 at Y 128 limited comes out at 130.4, the 16-235 expansion | |
+| `mpcvr-hdr-to-sdr-125` | 10 bit PQ 0.65 converted to SDR for a 125 nit display comes out at 233.3 | |
+| `mpcvr-hdr-to-sdr-200` | the same clip for a 200 nit display comes out at 206.7, and not at the 125 nit level | |
+| `mpcvr-hdr-to-sdr-dark` | 10 bit PQ 0.25 for a 200 nit display comes out at 35.2 | |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -68,7 +72,25 @@ argument, `-like` wildcards), e.g. `-Case default-audio-track` or
 
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
-swapped channels, so a pass means something.
+swapped channels, so a pass means something. The two PQ 0.65 cases are each
+other's control: the same clip at two display targets must come out at two
+different levels, so a stuck value cannot pass both.
+
+The renderer cases differ from the rest in three ways:
+
+- MPC Video Renderer keeps its settings in the registry, not the player's ini,
+  under the user that runs the player. `Invoke-PlayerCase -Renderer` hands them
+  to `Run-PlayerCase.guest.ps1`, which applies them as that user and puts back
+  what was there.
+- The ini pins `LastGPUCheck` and the LAV `HWAccel`. Without them MPC-HC writes
+  `UseD3D11` back to 1 on a fresh profile, and a Direct3D 9 case would quietly
+  run on Direct3D 11.
+- The clips are flat fields, 25 s long, captured at 12 s. On a guest with no
+  GPU the renderer takes several seconds to start and compiles its shaders, so
+  at 3 s the frame is still the player's logo. The expected level is worked out
+  from the clip's declaration by `Get-FieldLevel`, not read off another
+  renderer, and `New-PlaybackClips.ps1` refuses to write a clip that does not
+  decode back to the code value it was given.
 
 ## What it needs on the target
 

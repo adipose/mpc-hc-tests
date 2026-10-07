@@ -16,7 +16,8 @@ param(
     [int] $StormIntervalMs = 150,
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
-    [string] $CapturePath = ''
+    [string] $CapturePath = '',
+    [string] $RendererFile = ''          # json of renderer settings to apply for this case, and put back after
 )
 
 $ErrorActionPreference = 'Continue'
@@ -39,6 +40,25 @@ function Send-Close {
         return [MpcTest.User32]::PostMessageW($Process.MainWindowHandle, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)
     }
     return (-not $Process.HasExited) -and $Process.CloseMainWindow()
+}
+
+# MPC Video Renderer keeps its settings in the registry rather than in the player's ini, and under
+# the user that runs the player -- which is this process, not the host's session. Apply them here,
+# and put back exactly what was there, whatever happens later in the script.
+$rendererKey = 'HKCU:\Software\MPC-BE Filters\MPC Video Renderer'
+$rendererSaved = @{}
+$rendererNames = @()
+$rendererExisted = Test-Path $rendererKey
+if ($RendererFile -and (Test-Path $RendererFile)) {
+    $wanted = Get-Content $RendererFile -Raw | ConvertFrom-Json
+    if (-not $rendererExisted) { New-Item -Path $rendererKey -Force | Out-Null }
+    foreach ($p in $wanted.PSObject.Properties) {
+        $rendererNames += $p.Name
+        $was = (Get-ItemProperty -Path $rendererKey -Name $p.Name -ErrorAction SilentlyContinue).($p.Name)
+        if ($null -ne $was) { $rendererSaved[$p.Name] = $was }
+        Set-ItemProperty -Path $rendererKey -Name $p.Name -Value ([int]$p.Value) -Type DWord
+    }
+    $result.renderer = ($wanted.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' '
 }
 
 $p = Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru
@@ -126,5 +146,14 @@ if ($result.timedOut) {
 }
 
 Start-Sleep -Seconds 3      # the audio driver writes its capture from a work item after the stream closes
+
+if ($rendererNames.Count) {
+    foreach ($n in $rendererNames) {
+        if ($rendererSaved.ContainsKey($n)) { Set-ItemProperty -Path $rendererKey -Name $n -Value ([int]$rendererSaved[$n]) -Type DWord }
+        else { Remove-ItemProperty -Path $rendererKey -Name $n -ErrorAction SilentlyContinue }
+    }
+    if (-not $rendererExisted) { Remove-Item $rendererKey -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 $result.finished = (Get-Date).ToString('o')
 $result | ConvertTo-Json -Depth 4 | Set-Content $Out
