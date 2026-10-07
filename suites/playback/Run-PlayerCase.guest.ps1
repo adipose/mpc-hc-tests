@@ -1,4 +1,4 @@
-﻿# Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
+# Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
 # arguments, optionally captures the virtual monitor part-way through, waits for the player to exit by itself, and
 # kills it if it does not. Writes one JSON object to -Out; the host does the asserting.
 param(

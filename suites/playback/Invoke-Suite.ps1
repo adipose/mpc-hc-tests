@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     The playback suite: plays generated clips in the player under test and
     asserts on what reached the (virtual) speakers and the (virtual) monitor.

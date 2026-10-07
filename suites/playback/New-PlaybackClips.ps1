@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Generates the clips the playback suite plays: a few seconds each, with
     content declared here so that a test can say exactly what should come out
