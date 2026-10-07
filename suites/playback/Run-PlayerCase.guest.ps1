@@ -14,6 +14,11 @@ param(
     [string[]] $RedirectFiles = @(),     # the files they carry, in rotation (a comma-joined string is accepted too)
     [double] $StormAtSec = 2,
     [int] $StormIntervalMs = 150,
+    [string] $SecondArgumentLine = '',   # base64 of a UTF-8 command line: at SecondAtSec launch one more instance
+                                         # of the exe with it (quoting would not survive the hand-built task line);
+                                         # several, comma-separated, are launched SecondIntervalMs apart
+    [double] $SecondAtSec = 2,
+    [int] $SecondIntervalMs = 300,
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
     [string] $CapturePath = '',
@@ -95,6 +100,32 @@ if ($RedirectStorm -gt 0) {
         $exited = if ($_.proc.HasExited) { $true } else { $_.proc.WaitForExit($remainingMs) }
         @{ exited = $exited; exitCode = if ($exited) { $_.proc.ExitCode } else { $null } }
     })
+}
+
+if ($SecondArgumentLine) {
+    # One more instance of the same exe with its own command line: with AllowMultipleInstances=0 it hands the
+    # line to the running player over WM_COPYDATA and exits. What the player does with it (/add, a start
+    # position, a multi-file open) is what the case is about; how the instance exits is part of the result.
+    # Several lines arrive as one selection when they are closer together than the player's redirect threshold,
+    # which is how Explorer hands over a multi-file open: one instance per file.
+    $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
+    if ($SecondAtSec -gt $elapsed) { Start-Sleep -Milliseconds ([int](($SecondAtSec - $elapsed) * 1000)) }
+    $seconds = @()
+    foreach ($encoded in ($SecondArgumentLine -split ',')) {
+        if ($seconds.Count) { Start-Sleep -Milliseconds $SecondIntervalMs }
+        $line = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+        $inst = Start-Process -FilePath $Exe -ArgumentList $line -PassThru
+        # Open the handle now: a process that exited before anything opened its handle reports $null for ExitCode.
+        $null = $inst.Handle
+        $seconds += $inst
+    }
+    $result.secondExited = $true
+    $result.secondExitCode = 0
+    foreach ($inst in $seconds) {
+        $exited = if ($inst.HasExited) { $true } else { $inst.WaitForExit(10000) }
+        if (-not $exited) { $result.secondExited = $false; $result.secondExitCode = $null }
+        elseif ($result.secondExitCode -eq 0 -and $inst.ExitCode -ne 0) { $result.secondExitCode = $inst.ExitCode }
+    }
 }
 
 $closeWatch = $null

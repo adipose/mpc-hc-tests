@@ -67,6 +67,11 @@ centre the box there. The band cases only ask which colour is present.
 | `mpcvr-hdr-to-sdr-dark` | 10 bit PQ 0.25 for a 200 nit display comes out at 35.2 | |
 | `filters-reset-once-from-version-8` | a profile at `SettingsVersion=8` with two internal filters set to 0 comes back at version 9 with both re-enabled | a0735130e |
 | `filters-kept-off-at-version-9` | the same profile at the current version keeps both filters at 0: the reset runs once, not on every launch | a0735130e |
+| `add-keeps-playing` | a second instance adding a file with `/add` does not pause what is playing: the running clip sounds unbroken until the close at 8 s (about 7 s from the start of playback), and the second instance exits 0 | #3838; 76ee7f64f4 (regression since f82f61855e) |
+| `start-position` | `/play /close /start 12000` on a 20 s clip plays about 8 s and exits 0 | bb8bf48324 (regression since f82f61855e) |
+| `redirect-start-position` | a redirected open carrying `/start 12000` starts there: the second capture (the redirected clip) lasts about 8 s | bb8bf48324 |
+| `redirect-multi-file-order` | two redirects 300 ms apart (one selection, as Explorer sends it): the first file keeps playing first and the second plays after it: 1600 Hz, then 1200 Hz | #3991, #4168, #4171; 2ac66df928 |
+| `dub-with-add-is-one-entry` | `<video> /dub <audio> /add` adds one playlist entry: after the playing clip ends the dub sounds (300 Hz), and there is no third capture | #4224, #4232; b18fd6036a |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

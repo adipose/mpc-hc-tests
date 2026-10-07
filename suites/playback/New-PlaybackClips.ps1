@@ -72,6 +72,34 @@ Invoke-FFmpeg $long @(
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
 )
 
+# --- third.mkv: stereo.mkv's picture with a tone of its own, 1600 Hz on ----
+# both channels, so three clips are told apart by tone: stereo.mkv 440/880,
+# twotracks.mkv (default track) 1200, third.mkv 1600. For the case that checks
+# the order of a redirected multi-file open.
+$third = Join-Path $OutDir 'third.mkv'
+Invoke-FFmpeg $third @(
+    '-f', 'lavfi', '-i', (Tone 1600),
+    '-filter_complex', "$quad;[0:a]aformat=channel_layouts=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
+# --- long_silent.mkv + dub.wav: long.mkv's picture with NO audio track, and -
+# a dub to lay on it (20 s, 300 Hz both channels, 48 kHz). A video given with
+# /dub must reach the playlist as one entry whose audio is the dub.
+$longSilent = Join-Path $OutDir 'long_silent.mkv'
+Invoke-FFmpeg $longSilent @(
+    '-filter_complex', $longQuad,
+    '-map', '[v]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast'
+)
+$dub = Join-Path $OutDir 'dub.wav'
+Invoke-FFmpeg $dub @(
+    '-f', 'lavfi', '-i', (Tone 300 $longSeconds),
+    '-af', 'aformat=channel_layouts=stereo,volume=0.5',
+    '-c:a', 'pcm_s16le'
+)
+
 # --- twotracks.mkv: two audio tracks; the SECOND carries the default flag. --
 # Track 1: English, 600 Hz both channels. Track 2: German, 1200 Hz, default.
 $twotracks = Join-Path $OutDir 'twotracks.mkv'
@@ -234,6 +262,18 @@ $clips = [ordered]@{
                 [ordered]@{ track = 1; language = 'eng'; default = $false; tones = @(600, 600) }
                 [ordered]@{ track = 2; language = 'ger'; default = $true;  tones = @(1200, 1200) }
             )
+        }
+        'third.mkv' = [ordered]@{
+            picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio   = @([ordered]@{ track = 1; default = $true; tones = @(1600, 1600) })
+        }
+        'long_silent.mkv' = [ordered]@{
+            seconds = $longSeconds
+            picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+        }
+        'dub.wav' = [ordered]@{
+            seconds = $longSeconds
+            audio   = @([ordered]@{ track = 1; default = $true; tones = @(300, 300) })
         }
         'subs.mkv' = [ordered]@{
             picture   = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }

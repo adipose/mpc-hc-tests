@@ -146,7 +146,7 @@ try {
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
-    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -178,6 +178,9 @@ try {
             [string[]] $RedirectFiles = @(),   # the files they carry, in rotation
             [double] $StormAtSec = 2,
             [int] $StormIntervalMs = 150,
+            [string[]] $SecondArgumentLine = @(), # at SecondAtSec the guest launches one more instance per command line,
+                                               # 300 ms apart: close enough to arrive as one selection
+            [double] $SecondAtSec = 2,
             [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
@@ -199,10 +202,13 @@ try {
         $rendererJson = if ($Renderer.Count) { $Renderer | ConvertTo-Json -Compress } else { '' }
 
         $argumentLine = ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim()
+        # Each later command line carries quoted paths, and no quoting survives the hand-built task line: each goes
+        # over as base64 of the UTF-8 string (nothing but [A-Za-z0-9+/=]), comma-joined, and the guest decodes them.
+        $secondEncoded = (@($SecondArgumentLine | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -238,6 +244,10 @@ try {
             if ($redirectStorm -gt 0) {
                 $taskArgs += " -RedirectStorm $redirectStorm -StormAtSec $stormAtSec -StormIntervalMs $stormIntervalMs"
                 if ($redirectFiles) { $taskArgs += (' -RedirectFiles "{0}"' -f $redirectFiles) }
+            }
+            if ($secondEncoded) {
+                $taskArgs += " -SecondArgumentLine $secondEncoded"
+                if ($secondAtSec -ne 2) { $taskArgs += " -SecondAtSec $secondAtSec" }
             }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
@@ -281,7 +291,7 @@ try {
                 Sort-Object LastWriteTime | Select-Object FullName, Length
         })
         for ($i = 0; $i -lt $hits.Count; $i++) {
-            $local = Join-Path $OutDir ('{0}.{1}.wav' -f $Name, $i + 1)
+            $local = Join-Path $OutDir ('{0}.{1}.wav' -f $Name, ($i + 1))
             Copy-Item -FromSession $session $hits[$i].FullName $local -Force
             $wavs += $local
         }
@@ -709,6 +719,91 @@ try {
             $(if ($null -eq $c.Ini) { 'no mpc-hc64.ini came back from the guest' }
               elseif ($src -ne '0' -or $tra -ne '0') { "filters set to 0 came back SRC_FLV=$src TRA_MPEG2=$tra, both expected to stay 0" })
         )
+    }
+
+    # 16-20. The command line, and what a second instance's command line does to the running player. With
+    #    AllowMultipleInstances=0 the second instance hands its line to the running player over WM_COPYDATA
+    #    and exits; the guest runner records its exit as secondExited/secondExitCode, and the player's side
+    #    shows in the audio captures (one per file played, oldest first).
+
+    # 16. "Add to MPC-HC playlist" / /add must not pause what is playing: clsid2/mpc-hc@76ee7f64f4 removed the
+    #    blanket pause f82f61855e had put in front of every redirected open (#3838). A second instance adds
+    #    stereo.mkv at 2 s; the 20 s clip, closed at 8 s, must sound without a break until the close: about 7 s,
+    #    since playback starts about a second after launch on the guest. Paused at 2 s it sounds for about 1.4
+    #    (measured on 2.6.4).
+    if (Test-CaseSelected 'add-keeps-playing') {
+        $c = Invoke-PlayerCase -Name 'add-keeps-playing' -Clip 'long.mkv' -Switches '/play' -CloseAtSec 8 `
+            -SecondArgumentLine '"C:\mpc-test\media\stereo.mkv" /add'
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.secondExited) { $problems += 'the /add instance did not exit within 10 s' }
+        elseif ($c.Run.secondExitCode -ne 0) { $problems += "the /add instance exited with code $($c.Run.secondExitCode)" }
+        if ($c.Wavs.Count -ne 1) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 1 (the running clip's)" }
+        else { $problems += (Test-Audio $c.Wavs[0] $long.audio[0].tones 7 1.0) }
+        Complete-Case 'add-keeps-playing' $problems
+    }
+
+    # 17. /start: clsid2/mpc-hc@bb8bf48324 "Fix regression with setting initial startpos" -- f82f61855e had
+    #    dropped it. A 20 s clip started at 12 s plays for about 8, not 20.
+    if (Test-CaseSelected 'start-position') {
+        $c = Invoke-PlayerCase -Name 'start-position' -Clip 'long.mkv' -Switches '/play /close /start 12000'
+        Complete-Case 'start-position' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $long.audio[0].tones 8 1.0)
+        )
+    }
+
+    # 18. The same /start through a redirect (same commits, the ProcessCommandLine path): the second instance
+    #    hands "long.mkv /start 12000" to the running player, which replaces stereo.mkv and must start long.mkv
+    #    at 12 s. Two captures, oldest first: stereo.mkv's ~2 s, then long.mkv's ~8 s.
+    if (Test-CaseSelected 'redirect-start-position') {
+        $c = Invoke-PlayerCase -Name 'redirect-start-position' -Clip 'stereo.mkv' -Switches '/play' -CloseAtSec 13 `
+            -SecondArgumentLine '"C:\mpc-test\media\long.mkv" /start 12000'
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.secondExited) { $problems += 'the redirecting instance did not exit within 10 s' }
+        elseif ($c.Run.secondExitCode -ne 0) { $problems += "the redirecting instance exited with code $($c.Run.secondExitCode)" }
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)" }
+        else { $problems += (Test-Audio $c.Wavs[1] $long.audio[0].tones 8 1.0) }
+        Complete-Case 'redirect-start-position' $problems
+    }
+
+    # 19. A redirected multi-file open as Explorer makes it: one instance per file, close together.
+    #    clsid2/mpc-hc@2ac66df928 (#4171, of #3991 and #4168). The first redirect, third.mkv, replaces the
+    #    playlist and starts playing; the second, folder\b.mkv 300 ms later, is within the redirect threshold
+    #    (1000 ms), so it is the same selection: it is appended and the selection sorted by path. The fix starts
+    #    that sort at index 1, under the playing file. Sorting from 0 moved "folder\b.mkv" in front of
+    #    "third.mkv", which was playing at the end of the list with nothing after it, so b.mkv never played.
+    #    LoopMode=1 plays the next playlist entry (AfterPlayback=1 is next file in folder, which
+    #    DoAfterPlaybackEvent ignores once the playlist holds two entries). Three captures: stereo.mkv's 2 s,
+    #    third.mkv, then b.mkv; on the unfixed player playback stops after third.mkv.
+    if (Test-CaseSelected 'redirect-multi-file-order') {
+        $c = Invoke-PlayerCase -Name 'redirect-multi-file-order' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ LoopMode = 1 } -CloseAtSec 14 `
+            -SecondArgumentLine '"C:\mpc-test\media\third.mkv"', '"C:\mpc-test\media\folder\b.mkv"'
+        $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]     # folder\b.mkv is a copy of twotracks.mkv
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.secondExited) { $problems += 'a redirecting instance did not exit within 10 s' }
+        elseif ($c.Run.secondExitCode -ne 0) { $problems += "a redirecting instance exited with code $($c.Run.secondExitCode)" }
+        if ($c.Wavs.Count -ne 3) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 3 (stereo.mkv, then third.mkv, then folder\b.mkv)" }
+        else {
+            $problems += (Test-Audio $c.Wavs[1] $clips.clips.'third.mkv'.audio[0].tones $seconds 1.0)
+            $problems += (Test-Audio $c.Wavs[2] $second.tones $seconds 1.0)
+        }
+        Complete-Case 'redirect-multi-file-order' $problems
+    }
+
+    # 20. A video given with /dub and /add is one playlist entry: clsid2/mpc-hc@b18fd6036a (#4232, of #4224),
+    #    which made the ADD branch append video + dub together like the open path always had. The second
+    #    instance adds long_silent.mkv with dub.wav; with LoopMode=1 the entry follows stereo.mkv, and what
+    #    sounds is the dub's 300 Hz over the video -- not silence (the video alone) and not a third capture
+    #    (the dub as an entry of its own). The close covers stereo.mkv's end plus a few seconds of the dub.
+    if (Test-CaseSelected 'dub-with-add-is-one-entry') {
+        $c = Invoke-PlayerCase -Name 'dub-with-add-is-one-entry' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ LoopMode = 1 } -CloseAtSec 9 `
+            -SecondArgumentLine '"C:\mpc-test\media\long_silent.mkv" /dub "C:\mpc-test\media\dub.wav" /add'
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.secondExited) { $problems += 'the /add instance did not exit within 10 s' }
+        elseif ($c.Run.secondExitCode -ne 0) { $problems += "the /add instance exited with code $($c.Run.secondExitCode)" }
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (stereo.mkv, then the video with its dub)" }
+        else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'dub.wav'.audio[0].tones 5 1.5) }
+        Complete-Case 'dub-with-add-is-one-entry' $problems
     }
 }
 finally {
