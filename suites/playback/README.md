@@ -99,7 +99,7 @@ centre the box there. The band cases only ask which colour is present.
 | `playlist-no-horizontal-scrollbar` | a 30-entry playlist restored at startup (`default.mpcpl`, panel shown, no file on the command line): vertical scrollbar present, no horizontal one | #3972; fbcb10020f (#3988) |
 | `toolbar-layout-with-duplicates-is-discarded` | a saved revision-1 layout naming Stop twice is discarded: the probed toolbar has no duplicate button and holds the default buttons | #3829; a0968dc305 (#3839) |
 | `toolbar-layout-without-movable-buttons-is-kept` | a saved revision-1 layout with every movable button removed (just the separators and the volume button) is honoured: no play/pause/stop on the probed toolbar | #4220; 90d2b12d68 |
-| `toolbar-old-layout-has-no-duplicates` | a layout as 2.5.5 saved it (no ButtonLayoutRevision) does not put Play, Pause or Stop on the toolbar twice | #3829; #3839 |
+| `toolbar-old-layout-has-no-duplicates` | a layout as 2.5.5 saved it (no ButtonLayoutRevision) does not put Play, Pause or Stop on the toolbar twice, and loads in its saved order rather than being replaced by the defaults | #3829; #3839; patch759 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
