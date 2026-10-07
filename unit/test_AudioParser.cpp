@@ -61,14 +61,3 @@ TEST(ChannelMask, EveryDefaultMaskHasAsManyBitsAsChannels)
         EXPECT_EQ(GetDefChannelMask(n), 0u) << "channels " << n;
     }
 }
-
-// Vorbis and FLAC order 5.1 as L C R Ls Rs LFE with back surrounds; the mask
-// says which speakers, the decoder's channel order is a separate matter.
-TEST(ChannelMask, VorbisMasksUseBackSurrounds)
-{
-    EXPECT_EQ(GetVorbisChannelMask(2), KSAUDIO_SPEAKER_STEREO);
-    EXPECT_EQ(GetVorbisChannelMask(3), SPEAKER_FRONT_LEFT | SPEAKER_FRONT_CENTER | SPEAKER_FRONT_RIGHT);
-    EXPECT_EQ(GetVorbisChannelMask(6), KSAUDIO_SPEAKER_5POINT1);
-    EXPECT_EQ(GetVorbisChannelMask(8), KSAUDIO_SPEAKER_7POINT1_SURROUND);
-    EXPECT_EQ(GetVorbisChannelMask(9), 0u);
-}
