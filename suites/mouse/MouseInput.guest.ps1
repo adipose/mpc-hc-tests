@@ -31,8 +31,16 @@ public class MouseRig {
   }
   // 40 bytes on x64. SendInput rejects the call outright if the size is wrong, and moves nothing.
   [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; }
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
+    public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo;
+  }
+  // The keyboard arm of the INPUT union is smaller than the mouse arm, but SendInput still wants
+  // sizeof(INPUT), so the size is pinned to the same 40 bytes.
+  [StructLayout(LayoutKind.Sequential, Size=40)] public struct KEYINPUT { public uint type; public KEYBDINPUT ki; }
 
   [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  [DllImport("user32.dll")] public static extern uint SendInput(uint n, KEYINPUT[] inputs, int size);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint vk, uint mapType);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -84,8 +92,14 @@ public class MouseRig {
     GUITHREADINFO g = new GUITHREADINFO(); g.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
     return GetGUIThreadInfo(tid, ref g) ? g.hwndCapture : IntPtr.Zero;
   }
+  // Which window holds the keyboard focus on the thread that owns h.
+  public static IntPtr FocusOf(IntPtr h) {
+    uint pid; uint tid = GetWindowThreadProcessId(h, out pid);
+    GUITHREADINFO g = new GUITHREADINFO(); g.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    return GetGUIThreadInfo(tid, ref g) ? g.hwndFocus : IntPtr.Zero;
+  }
 
-  const uint MOVE = 0x0001, LDOWN = 0x0002, LUP = 0x0004, ABSOLUTE = 0x8000;
+  const uint MOVE = 0x0001, LDOWN = 0x0002, LUP = 0x0004, RDOWN = 0x0008, RUP = 0x0010, ABSOLUTE = 0x8000;
   static INPUT Ev(uint flags, int x, int y) {
     INPUT i = new INPUT(); i.type = 0;
     i.mi.dwFlags = flags;
@@ -99,6 +113,14 @@ public class MouseRig {
   static uint Send(List<INPUT> l) { INPUT[] a = l.ToArray(); return SendInput((uint)a.Length, a, Marshal.SizeOf(typeof(INPUT))); }
   public static uint MoveTo(int x, int y) { List<INPUT> l = new List<INPUT>(); l.Add(Ev(MOVE | ABSOLUTE, x, y)); return Send(l); }
   public static uint Click() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(LDOWN, 0, 0)); l.Add(Ev(LUP, 0, 0)); return Send(l); }
+  public static uint ClickRight() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(RDOWN, 0, 0)); l.Add(Ev(RUP, 0, 0)); return Send(l); }
+  // One real key press (down, up) with the scan code the layout would produce, as a hand would type it.
+  public static uint KeyPress(ushort vk) {
+    KEYINPUT d = new KEYINPUT(); d.type = 1; d.ki.wVk = vk; d.ki.wScan = (ushort)MapVirtualKey(vk, 0);
+    KEYINPUT u = d; u.ki.dwFlags = 0x0002;   // KEYEVENTF_KEYUP
+    KEYINPUT[] a = new KEYINPUT[] { d, u };
+    return SendInput(2, a, Marshal.SizeOf(typeof(KEYINPUT)));
+  }
   // The click and the move after it injected in one call, so nothing can run in between.
   public static uint ClickThenMove(int x, int y) {
     List<INPUT> l = new List<INPUT>(); l.Add(Ev(LDOWN, 0, 0)); l.Add(Ev(LUP, 0, 0)); l.Add(Ev(MOVE | ABSOLUTE, x, y)); return Send(l);

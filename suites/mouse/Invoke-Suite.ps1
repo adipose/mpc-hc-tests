@@ -14,6 +14,12 @@
     pointer already over an item, the closed part of the combo must still show the selected item; closing
     without a pick must leave the selection alone; clicking an item must select it.
 
+    Two more cases drive the playlist (Run-PlaylistInputCase.guest.ps1): typing a name's first letters
+    must move the selection to it without skipping the item the search starts from (#3844), and a click on
+    the time column of the selected entry must not open an editor holding the time (#3885). A fourth case
+    (Run-KeysEditCase.guest.ps1) double-clicks a key entry's hotkey cell in Options > Player > Keys, which
+    must open the in-place hotkey editor (#3853).
+
     Two control cases run first, against combocase.exe, a small program with no player code in it:
 
       control-plain-windows-combo    a plain comctl32 combo never shows the hovered item, which is what
@@ -36,7 +42,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -75,6 +81,9 @@ function Get-ResourceId {
 }
 $idOptions      = Get-ResourceId 'ID_VIEW_OPTIONS' 815
 $idThemePage    = Get-ResourceId 'IDD_PPAGETHEME' 10038
+$idKeysPage     = Get-ResourceId 'IDD_PPAGEACCELTBL' 10032
+$idKeysList     = Get-ResourceId 'IDC_LIST1' 11160               # the keys list on the Keys page
+$idWinHotkey    = Get-ResourceId 'IDC_WINHOTKEY1' 11070          # the in-place hotkey editor
 $idFontCombo    = Get-ResourceId 'IDC_COMBO5' 11004           # OSD font: over a hundred items
 $idSeekbarCombo = Get-ResourceId 'IDC_TIMEONSEEKBAR' 22100    # three items
 
@@ -90,6 +99,22 @@ if (-not $playerDir) { throw 'No player build: pass -PlayerBinary or build this 
 
 $combocase = & (Join-Path $PSScriptRoot 'combocase\Build-ComboCase.ps1')
 
+# Six short clips for the playlist cases, named so type-to-find has something to find: alpha, bravo,
+# charlie, delta, doge, echo. doge is the second d-name: the type-ahead assertion turns on the search
+# reaching delta rather than skipping past it. One video-only 4 s clip is generated once (gitignored
+# media\) and copied under each name on the guest; video-only because a guest need not have an audio
+# device at all.
+$plClip = Join-Path $PSScriptRoot 'media\pl-clip.mkv'
+if (-not (Test-Path $plClip)) {
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if ($ffmpeg) {
+        New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot 'media') | Out-Null
+        & $ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:s=320x180:r=30:d=4' -c:v libx264 -pix_fmt yuv420p -preset veryfast $plClip
+        if ($LASTEXITCODE -ne 0) { Remove-Item $plClip -Force -ErrorAction SilentlyContinue }
+    }
+}
+$havePlaylistMedia = Test-Path $plClip
+
 # --- target -------------------------------------------------------------------
 
 . $transport
@@ -100,13 +125,24 @@ try {
     $consoleUser = if ($cfg.GuestConsoleUser) { $cfg.GuestConsoleUser } else { ("$console" -split '\\')[-1] }
     if (-not $consoleUser) { throw 'Nobody is logged on at the guest console; real mouse input needs a desktop.' }
 
-    # Deploy: the two guest scripts, the control program, and the player (the Options dialog needs the exe and
-    # the icon library, nothing else).
+    # Deploy: the guest scripts, the control program, and the player. The combo cases only open the
+    # Options dialog (exe and icon library), but the playlist cases really play short clips, so the stage
+    # gets what playback needs: LAV Filters to decode, and D3DX9_43.dll or EVR-CP stops on a modal
+    # "missing d3dx9_43.dll" box on a clean guest (the installer ships it from distrib\x64, two levels
+    # above bin\mpc-hc_x64).
     $stage = Join-Path $OutDir 'player-stage'
     if (Test-Path $stage) { Get-ChildItem $stage -Recurse -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item (Join-Path $playerDir 'mpc-hc64.exe') $stage
     if (Test-Path (Join-Path $playerDir 'mpciconlib.dll')) { Copy-Item (Join-Path $playerDir 'mpciconlib.dll') $stage }
+    $lavDir = Join-Path $playerDir 'LAVFilters64'
+    $haveLav = Test-Path (Join-Path $lavDir 'LAVSplitter.ax')
+    if ($haveLav) {
+        New-Item -ItemType Directory -Force (Join-Path $stage 'LAVFilters64') | Out-Null
+        Get-ChildItem $lavDir -File | Where-Object { $_.Extension -in '.ax', '.dll', '.manifest' } | Copy-Item -Destination (Join-Path $stage 'LAVFilters64')
+    }
+    $d3dx = @((Join-Path $playerDir 'D3DX9_43.dll'), (Join-Path $playerDir '..\..\distrib\x64\D3DX9_43.dll')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($d3dx) { Copy-Item $d3dx (Join-Path $stage 'D3DX9_43.dll') }
     $zip = Join-Path $OutDir 'player.zip'
     if (Test-Path $zip) { [IO.File]::Delete($zip) }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
@@ -116,13 +152,23 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
         Expand-Archive 'C:\mpc-test\mouse\player.zip' 'C:\mpc-test\mouse\player' -Force
-        # The case runs as the console user, who has to be able to write its results here.
+        # The case runs as the console user, who has to be able to write its results here. The grant is
+        # inheritable, so the media copied in below picks it up too.
         & icacls 'C:\mpc-test\mouse' /grant 'Users:(OI)(CI)M' /T | Out-Null
+    }
+    if ($havePlaylistMedia) {
+        Copy-Item -ToSession $session $plClip 'C:\mpc-test\mouse\pl-clip.mkv' -Force
+        Invoke-Command -Session $session {
+            $pl = 'C:\mpc-test\mouse\media\pl'
+            if (Test-Path $pl) { Remove-Item $pl -Recurse -Force }
+            New-Item -ItemType Directory $pl | Out-Null
+            foreach ($n in 'alpha', 'bravo', 'charlie', 'delta', 'doge', 'echo') { Copy-Item 'C:\mpc-test\mouse\pl-clip.mkv' "$pl\$n.mkv" }
+        }
     }
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\mouse\player\mpc-hc64.exe').VersionInfo.ProductVersion }
     Note Gray "player under test: $version from $playerDir"
@@ -182,7 +228,89 @@ try {
         [pscustomobject]@{ Run = $run; Dir = $local }
     }
 
-    # --- evidence ---------------------------------------------------------------
+    # The playlist job: one launch of the player with the six clips playing, Run-PlaylistInputCase driving
+    # real mouse and keyboard input at the playlist. Same scheduled-task shape as the combo job.
+    function Invoke-PlaylistJob {
+        param([string] $Name, [string] $ArgumentLine, [string] $IniText)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $job = @{ Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = $ArgumentLine; OutDir = $guestOut } | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            # A command-line open would replace a restored playlist, but do not leave one around either way.
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-PlaylistInputCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(240)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # The Keys job: one launch of the player with no media, Options opened at the Keys page,
+    # Run-KeysEditCase driving a real double-click at the keys list. Same scheduled-task shape as the
+    # playlist job.
+    function Invoke-KeysJob {
+        param([string] $Name, [string] $IniText)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $job = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = ''; OutDir = $guestOut
+            PostCommand = $idOptions; DialogTitle = 'Options'; ListId = $idKeysList
+        } | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            # A command-line open would replace a restored playlist, but do not leave one around either way.
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-KeysEditCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(240)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
 
     Add-Type -AssemblyName System.Drawing
 
@@ -254,6 +382,78 @@ try {
         $problems
     }
 
+    # Shared gate for the playlist cases: a run only means something if the list was found holding the
+    # six clips, alpha really was playing (the title names it), and the list really had keyboard focus
+    # when the driving started.
+    function Test-PlaylistBase {
+        param($Job)
+        $run = $Job.Run
+        if (-not $run.list -or -not $run.list.found) { return @('the playlist list control was not found') }
+        $problems = @()
+        if ($run.list.count -ne 6) { $problems += "the playlist holds $($run.list.count) entries, expected 6" }
+        if (-not $run.list.visible) { $problems += 'the playlist was not shown at start' }
+        if ($run.list.titleAtStart -notlike '*alpha*') { $problems += "alpha.mkv never played: the title is '$($run.list.titleAtStart)'" }
+        if ($problems.Count) { return $problems }
+        if (-not $run.setup.foregroundIsPlayer) { $problems += 'the player was not the foreground window when input started' }
+        if (-not $run.setup.focusIsList) { $problems += 'the playlist list did not have keyboard focus after the setup clicks' }
+        $problems
+    }
+
+    function Test-PlaylistTypeToFind {
+        param($Job)
+        $problems = @(Test-PlaylistBase $Job)
+        if ($problems.Count) { return $problems }
+        $b = $Job.Run.caseA
+        if (-not $b) { return $problems + 'the guest run ended before the type-to-find steps' }
+        if ($b.selAlpha -ne 0) { $problems += "the click on alpha left entry $($b.selAlpha) selected, expected 0" }
+        if ($b.selAfterD1 -ne 3) { $problems += "typing 'd' with alpha selected left entry $($b.selAfterD1) selected, expected 3 (delta)" }
+        if ($b.selCharlie -ne 2) { $problems += "the click on charlie left entry $($b.selCharlie) selected, expected 2" }
+        # The keystroke that tells c215310313 from the unfixed `idx > startidx`: charlie selected (row 2),
+        # so comctl starts the search at row 3, which is delta and itself matches. The fixed handler
+        # returns it; the unfixed one skips past it and lands on doge (row 4).
+        if ($b.selAfterD2 -ne 3) { $problems += "typing 'd' with charlie selected left entry $($b.selAfterD2) selected, expected 3 (delta): the search skipped the item it started from" }
+        $problems
+    }
+
+    function Test-PlaylistTimeColumn {
+        param($Job)
+        $problems = @(Test-PlaylistBase $Job)
+        if ($problems.Count) { return $problems }
+        $cc = $Job.Run.caseB
+        if (-not $cc) { return $problems + 'the guest run ended before the time-column steps' }
+        if (-not $cc.timeTextRow0) { $problems += "the time column never showed the played entry's duration" }
+        if ($cc.selBravo -ne 1) { $problems += "the click on bravo left entry $($cc.selBravo) selected, expected 1" }
+        # A click on the selected entry may start renaming it; what #3885 reported is the editor taking
+        # the time cell's text ("it copies time there").
+        # Measured on 2.7.1.16: the editor opens empty on an entry with no duration yet; develop opens it on
+        # the name.
+        if ($cc.editSeenTime -and "$($cc.editTextTime)" -ne "$($cc.nameRow1)") {
+            $problems += "a click on the time column opened an editor holding '$($cc.editTextTime)', not the entry's name '$($cc.nameRow1)' (#3885 item 1)"
+        }
+        $problems
+    }
+
+    function Test-KeysEdit {
+        param($Job)
+        $run = $Job.Run
+        if (-not $run.list -or -not $run.list.found) { return @('the Keys page list control was not found') }
+        $problems = @()
+        if ($run.list.count -lt 3) { $problems += "the Keys list holds $($run.list.count) entries, expected many" }
+        if ($problems.Count) { return $problems }
+        if (-not $run.setup.foregroundIsDialog) { $problems += 'the Options dialog was not the foreground window when input started' }
+        if (-not $run.setup.focusIsList) { $problems += 'the Keys list did not have keyboard focus after the setup click' }
+        if ($problems.Count) { return $problems }
+        $k = $run.caseK
+        if (-not $k) { return $problems + 'the guest run ended before the double-click step' }
+        if ($k.selectedBeforeDbl -ne 1) { $problems += "the click on the key cell left row $($k.selectedBeforeDbl) selected, expected 1" }
+        # The unfixed build arms a GetDoubleClickTime() edit timer on the first click and the second click
+        # of the double-click (WM_LBUTTONDBLCLK) kills it before it fires; the fixed build's 1 ms timer
+        # fires on that first click. So the editor is the fix, seen from outside.
+        if (-not $k.editSeen) { $problems += 'no in-place editor (an Edit child of the list) appeared within 1 s of the double-click (#3853)' }
+        elseif ($k.editId -ne $idWinHotkey) { $problems += "the in-place editor's control id is $($k.editId), expected $idWinHotkey (IDC_WINHOTKEY1)" }
+        $problems
+    }
+
     # --- cases ------------------------------------------------------------------
 
     # 1. The controls. 101 is a plain comctl32 combo; 105 is the same combo, invalidated on mouse-leave.
@@ -278,6 +478,31 @@ try {
         Complete-Case "combo-hover-keeps-selected-item-$($theme.Name)" (Test-ComboHover $c $idFontCombo, $idSeekbarCombo)
         Complete-Case "combo-click-selects-item-$($theme.Name)" (Test-ComboPick $c $idFontCombo, $idSeekbarCombo)
     }
+
+    # 3-4. The playlist under real input. One job drives both cases in one player instance: type-to-find
+    #    (54b5aaa66b, c215310313; #3844) and a click on the time column that must not open an in-place
+    #    editor holding the time (419dadc920; #3885 item 1). LoopMode=0 and AfterPlayback=0 so nothing
+    #    advances by itself. The guest script's header has the reasoning for each assertion.
+    if ($havePlaylistMedia -and $haveLav) {
+        $plIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nAllowMultipleInstances=0`r`nLoop=0`r`nLoopMode=0`r`nAfterPlayback=0`r`nShowOSD=0`r`n`r`n[ToolBars\Playlist]`r`nVisible=1`r`n"
+        $argLine = (@('alpha', 'bravo', 'charlie', 'delta', 'doge', 'echo') | ForEach-Object { '"C:\mpc-test\mouse\media\pl\{0}.mkv"' -f $_ }) -join ' '
+        $c = Invoke-PlaylistJob -Name 'playlist-input' -ArgumentLine "$argLine /play" -IniText $plIni
+        Complete-Case 'playlist-type-to-find' (Test-PlaylistTypeToFind $c)
+        Complete-Case 'playlist-click-time-column-no-edit' (Test-PlaylistTimeColumn $c)
+    } else {
+        $skipped += 2
+        $why = @()
+        if (-not $havePlaylistMedia) { $why += 'no media\pl-clip.mkv and no ffmpeg on PATH to make one' }
+        if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
+        Note Yellow "playlist cases not run: $($why -join '; ')"
+    }
+
+    # 5. The Keys page of Options: a double-click on a key entry's hotkey cell must open the in-place
+    #    hotkey editor (#3853, f17f348494). It plays nothing, so it runs even when the playlist cases are
+    #    skipped, in its own player instance.
+    $keysIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idKeysPage`r`n"
+    $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
+    Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c)
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

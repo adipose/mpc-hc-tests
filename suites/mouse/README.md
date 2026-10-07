@@ -13,7 +13,10 @@ framework can reach.
 
 It needs a target with someone logged on at the console, and, for the two
 control cases, a Visual Studio C++ toolset on the host to build
-`combocase.exe` with. No drivers, no media.
+`combocase.exe` with. No drivers. The playlist cases play short clips, which
+the suite synthesises on the host with ffmpeg (one 4 s video-only clip,
+copied on the guest under the six names the cases need), and they need LAV
+Filters and D3DX9_43.dll beside the player build so the clips really open.
 
 ## Why real input
 
@@ -44,6 +47,19 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `control-harness-detects-echo` | the same combo, invalidated on mouse-leave | the face does change: the harness can see the defect |
 | `combo-hover-keeps-selected-item-<theme>` | the OSD font and "Time on seekbar" combos on the Theme options page | as the first control; and closing without a pick leaves the selection alone |
 | `combo-click-selects-item-<theme>` | the same two combos | clicking a list item selects that item |
+| `playlist-type-to-find` | typing a name's first letter with the selection just before two entries that match it | the selection lands on the entry the search starts from, not past it (#3844) |
+| `playlist-click-time-column-no-edit` | a click on an entry's time column | the editor that may open holds the entry's name, never the time cell's text (#3885 item 1) |
+| `keys-double-click-edits` | a real double-click on a key entry's hotkey cell in Options > Player > Keys | the in-place hotkey editor opens within 1 s (#3853) |
+
+The playlist cases run in one player instance, driven by
+`Run-PlaylistInputCase.guest.ps1`, which types with keyboard `SendInput` as
+well as clicking. The list is read from outside the player (selection via
+`LVM_GETNEXTITEM`, rows via `LVM_GETITEMRECT` through memory allocated in the
+player process) and an in-place editor is watched for as an `Edit` child of
+the list. The keys case gets its own player instance
+(`Run-KeysEditCase.guest.ps1`), plays no media, and opens Options at the Keys
+page with `LastUsedPage`, the way the combo cases open the Theme page; it
+reads the list the same way.
 
 Both themes run, because the defect behind #4276 was in neither theme's
 painting but in an `Invalidate()` the two share.
