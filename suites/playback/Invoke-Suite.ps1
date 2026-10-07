@@ -113,13 +113,26 @@ try {
     $consoleUser = if ($cfg.GuestConsoleUser) { $cfg.GuestConsoleUser } else { ($devices.Console -split '\\')[-1] }
     if (-not $consoleUser) { throw 'Nobody is logged on at the guest console; the player needs a desktop.' }
 
-    # Deploy the player as one archive: exe, icon library, LAV Filters. No symbols, no import libraries.
+    # Deploy the player as one archive: exe, icon library, LAV Filters, MPC Video Renderer and D3DX9.
+    # No symbols, no import libraries.
     $stage = Join-Path $OutDir 'player-stage'
     if (Test-Path $stage) { Get-ChildItem $stage -Recurse -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
     New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'LAVFilters64') | Out-Null
     Copy-Item (Join-Path $playerDir 'mpc-hc64.exe') $stage
     foreach ($f in 'mpciconlib.dll') { if (Test-Path (Join-Path $playerDir $f)) { Copy-Item (Join-Path $playerDir $f) $stage } }
     Get-ChildItem (Join-Path $playerDir 'LAVFilters64') -File | Where-Object { $_.Extension -in '.ax', '.dll', '.manifest' } | Copy-Item -Destination (Join-Path $stage 'LAVFilters64')
+    # The installer puts MPC Video Renderer in MPCVR\ beside the exe, which is where the player loads it from.
+    $mpcvrDir = Join-Path $playerDir 'MPCVR'
+    if (Test-Path $mpcvrDir) {
+        New-Item -ItemType Directory -Force (Join-Path $stage 'MPCVR') | Out-Null
+        Get-ChildItem $mpcvrDir -File -Filter '*.ax' | Copy-Item -Destination (Join-Path $stage 'MPCVR')
+    }
+    # EVR-CP, the default renderer, needs D3DX9_43.dll. A clean Windows has none and the player stops on a
+    # modal "missing d3dx9_43.dll" box, so every case runs into its timeout. The installer ships it from
+    # distrib\x64; a build tree has it only there, two levels above bin\mpc-hc_x64.
+    $d3dx = @((Join-Path $playerDir 'D3DX9_43.dll'), (Join-Path $playerDir '..\..\distrib\x64\D3DX9_43.dll')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($d3dx) { Copy-Item $d3dx (Join-Path $stage 'D3DX9_43.dll') }
+    else { Note Yellow "no D3DX9_43.dll beside the player or in its distrib\x64; EVR-CP will fail to load on a clean guest" }
     $zip = Join-Path $OutDir 'player.zip'
     if (Test-Path $zip) { [IO.File]::Delete($zip) }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
@@ -155,7 +168,9 @@ try {
             [string] $PlugModes = '',          # non-empty: plug the virtual monitor with these modes for the case
             [double] $CaptureAtSec = 0,
             [double] $CloseAtSec = 0,          # non-zero: close the player's window at this time instead of /close
-            [switch] $KeepProfile              # keep the history file of the previous case: this case is its second run
+            [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
+            [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
+            [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
         $guestOut = "C:\mpc-test\out\$tag.json"
@@ -167,10 +182,15 @@ try {
         $ini = [ordered]@{ UpdaterAutoCheck = 0; KeepHistory = 0; RememberFilePos = 0; Loop = 0; AllowMultipleInstances = 0; LogoFile = ''; ShowOSD = 0 }
         foreach ($k in $Settings.Keys) { $ini[$k] = $Settings[$k] }
         $iniText = "[Settings]`r`n" + (($ini.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
+        foreach ($section in $IniSections.Keys) {
+            $body = $IniSections[$section]
+            $iniText += "`r`n[$section]`r`n" + (($body.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
+        }
+        $rendererJson = if ($Renderer.Count) { $Renderer | ConvertTo-Json -Compress } else { '' }
 
         $argumentLine = ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim()
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, [bool]$KeepProfile, $consoleUser {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, [bool]$KeepProfile, $consoleUser, $rendererJson {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $rendererJson)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -181,6 +201,11 @@ try {
                 Where-Object { -not ($keepProfile -and $_.Name -like '*.history.ini') } |
                 ForEach-Object { [IO.File]::Delete($_.FullName) }
             [IO.File]::WriteAllText('C:\mpc-test\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            # The renderer's settings go to the guest as a file: the runner applies them as the console
+            # user, whose hive is the one the player reads, and puts them back when the case ends.
+            $rendererFile = 'C:\mpc-test\renderer.json'
+            Remove-Item $rendererFile -ErrorAction SilentlyContinue
+            if ($rendererJson) { [IO.File]::WriteAllText($rendererFile, $rendererJson) }
 
             $plug = $null
             if ($plugModes) {
@@ -191,7 +216,7 @@ try {
                 Start-Sleep -Seconds 2      # let the shell settle on the new desktop before a window is placed on it
             }
 
-            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-PlayerCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -ArgumentLine `"$($argumentLine.Replace('"','\"'))`" -Out $out -CaptureAtSec $captureAt -CapturePath $png -CloseAtSec $closeAt"
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-PlayerCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -ArgumentLine `"$($argumentLine.Replace('"','\"'))`" -Out $out -CaptureAtSec $captureAt -CapturePath $png -CloseAtSec $closeAt$(if ($rendererJson) { ' -RendererFile C:\mpc-test\renderer.json' })"
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -334,6 +359,54 @@ try {
         return "the band is $other, expected $Expected"
     }
 
+    # What a flat field should come out as, worked out from the file: PQ to nits, the conversion's
+    # fixed curve at the display target, then the sRGB transfer. Checking a renderer against another
+    # renderer only says they agree; this says whether the arithmetic is right.
+    function Get-FieldLevel {
+        param($Field, [double] $DisplayNits)
+        $peak = if ($Field.depth -eq 10) { 1023.0 } else { 255.0 }
+        $black = if ($Field.depth -eq 10) { 64.0 } else { 16.0 }
+        $white = if ($Field.depth -eq 10) { 940.0 } else { 235.0 }
+        $signal = if ($Field.range -eq 'limited') { ($Field.code - $black) / ($white - $black) } else { $Field.code / $peak }
+        if ($Field.transfer -ne 'pq') { return [math]::Round($signal * 255.0, 1) }   # SDR: the expansion, no curve
+
+        $m1 = 0.1593017578125; $m2 = 78.84375
+        $c1 = 0.8359375; $c2 = 18.8515625; $c3 = 18.6875
+        $ep = [math]::Pow($signal, 1.0 / $m2)
+        $linear = [math]::Pow([math]::Max($ep - $c1, 0.0) / ($c2 - $c3 * $ep), 1.0 / $m1)   # 1.0 is 10000 nits
+        $x = $linear * (10000.0 / $DisplayNits)
+        $hable = {
+            param([double] $v)
+            $a = 0.15; $b = 0.50; $cc = 0.10; $d = 0.20; $e = 0.02; $f = 0.30
+            (($v * ($a * $v + $cc * $b) + $d * $e) / ($v * ($a * $v + $b) + $d * $f)) - $e / $f
+        }
+        $mapped = (& $hable $x) / (& $hable 4.8)
+        $mapped = [math]::Min([math]::Max($mapped, 0.0), 1.0)
+        [math]::Round([math]::Pow($mapped, 1.0 / 2.2) * 255.0, 1)
+    }
+
+    # The field fills the screen, so the middle of it is the picture wherever it was fitted.
+    function Test-FlatField {
+        param([string] $Png, $Field, [double] $DisplayNits, [double] $Tolerance = 4.0)
+        if (-not $Png) { return 'no frame was captured' }
+        $want = Get-FieldLevel $Field $DisplayNits
+        $bmp = [System.Drawing.Bitmap]::FromFile($Png)
+        try {
+            $sum = 0.0; $n = 0
+            for ($y = [int]($bmp.Height * 0.4); $y -lt [int]($bmp.Height * 0.6); $y += 4) {
+                for ($x = [int]($bmp.Width * 0.4); $x -lt [int]($bmp.Width * 0.6); $x += 4) {
+                    $p = $bmp.GetPixel($x, $y)
+                    $sum += ($p.R + $p.G + $p.B) / 3.0; $n++
+                }
+            }
+            $got = [math]::Round($sum / $n, 1)
+        } finally { $bmp.Dispose() }
+        if ([math]::Abs($got - $want) -gt $Tolerance) {
+            return "the picture is $got, expected $want from the file (tolerance $Tolerance)"
+        }
+        return $null
+    }
+
     function Complete-Case {
         param([string] $Name, [string[]] $Problems)
         $Problems = @($Problems | Where-Object { $_ })
@@ -459,6 +532,58 @@ try {
         (Get-ProcessProblem $c.Run),
         (Test-Picture $c.Png $ext.picture),
         (Test-Band $c.Png $ext.sidecar.band)
+    )
+
+    # 10-13. MPC Video Renderer, which ships with the player and is picked by DSVidRen 14. Its own
+    #    settings are not in the ini: they are in the registry, under the user that runs the player,
+    #    which is why these cases pass -Renderer instead of putting them in -Settings.
+    #
+    #    What is asserted is the level the file implies, worked out by Get-FieldLevel -- not what some
+    #    other renderer produces. The two 0.65 cases are each other's control: the same clip at two
+    #    display targets must come out at two different levels, so neither can pass on a stuck value.
+    #
+    #    The capture is late and the clips are long because the renderer takes several seconds to get
+    #    going on a guest with no GPU, where it also compiles its shaders. At 3 s the frame is still
+    #    the player's logo.
+    $rendererIni = @{ DSVidRen = 14; LastGPUCheck = 500000 }
+    $rendererLav = @{ 'Internal Filters\LAVVideo\HWAccel' = @{ HWAccel = 0 } }
+    $rendererBase = @{ UseD3D11 = 1; ConvertToSdr = 1; SdrToneMapping = 0; HdrPassthrough = 0 }
+
+    $field = $clips.clips.'flat_sdr.mkv'.field
+    $c = Invoke-PlayerCase -Name 'mpcvr-sdr-range' -Clip 'flat_sdr.mkv' `
+        -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
+        -Settings $rendererIni -IniSections $rendererLav -Renderer ($rendererBase + @{ DisplayNits = 200 })
+    Complete-Case 'mpcvr-sdr-range' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-FlatField $c.Png $field 200)
+    )
+
+    $field = $clips.clips.'flat_pq065.mkv'.field
+    $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-125' -Clip 'flat_pq065.mkv' `
+        -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
+        -Settings $rendererIni -IniSections $rendererLav -Renderer ($rendererBase + @{ DisplayNits = 125 })
+    Complete-Case 'mpcvr-hdr-to-sdr-125' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-FlatField $c.Png $field 125)
+    )
+
+    $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-200' -Clip 'flat_pq065.mkv' `
+        -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
+        -Settings $rendererIni -IniSections $rendererLav -Renderer ($rendererBase + @{ DisplayNits = 200 })
+    Complete-Case 'mpcvr-hdr-to-sdr-200' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-FlatField $c.Png $field 200),
+        # the display target must actually have moved the picture, or both cases are reading something stuck
+        $(if ($null -eq (Test-FlatField $c.Png $field 125)) { 'the 200 nit picture also passes as 125 nit, so the setting did nothing' })
+    )
+
+    $field = $clips.clips.'flat_pq025.mkv'.field
+    $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-dark' -Clip 'flat_pq025.mkv' `
+        -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
+        -Settings $rendererIni -IniSections $rendererLav -Renderer ($rendererBase + @{ DisplayNits = 200 })
+    Complete-Case 'mpcvr-hdr-to-sdr-dark' @(
+        (Get-ProcessProblem $c.Run),
+        (Test-FlatField $c.Png $field 200)
     )
 }
 finally {
