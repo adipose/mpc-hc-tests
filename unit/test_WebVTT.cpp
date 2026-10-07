@@ -45,6 +45,20 @@ TEST(WebVTT, HeaderNotesAndCueIdentifiersAreNotCues)
     EXPECT_EQ(EndMs(sts, PLAIN), 2500);
 }
 
+// 0ecbf5bea8 (#3796): a stray extra BOM ahead of the WEBVTT header. CTextFile
+// consumes one BOM and skips one duplicate, so a triple BOM is what still
+// reaches OpenVTT as a U+FEFF; the unfixed code compared "\xFEFFWEBVTT"
+// against the signature and rejected the file.
+TEST(WebVTT, TripleBomStillParsesTheHeader)
+{
+    CSimpleTextSubtitle sts;
+    ASSERT_TRUE(OpenText(sts, L"bom3.vtt", "\xEF\xBB\xBF\xEF\xBB\xBF\xEF\xBB\xBF" "WEBVTT\n\n00:01.000 --> 00:02.000\nfirst\n"));
+    EXPECT_EQ(sts.m_subtitleType, Subtitle::VTT);
+    ASSERT_EQ(sts.GetCount(), (size_t)1);
+    EXPECT_EQ(sts[0].str, L"first");
+    EXPECT_EQ(StartMs(sts, 0), 1000);
+}
+
 TEST(WebVTT, TimestampsWithoutHours)
 {
     CSimpleTextSubtitle sts;

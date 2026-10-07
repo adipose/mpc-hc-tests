@@ -173,6 +173,168 @@ TEST(PathUtils, StripPathOrUrl)
     EXPECT_EQ(PathUtils::StripPathOrUrl(L"http://example.com/path/clip%20one.mkv"), L"clip one.mkv");
 }
 
+// --- CLongPath (PR #4236) -----------------------------------------------------
+//
+// CPath builds its results in a MAX_PATH buffer, so past MAX_PATH Combine and
+// Canonicalize leave an empty path, AddBackslash does nothing and Append,
+// AddExtension and RenameExtension return FALSE -- silently for the void ones.
+// CLongPath runs the CPath method whenever the result fits and only then its
+// own. The tests below pair each operation with the CPath result for short
+// inputs (they must agree exactly) and with the full expected string for long
+// ones (each of those assertions fails if CLongPath is replaced by CPath).
+
+TEST(LongPath, ShortPathsMatchCPath)
+{
+    // Combine
+    for (auto* dir : { L"C:\\dir", L"C:\\dir\\", L"\\\\NAS\\share" }) {
+        CLongPath lp;
+        lp.Combine(dir, L"sub\\file.txt");
+        CPath cp;
+        cp.Combine(dir, L"sub\\file.txt");
+        EXPECT_EQ(CString(lp), CString(cp));
+    }
+    {
+        CLongPath lp;
+        lp.Combine(L"C:\\dir", L"D:\\abs.txt");
+        EXPECT_EQ(CString(lp), L"D:\\abs.txt"); // an absolute file wins
+        lp.Combine(L"C:\\dir", L"\\rooted.txt");
+        EXPECT_EQ(CString(lp), L"C:\\rooted.txt"); // rooted goes on the drive
+    }
+
+    // AddBackslash / Append
+    {
+        CLongPath lp(L"C:\\dir");
+        CPath cp(L"C:\\dir");
+        lp.AddBackslash();
+        cp.AddBackslash();
+        EXPECT_EQ(CString(lp), CString(cp));
+        EXPECT_TRUE(lp.Append(L"more.txt"));
+        EXPECT_TRUE(cp.Append(L"more.txt"));
+        EXPECT_EQ(CString(lp), CString(cp));
+        EXPECT_EQ(CString(lp), L"C:\\dir\\more.txt");
+    }
+
+    // AddExtension / RenameExtension
+    {
+        CLongPath lp(L"C:\\dir\\file");
+        CPath cp(L"C:\\dir\\file");
+        EXPECT_EQ(lp.AddExtension(L".txt"), cp.AddExtension(L".txt"));
+        EXPECT_EQ(CString(lp), CString(cp));
+        EXPECT_EQ(CString(lp), L"C:\\dir\\file.txt");
+        EXPECT_EQ(lp.RenameExtension(L".mkv"), cp.RenameExtension(L".mkv"));
+        EXPECT_EQ(CString(lp), L"C:\\dir\\file.mkv");
+    }
+
+    // Canonicalize: "." and ".." resolved, never above the root
+    {
+        CLongPath lp(L"C:\\a\\.\\b\\..\\c");
+        CPath cp(L"C:\\a\\.\\b\\..\\c");
+        lp.Canonicalize();
+        cp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(cp));
+        EXPECT_EQ(CString(lp), L"C:\\a\\c");
+    }
+    {
+        CLongPath lp(L"C:\\..\\..\\x");
+        CPath cp(L"C:\\..\\..\\x");
+        lp.Canonicalize();
+        cp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(cp));
+        EXPECT_EQ(CString(lp), L"C:\\x");
+    }
+}
+
+TEST(LongPath, CombinePastMaxPath)
+{
+    const CString dir = CString(L"C:\\") + CString(L'd', 300);
+    CLongPath lp;
+    lp.Combine(dir, L"file.txt");
+    // CPath::Combine leaves m_strPath empty here
+    EXPECT_EQ(CString(lp), dir + L"\\file.txt");
+
+    CLongPath abs;
+    abs.Combine(dir, CString(L"D:\\") + CString(L'e', 300) + L".txt");
+    EXPECT_EQ(CString(abs), CString(L"D:\\") + CString(L'e', 300) + L".txt");
+}
+
+TEST(LongPath, AppendPastMaxPath)
+{
+    const CString dir = CString(L"C:\\") + CString(L'd', 300);
+    CLongPath lp(dir);
+    // CPath::Append returns FALSE and leaves the path short
+    EXPECT_TRUE(lp.Append(L"more.txt"));
+    EXPECT_EQ(CString(lp), dir + L"\\more.txt");
+
+    // operator+= goes through the same code
+    CLongPath lp2(dir);
+    lp2 += L"more.txt";
+    EXPECT_EQ(CString(lp2), dir + L"\\more.txt");
+}
+
+TEST(LongPath, AddBackslashPastMaxPath)
+{
+    const CString dir = CString(L"C:\\") + CString(L'd', 300);
+    CLongPath lp(dir);
+    lp.AddBackslash(); // a no-op in CPath past MAX_PATH
+    EXPECT_EQ(CString(lp), dir + L"\\");
+}
+
+TEST(LongPath, AddAndRenameExtensionPastMaxPath)
+{
+    const CString dir = CString(L"C:\\") + CString(L'd', 300);
+    CLongPath lp(dir);
+    // CPath::AddExtension returns FALSE here
+    EXPECT_TRUE(lp.AddExtension(L".srt"));
+    EXPECT_EQ(CString(lp), dir + L".srt");
+
+    CLongPath rp(dir + L".old");
+    EXPECT_TRUE(rp.RenameExtension(L".new"));
+    EXPECT_EQ(CString(rp), dir + L".new");
+}
+
+TEST(LongPath, CanonicalizePastMaxPath)
+{
+    const CString dir = CString(L"C:\\") + CString(L'd', 300);
+    CLongPath lp(dir + L"\\sub\\..\\file.txt");
+    lp.Canonicalize(); // CPath::Canonicalize leaves the path empty here
+    EXPECT_EQ(CString(lp), dir + L"\\file.txt");
+}
+
+// ".." must never climb above the root: not above a drive, not out of a
+// share, not past the long-path prefix. Long inputs so CLongPath's own
+// canonicalization, not the CPath fallback, is what runs.
+TEST(LongPath, DotDotNeverClimbsAboveTheRoot)
+{
+    const CString name(L'n', 300);
+    {
+        CLongPath lp(CString(L"C:\\..\\..\\") + name);
+        lp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(L"C:\\") + name);
+    }
+    {
+        CLongPath lp(CString(L"\\\\server\\share\\..\\..\\") + name);
+        lp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(L"\\\\server\\share\\") + name);
+    }
+    {
+        CLongPath lp(CString(L"\\\\server\\share\\a\\..\\..\\") + name);
+        lp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(L"\\\\server\\share\\") + name);
+    }
+    {
+        CLongPath lp(CString(L"\\\\?\\C:\\..\\") + name);
+        lp.Canonicalize();
+        EXPECT_EQ(CString(lp), CString(L"\\\\?\\C:\\") + name);
+    }
+    {
+        // a relative path climbing above where it starts cannot be resolved,
+        // so it comes back empty rather than guessed
+        CLongPath lp(CString(L"..\\") + name);
+        lp.Canonicalize();
+        EXPECT_TRUE(CString(lp).IsEmpty());
+    }
+}
+
 // --- text.cpp / DSUtil.cpp --------------------------------------------------
 
 TEST(Text, UrlEncodeDecodeRoundTrip)
@@ -220,6 +382,42 @@ TEST(Text, StartsEndsWith)
     EXPECT_TRUE(EndsWith(L"clip.mkv", L".mkv"));
     EXPECT_TRUE(EndsWithNoCase(L"CLIP.MKV", L".mkv"));
     EXPECT_FALSE(EndsWith(L"CLIP.MKV", L".mkv"));
+}
+
+// 0ecbf5bea8 (#3796): trims up to two leading BOMs from the first line of a
+// subtitle; CTextFile already removes one duplicate, so one or two is what a
+// parser can still see.
+TEST(Text, TrimLeadingUTF16BOM)
+{
+    CStringW s;
+
+    s = L"\xFEFF\xFEFF" L"text";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"text");
+
+    s = L"\xFEFF" L"text";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"text");
+
+    // the byteswapped BOM counts too, and the two can mix
+    s = L"\xFFEF\xFEFF" L"text";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"text");
+
+    // two at most
+    s = L"\xFEFF\xFEFF\xFEFF" L"text";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"\xFEFF" L"text");
+
+    // only leading ones
+    s = L"a\xFEFF" L"b";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"a\xFEFF" L"b");
+
+    // a lone BOM is left alone
+    s = L"\xFEFF";
+    TrimLeadingUTF16BOM(s);
+    EXPECT_EQ(s, L"\xFEFF");
 }
 
 TEST(Text, ExplodeRespectsLimitAndTrims)

@@ -86,6 +86,53 @@ TEST(SubRip, BlankLineInsideACueDoesNotEndIt)
     EXPECT_EQ(sts[1].str, L"second");
 }
 
+// 0ecbf5bea8 (#3796): a subtitle starting with a stray extra BOM. CTextFile
+// consumes one BOM as the encoding marker and its duplicate-BOM workaround
+// (8aa17ee81c) skips one more, so it takes a triple BOM for a U+FEFF to still
+// reach the parser's first line. OpenSubRipper trims it now; the unfixed code
+// read "\xFEFF1" as the first line, saw no cue number and rejected the file.
+TEST(SubRip, TripleBomStillParsesTheFirstCue)
+{
+    CSimpleTextSubtitle sts;
+    ASSERT_TRUE(OpenText(sts, L"bom3.srt", "\xEF\xBB\xBF\xEF\xBB\xBF\xEF\xBB\xBF" "1\r\n00:00:01,000 --> 00:00:02,000\r\nfirst\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nsecond\r\n"));
+    ASSERT_EQ(sts.GetCount(), (size_t)2);
+    EXPECT_EQ(sts[0].str, L"first"); // no U+FEFF in the text
+    EXPECT_EQ(StartMs(sts, 0), 1000);
+    EXPECT_EQ(sts[1].str, L"second");
+}
+
+// 0ecbf5bea8 (#3796): the same stray BOM ahead of an ASS file. The unfixed
+// code did not recognise "\xFEFF[Script Info]" as a section, counted it and
+// the script-info entries as unknown ones and gave up on the file after ten.
+TEST(ASS, TripleBomStillParsesScriptInfo)
+{
+    CSimpleTextSubtitle sts;
+    const std::string doc =
+        "\xEF\xBB\xBF\xEF\xBB\xBF\xEF\xBB\xBF"
+        "[Script Info]\n"
+        "Title: bom\n"
+        "Original Script: test\n"
+        "Original Translation: test\n"
+        "Original Editing: test\n"
+        "Original Timing: test\n"
+        "Synch Point: 0\n"
+        "Script Updated By: test\n"
+        "Update Details: none\n"
+        "PlayDepth: 0\n"
+        "Timer: 100.0000\n"
+        "ScriptType: v4.00+\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hello\n";
+    ASSERT_TRUE(OpenText(sts, L"bom3.ass", doc));
+    ASSERT_EQ(sts.GetCount(), (size_t)1);
+    EXPECT_EQ(sts[0].str, L"hello");
+    EXPECT_EQ(StartMs(sts, 0), 1000);
+}
+
 TEST(SubRip, TextStartingWithANumberIsNotACueNumber)
 {
     CSimpleTextSubtitle sts;
@@ -170,6 +217,35 @@ TEST(SSA, MarkedFieldAndEqualsSignInText)
     EXPECT_EQ(sts[0].str, L"x = y");
     EXPECT_EQ(sts[1].str, L"no sign");
     EXPECT_EQ(StartMs(sts, 0), 1000);
+}
+
+// 7cd47832f1 (#4235): whether a style line got v4 or v4+ handling (the alpha
+// byte in &HAABBGGRR colours, the numpad alignment) used to come from the
+// ScriptType line, not from the styles section the line sits in. Here
+// ScriptType says v4.00 but the section is [V4+ Styles]: the unfixed code
+// kept the alpha byte inside the colours, forced alpha[3] to 0x80 and
+// remapped the alignment as SSA v4 (7 becomes 9).
+TEST(SSA, StylesSectionFormatWinsOverScriptType)
+{
+    CSimpleTextSubtitle sts;
+    const std::string doc =
+        "[Script Info]\nScriptType: v4.00\nPlayResX: 640\nPlayResY: 480\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H3C112233,&H000000FF,&H00000000,&H96000000,0,0,0,0,100,100,0,0,1,2,0,7,10,10,10,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,hello\n";
+    ASSERT_TRUE(OpenText(sts, L"v4scripttype-v4pstyles.ass", doc));
+    ASSERT_EQ(sts.GetCount(), (size_t)1);
+
+    STSStyle* style = nullptr;
+    ASSERT_TRUE(sts.m_styles.Lookup(L"Default", style));
+    ASSERT_TRUE(style != nullptr);
+    EXPECT_EQ(style->colors[0], (COLORREF)0x112233); // &H3C112233 with the alpha taken out
+    EXPECT_EQ(style->alpha[0], 0x3C);
+    EXPECT_EQ(style->alpha[3], 0x96); // the BackColour alpha, not a forced 0x80
+    EXPECT_EQ(style->scrAlignment, 7); // v4+ numpad alignment, not remapped to 9
 }
 
 TEST(ASS, BrokenDialogueLineReportsASyntaxError)
