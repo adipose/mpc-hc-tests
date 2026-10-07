@@ -113,13 +113,26 @@ try {
     $consoleUser = if ($cfg.GuestConsoleUser) { $cfg.GuestConsoleUser } else { ($devices.Console -split '\\')[-1] }
     if (-not $consoleUser) { throw 'Nobody is logged on at the guest console; the player needs a desktop.' }
 
-    # Deploy the player as one archive: exe, icon library, LAV Filters. No symbols, no import libraries.
+    # Deploy the player as one archive: exe, icon library, LAV Filters, MPC Video Renderer and D3DX9.
+    # No symbols, no import libraries.
     $stage = Join-Path $OutDir 'player-stage'
     if (Test-Path $stage) { Get-ChildItem $stage -Recurse -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
     New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'LAVFilters64') | Out-Null
     Copy-Item (Join-Path $playerDir 'mpc-hc64.exe') $stage
     foreach ($f in 'mpciconlib.dll') { if (Test-Path (Join-Path $playerDir $f)) { Copy-Item (Join-Path $playerDir $f) $stage } }
     Get-ChildItem (Join-Path $playerDir 'LAVFilters64') -File | Where-Object { $_.Extension -in '.ax', '.dll', '.manifest' } | Copy-Item -Destination (Join-Path $stage 'LAVFilters64')
+    # The installer puts MPC Video Renderer in MPCVR\ beside the exe, which is where the player loads it from.
+    $mpcvrDir = Join-Path $playerDir 'MPCVR'
+    if (Test-Path $mpcvrDir) {
+        New-Item -ItemType Directory -Force (Join-Path $stage 'MPCVR') | Out-Null
+        Get-ChildItem $mpcvrDir -File -Filter '*.ax' | Copy-Item -Destination (Join-Path $stage 'MPCVR')
+    }
+    # EVR-CP, the default renderer, needs D3DX9_43.dll. A clean Windows has none and the player stops on a
+    # modal "missing d3dx9_43.dll" box, so every case runs into its timeout. The installer ships it from
+    # distrib\x64; a build tree has it only there, two levels above bin\mpc-hc_x64.
+    $d3dx = @((Join-Path $playerDir 'D3DX9_43.dll'), (Join-Path $playerDir '..\..\distrib\x64\D3DX9_43.dll')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($d3dx) { Copy-Item $d3dx (Join-Path $stage 'D3DX9_43.dll') }
+    else { Note Yellow "no D3DX9_43.dll beside the player or in its distrib\x64; EVR-CP will fail to load on a clean guest" }
     $zip = Join-Path $OutDir 'player.zip'
     if (Test-Path $zip) { [IO.File]::Delete($zip) }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
