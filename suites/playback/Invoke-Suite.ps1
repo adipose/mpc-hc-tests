@@ -602,7 +602,21 @@ try {
     $rendererLav = @{ 'Internal Filters\LAVVideo\HWAccel' = @{ HWAccel = 0 } }
     $rendererBase = @{ UseD3D11 = 1; ConvertToSdr = 1; SdrToneMapping = 0; HdrPassthrough = 0 }
 
-    if (Test-CaseSelected 'mpcvr-sdr-range') {
+    # A player built from source has no MPCVR\ folder: only the installer and the release zips make one. Without
+    # it these cases do not fail, they hang to a kill on a dark frame, which says nothing about the player. So
+    # they are skipped, and the note says where the renderer comes from.
+    $mpcvrCases = @('mpcvr-sdr-range', 'mpcvr-hdr-to-sdr-125', 'mpcvr-hdr-to-sdr-200', 'mpcvr-hdr-to-sdr-dark')
+    $mpcvrMissing = -not (Test-Path (Join-Path $playerDir 'MPCVR\MpcVideoRenderer64.ax'))
+    if ($mpcvrMissing) {
+        $wanted = @($mpcvrCases | Where-Object { Test-CaseSelected $_ })
+        if ($wanted.Count) {
+            $skipped += $wanted.Count
+            Note Yellow "skipped $($wanted -join ', '): the player under test has no MPCVR\MpcVideoRenderer64.ax beside it ($playerDir). Copy the MPCVR folder from a release zip (https://github.com/clsid2/mpc-hc/releases) next to mpc-hc64.exe."
+        }
+        $mpcvrCases = @()
+    }
+
+    if ($mpcvrCases -contains 'mpcvr-sdr-range' -and (Test-CaseSelected 'mpcvr-sdr-range')) {
         $field = $clips.clips.'flat_sdr.mkv'.field
         $c = Invoke-PlayerCase -Name 'mpcvr-sdr-range' -Clip 'flat_sdr.mkv' `
             -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
@@ -613,7 +627,7 @@ try {
         )
     }
 
-    if (Test-CaseSelected 'mpcvr-hdr-to-sdr-125') {
+    if ($mpcvrCases -contains 'mpcvr-hdr-to-sdr-125' -and (Test-CaseSelected 'mpcvr-hdr-to-sdr-125')) {
         $field = $clips.clips.'flat_pq065.mkv'.field
         $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-125' -Clip 'flat_pq065.mkv' `
             -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
@@ -624,7 +638,7 @@ try {
         )
     }
 
-    if (Test-CaseSelected 'mpcvr-hdr-to-sdr-200') {
+    if ($mpcvrCases -contains 'mpcvr-hdr-to-sdr-200' -and (Test-CaseSelected 'mpcvr-hdr-to-sdr-200')) {
         $field = $clips.clips.'flat_pq065.mkv'.field
         $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-200' -Clip 'flat_pq065.mkv' `
             -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
@@ -637,7 +651,7 @@ try {
         )
     }
 
-    if (Test-CaseSelected 'mpcvr-hdr-to-sdr-dark') {
+    if ($mpcvrCases -contains 'mpcvr-hdr-to-sdr-dark' -and (Test-CaseSelected 'mpcvr-hdr-to-sdr-dark')) {
         $field = $clips.clips.'flat_pq025.mkv'.field
         $c = Invoke-PlayerCase -Name 'mpcvr-hdr-to-sdr-dark' -Clip 'flat_pq025.mkv' `
             -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 12 `
