@@ -35,7 +35,10 @@ param(
     [string] $VMName = '',
     [string] $OutDir = (Join-Path $PSScriptRoot 'results'),
     [string] $PlayerBinary,
-    [switch] $InstallDrivers
+    [switch] $InstallDrivers,
+    # Run only the cases whose name matches one of these -like patterns; empty runs everything, which is how the
+    # orchestrator calls the suite.
+    [string[]] $Case = @()
 )
 
 Set-StrictMode -Version Latest
@@ -155,6 +158,13 @@ try {
             [string] $PlugModes = '',          # non-empty: plug the virtual monitor with these modes for the case
             [double] $CaptureAtSec = 0,
             [double] $CloseAtSec = 0,          # non-zero: close the player's window at this time instead of /close
+            [ValidateSet('WM_CLOSE', 'SC_CLOSE')] [string] $CloseKind = 'WM_CLOSE',
+            [switch] $CloseWhenWindowAppears,  # close the moment a main window exists, not at CloseAtSec
+            [int] $CloseRepeat = 1,            # send the close this many times, 50 ms apart
+            [int] $RedirectStorm = 0,          # launch this many redirecting second instances mid-playback
+            [string[]] $RedirectFiles = @(),   # the files they carry, in rotation
+            [double] $StormAtSec = 2,
+            [int] $StormIntervalMs = 150,
             [switch] $KeepProfile              # keep the history file of the previous case: this case is its second run
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
@@ -169,8 +179,10 @@ try {
         $iniText = "[Settings]`r`n" + (($ini.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
 
         $argumentLine = ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim()
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, [bool]$KeepProfile, $consoleUser {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user)
+        # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
+        # which is true on the other side.
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -192,6 +204,16 @@ try {
             }
 
             $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-PlayerCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -ArgumentLine `"$($argumentLine.Replace('"','\"'))`" -Out $out -CaptureAtSec $captureAt -CapturePath $png -CloseAtSec $closeAt"
+            # Only the non-defaults go on the line: it is built by hand, and a plain case should read as one.
+            # The redirect files are paths under C:\mpc-test\media (no commas, no spaces), joined for the ride and
+            # split again on the guest.
+            if ($closeKind -ne 'WM_CLOSE') { $taskArgs += " -CloseKind $closeKind" }
+            if ($closeOnWindow) { $taskArgs += ' -CloseWhenWindowAppears' }
+            if ($closeRepeat -gt 1) { $taskArgs += " -CloseRepeat $closeRepeat" }
+            if ($redirectStorm -gt 0) {
+                $taskArgs += " -RedirectStorm $redirectStorm -StormAtSec $stormAtSec -StormIntervalMs $stormIntervalMs"
+                if ($redirectFiles) { $taskArgs += (' -RedirectFiles "{0}"' -f $redirectFiles) }
+            }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -334,6 +356,14 @@ try {
         return "the band is $other, expected $Expected"
     }
 
+    # A case runs when -Case was not given or its name matches one of the patterns. A case the filter skips is
+    # not counted at all: its Complete-Case never runs, so it is neither a pass, a fail, nor a skip.
+    function Test-CaseSelected {
+        param([string] $Name)
+        foreach ($pattern in $Case) { if ($Name -like $pattern) { return $true } }
+        return ($Case.Count -eq 0)
+    }
+
     function Complete-Case {
         param([string] $Name, [string[]] $Problems)
         $Problems = @($Problems | Where-Object { $_ })
@@ -354,35 +384,43 @@ try {
 
     # 1. The baseline every other case stands on: open, play to the end, close, exit 0; the whole clip's audio
     #    arrives, left on the left.
-    $c = Invoke-PlayerCase -Name 'plays-to-end-and-exits' -Clip 'stereo.mkv'
-    Complete-Case 'plays-to-end-and-exits' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Audio $c.Wav $clips.clips.'stereo.mkv'.audio[0].tones $seconds)
-    )
+    if (Test-CaseSelected 'plays-to-end-and-exits') {
+        $c = Invoke-PlayerCase -Name 'plays-to-end-and-exits' -Clip 'stereo.mkv'
+        Complete-Case 'plays-to-end-and-exits' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $clips.clips.'stereo.mkv'.audio[0].tones $seconds)
+        )
+    }
 
     # 2. The container's default flag picks the audio track: track 2 here, not track 1.
     #    (#99, #1551, #2093, #2673, #3935 -- the most re-reported behaviour in the tracker after file position.)
-    $c = Invoke-PlayerCase -Name 'default-audio-track' -Clip 'twotracks.mkv'
-    $default = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
-    Complete-Case 'default-audio-track' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Audio $c.Wav $default.tones $seconds)
-    )
+    if (Test-CaseSelected 'default-audio-track') {
+        $c = Invoke-PlayerCase -Name 'default-audio-track' -Clip 'twotracks.mkv'
+        $default = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
+        Complete-Case 'default-audio-track' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $default.tones $seconds)
+        )
+    }
 
     # 3. Fullscreen on a second monitor: the picture fills the monitor it was sent to, the right way up.
-    $c = Invoke-PlayerCase -Name 'fullscreen-second-monitor' -Clip 'stereo.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
-    Complete-Case 'fullscreen-second-monitor' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Picture $c.Png $clips.clips.'stereo.mkv'.picture)
-    )
+    if (Test-CaseSelected 'fullscreen-second-monitor') {
+        $c = Invoke-PlayerCase -Name 'fullscreen-second-monitor' -Clip 'stereo.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+        Complete-Case 'fullscreen-second-monitor' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $clips.clips.'stereo.mkv'.picture)
+        )
+    }
 
     # 4. Display rotation metadata is honoured, in the direction ffmpeg's own autorotation takes as correct.
     #    (#375, #3832, then #3909 "[Regression bug 3832]".)
-    $c = Invoke-PlayerCase -Name 'rotation-metadata' -Clip 'rotated90.mp4' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
-    Complete-Case 'rotation-metadata' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Picture $c.Png $clips.clips.'rotated90.mp4'.picture)
-    )
+    if (Test-CaseSelected 'rotation-metadata') {
+        $c = Invoke-PlayerCase -Name 'rotation-metadata' -Clip 'rotated90.mp4' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+        Complete-Case 'rotation-metadata' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $clips.clips.'rotated90.mp4'.picture)
+        )
+    }
 
     # 5. Remember file position, the most re-reported behaviour in the tracker (#1595, #1805, #2287, #2659,
     #    #3182, #3352, #3847). Three runs on one profile: play and close the window part-way, so the player's
@@ -391,75 +429,90 @@ try {
     $long = $clips.clips.'long.mkv'
     $remember = @{ RememberFilePos = 1; KeepHistory = 1; RememberPosForLongerThan = 0 }
     $closeAt = 8.0
-    $a = Invoke-PlayerCase -Name 'remember-position-first-run' -Clip 'long.mkv' -Switches '/play' -Settings $remember -CloseAtSec $closeAt
-    $stored = Get-RememberedPosition $a.History 'long.mkv'
-    Complete-Case 'remember-position-first-run' @(
-        (Get-ProcessProblem $a.Run),
-        $(if (-not $a.Run.closeSent) { 'the close request did not reach a window' }),
-        (Test-Audio $a.Wav $long.audio[0].tones $closeAt 1.0),
-        $(if ($null -eq $stored) { 'no position for the clip in mpc-hc64.history.ini' }
-          elseif ([math]::Abs($stored - $closeAt) -gt 1.5) { "history holds position ${stored}s, closed at ${closeAt}s" })
-    )
+    $stored = $null     # written by the first run; a filter can run any of the three without the others
+    if (Test-CaseSelected 'remember-position-first-run') {
+        $a = Invoke-PlayerCase -Name 'remember-position-first-run' -Clip 'long.mkv' -Switches '/play' -Settings $remember -CloseAtSec $closeAt
+        $stored = Get-RememberedPosition $a.History 'long.mkv'
+        Complete-Case 'remember-position-first-run' @(
+            (Get-ProcessProblem $a.Run),
+            $(if (-not $a.Run.closeSent) { 'the close request did not reach a window' }),
+            (Test-Audio $a.Wav $long.audio[0].tones $closeAt 1.0),
+            $(if ($null -eq $stored) { 'no position for the clip in mpc-hc64.history.ini' }
+              elseif ([math]::Abs($stored - $closeAt) -gt 1.5) { "history holds position ${stored}s, closed at ${closeAt}s" })
+        )
+    }
 
-    $b = Invoke-PlayerCase -Name 'remember-position-resumes' -Clip 'long.mkv' -Settings $remember -KeepProfile
-    Complete-Case 'remember-position-resumes' @(
-        (Get-ProcessProblem $b.Run),
-        $(if ($null -ne $stored) { Test-Audio $b.Wav $long.audio[0].tones ([double]$long.seconds - $stored) 1.5 } else { 'no stored position to resume from' })
-    )
+    if (Test-CaseSelected 'remember-position-resumes') {
+        $b = Invoke-PlayerCase -Name 'remember-position-resumes' -Clip 'long.mkv' -Settings $remember -KeepProfile
+        Complete-Case 'remember-position-resumes' @(
+            (Get-ProcessProblem $b.Run),
+            $(if ($null -ne $stored) { Test-Audio $b.Wav $long.audio[0].tones ([double]$long.seconds - $stored) 1.5 } else { 'no stored position to resume from' })
+        )
+    }
 
-    $c = Invoke-PlayerCase -Name 'remember-position-off-starts-over' -Clip 'long.mkv' -Settings @{ RememberFilePos = 0; KeepHistory = 1 } -KeepProfile
-    Complete-Case 'remember-position-off-starts-over' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Audio $c.Wav $long.audio[0].tones ([double]$long.seconds) 1.0)
-    )
+    if (Test-CaseSelected 'remember-position-off-starts-over') {
+        $c = Invoke-PlayerCase -Name 'remember-position-off-starts-over' -Clip 'long.mkv' -Settings @{ RememberFilePos = 0; KeepHistory = 1 } -KeepProfile
+        Complete-Case 'remember-position-off-starts-over' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $long.audio[0].tones ([double]$long.seconds) 1.0)
+        )
+    }
 
     # 6. Repeat forever, per file: the 4 s clip is still playing when the window is closed at 10 s, and it is the
     #    same tones on the second time round. (#1691, #1850, #2488, #3324, #3738.)
-    $stereo = $clips.clips.'stereo.mkv'
-    $c = Invoke-PlayerCase -Name 'repeat-file-forever' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ Loop = 1; LoopMode = 0 } -CloseAtSec 10
-    Complete-Case 'repeat-file-forever' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0),
-        (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0 -SkipSeconds 6)
-    )
+    $stereo = $clips.clips.'stereo.mkv'     # case 7 asserts on it too, so it is defined outside the filters
+    if (Test-CaseSelected 'repeat-file-forever') {
+        $c = Invoke-PlayerCase -Name 'repeat-file-forever' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ Loop = 1; LoopMode = 0 } -CloseAtSec 10
+        Complete-Case 'repeat-file-forever' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0),
+            (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0 -SkipSeconds 6)
+        )
+    }
 
     # 7. After playback: play the next file in the folder. a.mkv (440/880) is followed by b.mkv (1200 on its
     #    default track); with nothing after b the player closes the file and waits, and the window is closed at
     #    12 s. Each file is its own graph, so its own render stream and its own capture: two, in that order,
     #    each the whole clip. The setting is used rather than /playnext because it is the option the reports
     #    are about, and /close would outrank it. (#414, #697, #1419, #2200, #2209, #2579.)
-    $c = Invoke-PlayerCase -Name 'next-file-in-folder' -Clip 'folder\a.mkv' -Switches '/play' -Settings @{ AfterPlayback = 1 } -CloseAtSec 12
-    $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
-    $problems = @((Get-ProcessProblem $c.Run))
-    if ($c.Wavs.Count -ne 2) {
-        $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)"
-    } else {
-        $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds)
-        $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds)
+    if (Test-CaseSelected 'next-file-in-folder') {
+        $c = Invoke-PlayerCase -Name 'next-file-in-folder' -Clip 'folder\a.mkv' -Switches '/play' -Settings @{ AfterPlayback = 1 } -CloseAtSec 12
+        $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 2) {
+            $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (one per file)"
+        } else {
+            $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds)
+            $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds)
+        }
+        Complete-Case 'next-file-in-folder' $problems
     }
-    Complete-Case 'next-file-in-folder' $problems
 
     # 8. The container's default flag picks the subtitle track: track 2's cyan band at the centre, not track 1's
     #    magenta one, with the internal renderer. (#1551, #2452, #2876, #3283, #3914.)
-    $subs = $clips.clips.'subs.mkv'
-    $defaultSub = @($subs.subtitles | Where-Object default)[0]
-    $otherSub = @($subs.subtitles | Where-Object { -not $_.default })[0]
-    $c = Invoke-PlayerCase -Name 'default-subtitle-track' -Clip 'subs.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
-    Complete-Case 'default-subtitle-track' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Picture $c.Png $subs.picture),
-        (Test-Band $c.Png $defaultSub.band @{ $otherSub.band = "track $($otherSub.track) was rendered, which is not the default" })
-    )
+    if (Test-CaseSelected 'default-subtitle-track') {
+        $subs = $clips.clips.'subs.mkv'
+        $defaultSub = @($subs.subtitles | Where-Object default)[0]
+        $otherSub = @($subs.subtitles | Where-Object { -not $_.default })[0]
+        $c = Invoke-PlayerCase -Name 'default-subtitle-track' -Clip 'subs.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+        Complete-Case 'default-subtitle-track' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $subs.picture),
+            (Test-Band $c.Png $defaultSub.band @{ $otherSub.band = "track $($otherSub.track) was rendered, which is not the default" })
+        )
+    }
 
     # 9. A subtitle file beside the clip, same base name, is loaded by itself and shown. (#1121, #1164, #1894,
     #    #3152.)
-    $ext = $clips.clips.'ext.mkv'
-    $c = Invoke-PlayerCase -Name 'external-subtitle-autoload' -Clip 'ext.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
-    Complete-Case 'external-subtitle-autoload' @(
-        (Get-ProcessProblem $c.Run),
-        (Test-Picture $c.Png $ext.picture),
-        (Test-Band $c.Png $ext.sidecar.band)
-    )
+    if (Test-CaseSelected 'external-subtitle-autoload') {
+        $ext = $clips.clips.'ext.mkv'
+        $c = Invoke-PlayerCase -Name 'external-subtitle-autoload' -Clip 'ext.mkv' -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 2.5
+        Complete-Case 'external-subtitle-autoload' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $ext.picture),
+            (Test-Band $c.Png $ext.sidecar.band)
+        )
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

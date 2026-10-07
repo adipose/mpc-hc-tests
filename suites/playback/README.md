@@ -62,6 +62,10 @@ centre the box there. The band cases only ask which colour is present.
 | `default-subtitle-track` | of two ASS tracks, the one flagged default is rendered: its cyan band is in the frame, not track 1's magenta one | #1551, #2452, #2876, #3283, #3914 |
 | `external-subtitle-autoload` | `ext.ass` beside `ext.mkv` is loaded unasked and rendered (magenta band) | #1121, #1164, #1894, #3152 |
 
+`-Case <pattern>` runs only the cases whose name matches (one pattern per
+argument, `-like` wildcards), e.g. `-Case default-audio-track` or
+`-Case 'remember-position-*'`. A skipped case is not counted at all.
+
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
 swapped channels, so a pass means something.
