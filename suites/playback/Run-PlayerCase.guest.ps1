@@ -1,7 +1,7 @@
 # Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
 # arguments, optionally captures the virtual monitor part-way through, optionally posts WM_COMMAND messages to
-# the player's window at given times, optionally probes the player's playlist list control at given times,
-# waits for the player to exit by itself, and kills it if it does not.
+# the player's window at given times, optionally probes the player's playlist list control and main toolbar at
+# given times, waits for the player to exit by itself, and kills it if it does not.
 # Writes one JSON object to -Out; the host does the asserting.
 param(
     [Parameter(Mandatory)] [string] $Exe,
@@ -27,7 +27,8 @@ param(
                                          # hand-built task line unencoded)
     [string] $ProbeAt = '',              # comma-separated seconds after start: at each, read the player's
                                          # playlist list control from outside (count, selection, scroll
-                                         # position, scrollbars) and record it under "probes" in the JSON
+                                         # position, scrollbars) and the main toolbar's buttons (command ids
+                                         # in order) and record them under "probes" in the JSON
                                          # (digits, dots and commas only, like PostCommands)
     [double] $CaptureAtSec = 0,          # 0 = no frame capture
     [int] $CaptureConnector = 0,
@@ -41,8 +42,9 @@ $result = [ordered]@{ started = (Get-Date).ToString('o') }
 if ($CloseKind -eq 'SC_CLOSE' -or $PostCommands -or $ProbeAt) {
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
     # own path since e21c9fcfff, so both ways of closing belong under test. The posted commands are WM_COMMAND,
-    # the same message a menu accelerator sends. The probes send the list control plain integer list-view
-    # messages, which are safe cross-process (no pointers, no structs).
+    # the same message a menu accelerator sends. The playlist probe sends the list control plain integer
+    # list-view messages, which are safe cross-process (no pointers, no structs); the toolbar probe's
+    # TB_GETBUTTON writes a TBBUTTON, which is what the memory APIs below are for.
     Add-Type -Namespace MpcTest -Name User32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool PostMessageW(System.IntPtr hWnd, uint msg, System.IntPtr wParam, System.IntPtr lParam);
@@ -65,6 +67,24 @@ public static extern bool IsWindowVisible(System.IntPtr hWnd);
 public static extern System.IntPtr GetParent(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
 public static extern System.IntPtr GetWindowLongPtrW(System.IntPtr hWnd, int index);
+'@
+}
+
+if ($ProbeAt) {
+    # The toolbar probe reads TBBUTTONs out of the player: TB_GETBUTTON's lParam is a pointer, so the
+    # struct lives in the player's address space for the call and comes back over ReadProcessMemory,
+    # the same approach as the mouse suite's Run-PlaylistInputCase.guest.ps1.
+    Add-Type -Namespace MpcTest -Name Kernel32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr OpenProcess(uint access, bool inherit, uint processId);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr VirtualAllocEx(System.IntPtr process, System.IntPtr address, System.UIntPtr size, uint type, uint protect);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool VirtualFreeEx(System.IntPtr process, System.IntPtr address, System.UIntPtr size, uint type);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool ReadProcessMemory(System.IntPtr process, System.IntPtr address, byte[] buffer, System.UIntPtr size, out System.UIntPtr read);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern bool CloseHandle(System.IntPtr handle);
 '@
 }
 
@@ -105,9 +125,54 @@ function Find-PlaylistListView {
     [IntPtr]::Zero
 }
 
+# The command id of one button of a toolbar in the player's process. TB_GETBUTTON (WM_USER + 23) writes
+# a TBBUTTON at its lParam -- on x64 iBitmap int @0, idCommand int @4, fsState @8, fsStyle @9, six
+# reserved bytes, dwData @16, iString @24, 32 bytes in all (CommCtrl.h) -- so the struct lives in the
+# player's address space for the call and the id is read back from offset 4.
+function Get-RemoteToolbarButtonId {
+    param([IntPtr] $Toolbar, [int] $Index, [IntPtr] $ProcessHandle, [IntPtr] $RemoteBuffer)
+    [void] [MpcTest.User32]::SendMessageW($Toolbar, 0x0417, [IntPtr] $Index, $RemoteBuffer)   # TB_GETBUTTON
+    $out = New-Object byte[] 32
+    $read = [UIntPtr]::Zero
+    [void] [MpcTest.Kernel32]::ReadProcessMemory($ProcessHandle, $RemoteBuffer, $out, ([UIntPtr]::new([uint64]32)), [ref] $read)
+    [BitConverter]::ToInt32($out, 4)
+}
+
+# The player toolbar, found from outside the player. CPlayerToolBar is a CToolBar, so its window class
+# is ToolbarWindow32 and other windows of that class may exist in the process; a candidate is the
+# player toolbar when its first button is ID_LEFTSEPARATOR (957) -- PlaceButtons adds it before
+# anything else, whichever layout branch runs, and no other toolbar has it.
+function Find-PlayerToolbar {
+    param([int] $ProcessId, [IntPtr] $ProcessHandle, [IntPtr] $RemoteBuffer)
+    $candidates = [System.Collections.Generic.List[IntPtr]]::new()
+    $childCallback = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $className = [Text.StringBuilder]::new(64)
+        [void] [MpcTest.User32]::GetClassNameW($hWnd, $className, $className.Capacity)
+        if ($className.ToString() -eq 'ToolbarWindow32') { $candidates.Add($hWnd) }
+        return $true
+    }
+    $topCallback = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $procId = [uint32] 0
+        [void] [MpcTest.User32]::GetWindowThreadProcessId($hWnd, [ref] $procId)
+        if ($procId -eq $ProcessId) { [void] [MpcTest.User32]::EnumChildWindows($hWnd, $childCallback, [IntPtr]::Zero) }
+        return $true
+    }
+    [void] [MpcTest.User32]::EnumWindows($topCallback, [IntPtr]::Zero)
+    foreach ($candidate in $candidates) {
+        if ((Get-RemoteToolbarButtonId $candidate 0 $ProcessHandle $RemoteBuffer) -eq 957) { return $candidate }   # ID_LEFTSEPARATOR
+    }
+    # No candidate starts with the left separator: a sole ToolbarWindow32 can only be the player toolbar.
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    [IntPtr]::Zero
+}
+
 # One probe of the playlist's list control: LVM_GETITEMCOUNT, LVM_GETNEXTITEM (first selected, first
 # focused), LVM_GETTOPINDEX, LVM_GETCOUNTPERPAGE, visibility and the scrollbar style bits. A list view
 # sets WS_HSCROLL/WS_VSCROLL while the scrollbar is shown, so the style says whether one is there.
+# Also one probe of the player toolbar: TB_BUTTONCOUNT (WM_USER + 24) and, per button, the idCommand
+# of its TBBUTTON, recorded as toolbarIds in button order.
 function Get-PlaylistProbe {
     param([double] $At, [int] $ProcessId)
     $h = Find-PlaylistListView $ProcessId
@@ -122,6 +187,26 @@ function Get-PlaylistProbe {
         $style = [MpcTest.User32]::GetWindowLongPtrW($h, -16).ToInt64()                                              # GWL_STYLE
         $probe.hscroll  = [bool] ($style -band 0x00100000)                                                           # WS_HSCROLL
         $probe.vscroll  = [bool] ($style -band 0x00200000)                                                           # WS_VSCROLL
+    }
+    $probe.toolbarIds = $null
+    $hProc = [MpcTest.Kernel32]::OpenProcess(0x0438, $false, [uint32] $ProcessId)   # VM_OPERATION|VM_READ|VM_WRITE|QUERY_INFORMATION
+    if ($hProc -ne [IntPtr]::Zero) {
+        try {
+            $mem = [MpcTest.Kernel32]::VirtualAllocEx($hProc, [IntPtr]::Zero, ([UIntPtr]::new([uint64]32)), 0x1000, 0x04)   # MEM_COMMIT, PAGE_READWRITE
+            if ($mem -ne [IntPtr]::Zero) {
+                try {
+                    $toolbar = Find-PlayerToolbar $ProcessId $hProc $mem
+                    if ($toolbar -ne [IntPtr]::Zero) {
+                        $buttons = [MpcTest.User32]::SendMessageW($toolbar, 0x0418, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()   # TB_BUTTONCOUNT
+                        $probe.toolbarIds = @(for ($i = 0; $i -lt $buttons; $i++) { Get-RemoteToolbarButtonId $toolbar $i $hProc $mem })
+                    }
+                } finally {
+                    [void] [MpcTest.Kernel32]::VirtualFreeEx($hProc, $mem, [UIntPtr]::Zero, 0x8000)   # MEM_RELEASE
+                }
+            }
+        } finally {
+            [void] [MpcTest.Kernel32]::CloseHandle($hProc)
+        }
     }
     $probe
 }

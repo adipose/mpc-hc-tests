@@ -359,6 +359,24 @@ try {
         $null
     }
 
+    # The [Toolbars\PlayerToolBar] ini keys for a saved toolbar layout: ButtonSequence, the vector of
+    # command ids as the player's ini binary encoding -- two chars 'A'..'P' per byte, low nibble first
+    # (BinaryToAP in Profile.cpp, what WriteProfileBinary writes) -- over the little-endian int32 ids,
+    # and ButtonSequenceSize its byte count. GetProfileVectorInt (mplayerc.cpp) reads the size first
+    # and keeps the vector only when the binary decodes to exactly that many bytes, so the two must
+    # agree. ButtonLayoutRevision, when a case wants one, is added on top as a plain integer.
+    function Get-ButtonSequenceIni {
+        param([int[]] $Ids)
+        $text = [Text.StringBuilder]::new()
+        foreach ($id in $Ids) {
+            foreach ($byte in [BitConverter]::GetBytes($id)) {
+                [void] $text.Append([char](65 + ($byte -band 0x0F)))
+                [void] $text.Append([char](65 + (($byte -shr 4) -band 0x0F)))
+            }
+        }
+        [ordered]@{ ButtonSequence = $text.ToString(); ButtonSequenceSize = 4 * $Ids.Count }
+    }
+
     function Test-Audio {
         param([string] $Wav, [int[]] $Tones, [double] $Seconds, [double] $Tolerance = 0.4, [double] $SkipSeconds = 0.1)
         if (-not $Wav) { return 'no audio reached the endpoint' }
@@ -1021,6 +1039,93 @@ try {
         } finally {
             Invoke-Command -Session $session { Remove-Item 'C:\mpc-test\player\default.mpcpl' -Force -ErrorAction SilentlyContinue }
         }
+    }
+
+    # 28-30. The persisted toolbar layout, read back off the toolbar itself: every probe also records
+    #    toolbarIds, the idCommand of each of the main toolbar's buttons in order (TB_BUTTONCOUNT and
+    #    TB_GETBUTTON into a buffer in the player's address space). The layout a case seeds lives in
+    #    [Toolbars\PlayerToolBar] (IDS_R_PLAYERTOOLBAR in SettingsDefines.h): ButtonSequence and
+    #    ButtonSequenceSize from Get-ButtonSequenceIni, and ButtonLayoutRevision for revisions past 0.
+    #    The command ids are the resource.h ones CPlayerToolBar's supportedSvgButtons lists:
+    #    ID_LEFTSEPARATOR 957, ID_PLAY_PLAY 887, ID_PLAY_PAUSE 888, ID_PLAY_STOP 890,
+    #    ID_NAVIGATE_SKIPBACK 921, ID_NAVIGATE_SKIPFORWARD 922, ID_PLAY_FRAMESTEP 891,
+    #    ID_PLAY_DECRATE 894, ID_PLAY_INCRATE 895, ID_DUMMYSEPARATOR 945, ID_VOLUME_MUTE 909. The clip
+    #    only keeps the player alive while the probe runs; what is asserted is the toolbar.
+
+    # 28. A saved layout with a duplicated button must be discarded, not loaded as is:
+    #    clsid2/mpc-hc@a0968dc305 (#3839, of #3829 -- a layout that named Stop twice put two Stop
+    #    buttons on the toolbar). The seeded revision-1 sequence is valid but for the second Stop;
+    #    IsValidButtonLayout's duplicate check rejects it and PlaceButtons takes its else branch, the
+    #    defaults: play, pause, stop, skipback, decrate, incrate, skipforward, framestep between the
+    #    separators and the volume button. On an unfixed player the layout loads as it stands and the
+    #    probe sees Stop twice.
+    if (Test-CaseSelected 'toolbar-layout-with-duplicates-is-discarded') {
+        $layout = Get-ButtonSequenceIni @(957, 887, 888, 890, 890, 945, 909)
+        $layout.ButtonLayoutRevision = 1
+        $c = Invoke-PlayerCase -Name 'toolbar-layout-with-duplicates-is-discarded' -Clip 'stereo.mkv' `
+            -IniSections @{ 'Toolbars\PlayerToolBar' = $layout } -ProbeAt '2'
+        $tbProbe = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $tbProbe -or $null -eq $tbProbe.toolbarIds) {
+            $problems += 'the player toolbar was not found'
+        } else {
+            $ids = @($tbProbe.toolbarIds)
+            $nonSeparator = @($ids | Where-Object { $_ -ne 957 -and $_ -ne 945 })   # separators repeat legitimately
+            $duplicates = @($nonSeparator | Group-Object | Where-Object { $_.Count -gt 1 })
+            if ($duplicates) { $problems += "duplicate button(s) on the toolbar: $(($duplicates | ForEach-Object Name) -join ', ') ($($ids -join ','))" }
+            foreach ($want in @(887, 888, 890, 921, 894, 895, 922, 891)) {
+                if ($ids -notcontains $want) { $problems += "default button $want is missing from the toolbar ($($ids -join ','))" }
+            }
+        }
+        Complete-Case 'toolbar-layout-with-duplicates-is-discarded' $problems
+    }
+
+    # 29. A revision-1 layout the user removed every movable button from must be honoured, not reset:
+    #    clsid2/mpc-hc@90d2b12d68 (#4220 -- the saved sequence of such a layout is only leftsep,
+    #    dummysep, volume, which failed IsValidButtonLayout's old minimum of six entries and was
+    #    thrown away for the defaults). The minimum is now three entries with the movable part empty,
+    #    so the toolbar must come up as exactly the two separators and the volume button: no play,
+    #    pause or stop anywhere in it.
+    if (Test-CaseSelected 'toolbar-layout-without-movable-buttons-is-kept') {
+        $layout = Get-ButtonSequenceIni @(957, 945, 909)
+        $layout.ButtonLayoutRevision = 1
+        $c = Invoke-PlayerCase -Name 'toolbar-layout-without-movable-buttons-is-kept' -Clip 'stereo.mkv' `
+            -IniSections @{ 'Toolbars\PlayerToolBar' = $layout } -ProbeAt '2'
+        $tbProbe = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $tbProbe -or $null -eq $tbProbe.toolbarIds) {
+            $problems += 'the player toolbar was not found'
+        } else {
+            $ids = @($tbProbe.toolbarIds)
+            foreach ($removed in @(887, 888, 890)) {
+                if ($ids -contains $removed) { $problems += "button $removed is on the toolbar; the user's empty layout was not honoured ($($ids -join ','))" }
+            }
+        }
+        Complete-Case 'toolbar-layout-without-movable-buttons-is-kept' $problems
+    }
+
+    # 30. A layout saved before ButtonLayoutRevision existed must not show a button twice: #3829, two Stop
+    #    buttons, fixed by #3839 (a0968dc305), which discards such a layout and loads the defaults. The
+    #    sequence is byte for byte what 2.5.5 itself saves for this order (measured: it reads the seed and
+    #    writes it back unchanged): leftsep, play, pause, stop, skipforward, framestep, skipback, dummysep,
+    #    volume, with no revision key. 2.6.1 and 2.6.4 show Stop twice from it; develop shows the defaults.
+    #    The user's custom order is not kept on develop, by #3839's choice, so it is not asserted.
+    if (Test-CaseSelected 'toolbar-old-layout-has-no-duplicates') {
+        $layout = Get-ButtonSequenceIni @(957, 887, 888, 890, 922, 891, 921, 945, 909)
+        $c = Invoke-PlayerCase -Name 'toolbar-old-layout-has-no-duplicates' -Clip 'stereo.mkv' `
+            -IniSections @{ 'Toolbars\PlayerToolBar' = $layout } -ProbeAt '2'
+        $tbProbe = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $tbProbe -or $null -eq $tbProbe.toolbarIds) {
+            $problems += 'the player toolbar was not found'
+        } else {
+            $ids = @($tbProbe.toolbarIds)
+            foreach ($id in @(887, 888, 890)) {
+                $n = @($ids | Where-Object { $_ -eq $id }).Count
+                if ($n -ne 1) { $problems += "button $id is on the toolbar $n times, expected once ($($ids -join ','))" }
+            }
+        }
+        Complete-Case 'toolbar-old-layout-has-no-duplicates' $problems
     }
 }
 finally {

@@ -9,8 +9,8 @@ New-PlaybackClips.ps1     ffmpeg-synthesised clips and clips.json, the
 Invoke-Suite.ps1          the suite: deploy the player, run the cases, assert
 Run-PlayerCase.guest.ps1  target side: start the player in the console session,
                           grab a frame part-way, post menu commands and probe
-                          the playlist's list control at given times, wait for
-                          the player to exit
+                          the playlist's list control and the toolbar at given
+                          times, wait for the player to exit
 ```
 
 ## How a case works
@@ -44,7 +44,12 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
      The control is found by walking the player's windows for a
      `SysListView32` whose parent chain includes the playlist bar's window
      (titled `Playlist`, docked or floating) -- the Subresync bar keeps a
-     list view too;
+     list view too. The same probe also records the main toolbar's buttons
+     (the command ids, in order): `TB_GETBUTTON` writes its `TBBUTTON`
+     into memory allocated in the player, read back over
+     `ReadProcessMemory`, and the toolbar is the `ToolbarWindow32` whose
+     first button is `ID_LEFTSEPARATOR` -- PlaceButtons adds it before
+     anything else;
    - **process** -- exited by itself, exit code 0.
 
 The clips are built so that content identifies itself: four flat colour
@@ -92,6 +97,9 @@ centre the box there. The band cases only ask which colour is present.
 | `playlist-selection-follows-skip` | next/previous move the list's selection with the playing item: on a three-entry playlist the selection sits at 2, 2 (left behind until it catches up with the playing item), then follows 1, 2, 1 | #3840, #3996; b1741976ea |
 | `playlist-shows-current-after-hidden` | a 30-entry playlist (`list30.mpcpl`) opened at entry 20 (saved playlist position) with the panel hidden: showing the panel scrolls entry 20 fully into view | #4094, #3889; 66d467b094 (#4108) |
 | `playlist-no-horizontal-scrollbar` | a 30-entry playlist restored at startup (`default.mpcpl`, panel shown, no file on the command line): vertical scrollbar present, no horizontal one | #3972; fbcb10020f (#3988) |
+| `toolbar-layout-with-duplicates-is-discarded` | a saved revision-1 layout naming Stop twice is discarded: the probed toolbar has no duplicate button and holds the default buttons | #3829; a0968dc305 (#3839) |
+| `toolbar-layout-without-movable-buttons-is-kept` | a saved revision-1 layout with every movable button removed (just the separators and the volume button) is honoured: no play/pause/stop on the probed toolbar | #4220; 90d2b12d68 |
+| `toolbar-old-layout-has-no-duplicates` | a layout as 2.5.5 saved it (no ButtonLayoutRevision) does not put Play, Pause or Stop on the toolbar twice | #3829; #3839 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -155,6 +163,7 @@ the captured PNG, so a failure can be looked at rather than re-run.
 
 Driving a running player goes only as far as posted WM_COMMAND messages
 (seek, play, change rate, reopen) and read-only probes of the playlist's
-list control; anything that needs a finer hand waits for
-the `/slave` host described in `..\..\PLAN.md`. HDR cases need a Windows 11
-guest (the virtual monitor does HDR there) and a renderer that outputs HDR.
+list control and the main toolbar's buttons; anything that needs a finer
+hand waits for the `/slave` host described in `..\..\PLAN.md`. HDR cases
+need a Windows 11 guest (the virtual monitor does HDR there) and a
+renderer that outputs HDR.
