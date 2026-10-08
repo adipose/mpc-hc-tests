@@ -17,3 +17,7 @@
 [submodule "unit/googletest"]
 	path = unit/googletest
 	url = https://github.com/google/googletest.git
+[submodule "vcamera"]
+	path = vcamera
+	url = C:/dev/avs-vcamera
+	branch = main
