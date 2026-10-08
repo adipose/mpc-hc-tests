@@ -118,6 +118,7 @@ centre the box there. The band cases only ask which colour is present.
 | `history-exclude-filter` | `HistoryExcludeFilter=secret` (semicolon-separated substrings, case-insensitive on the full path): `SECRET-clip.mkv` plays but leaves no entry in the history ini, while `stereo.mkv` in a second run on the same profile is recorded | #3985, #3920, #4196; f310dc2461 (#3987) |
 | `close-during-first-run-prompt` | a WM_CLOSE is posted to the frame while the first-run update-check prompt is up (the profile leaves `UpdaterAutoCheck` out so the prompt appears; the close has to be a posted message, because the runner's timed close would fire only after the prompt was dismissed); after the prompt is dismissed the player exits 0 by itself, and the saved profile's `UpdaterAutoCheck=0` proves the prompt was answered | #3989; 92583276c5 |
 | `thumbnails-errors-exit-nonzero` | `/thumbnails /minimized` on a missing source exits by itself with code 1 (pre-fix: a message box nobody could dismiss, so a hang); a control run on `stereo.mkv` exits 0 and leaves `stereo.mkv_thumbs.jpg` beside the clip | #4228; 40de2ddea8 (#4234) |
+| `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: every window `Get-ToneTimeline.ps1` hears is the 800 Hz segment (unfixed: it plays on from 10 s to the end, 900-1200 Hz) | #3863; patch760 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
