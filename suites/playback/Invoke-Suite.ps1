@@ -1580,14 +1580,18 @@ try {
     #    The seed floats the bar: [ToolBars\Playlist] DockState=59423 (AFX_IDW_DOCKBAR_FLOAT,
     #    CPlayerBar::LoadState) with Visible=1 (CPlayerPlaylistBar::SaveState's key).
     #    HidePlaylistFullScreen and HideWindowedControls are the settings the fix's condition
-    #    reads. Fullscreen on and off are posted at 2.5 and 5 s; the probe at 6.5 s must find
-    #    the playlist's list view visible again. Unfixed 2.8.0: the bar stays hidden after
-    #    leaving fullscreen. The 1.5 s probe guards the seed: the bar must be visible then.
+    #    reads. Fullscreen on and off are posted at 4 and 7 s; the probes after must find the
+    #    playlist's list view visible again. Unfixed 2.8.0: the bar stays hidden after leaving
+    #    fullscreen. The 3 s probe guards the seed: the bar must be visible then. The toggles land
+    #    on a clip that is still playing: on the 4 s stereo.mkv the second toggle could land after the
+    #    end, where ID_VIEW_FULLSCREEN does nothing, and the player stayed fullscreen; long.mkv runs
+    #    20 s. A run whose window is still fullscreen after the second toggle says so instead of
+    #    blaming the bar.
     if (Test-CaseSelected 'floating-playlist-restored-after-fullscreen') {
-        $c = Invoke-PlayerCase -Name 'floating-playlist-restored-after-fullscreen' -Clip 'stereo.mkv' -Switches '/play' `
+        $c = Invoke-PlayerCase -Name 'floating-playlist-restored-after-fullscreen' -Clip 'long.mkv' -Switches '/play' `
             -Settings @{ HideWindowedControls = 1; HidePlaylistFullScreen = 1 } `
             -IniSections @{ 'ToolBars\Playlist' = @{ Visible = 1; DockState = 59423 } } `
-            -PostCommands '2.5:830,5:830' -ProbeAt '1.5,6.5,9,12' -CloseAtSec 13
+            -PostCommands '4:830,7:830' -ProbeAt '3,8.5,11,14' -CloseAtSec 15
         $posts = @($c.Run.posts)
         $probes = @($c.Run.probes)
         $problems = @((Get-ProcessProblem $c.Run))
@@ -1596,7 +1600,10 @@ try {
             $problems += 'the playlist list control was not found at every probe'
         } else {
             if (-not $probes[0].visible) { $problems += 'the seeded floating playlist was not visible before fullscreen' }
-            if (-not $probes[-1].visible) { $problems += "the floating playlist was not restored after leaving fullscreen (visible at 6.5/9/12 s: $(@($probes[1..3] | ForEach-Object { [bool]$_.visible }) -join '/'))" }
+            $after = $probes[-1].mainRect; $wa = $probes[-1].workArea
+            if ($after.left -le $wa.left -and $after.top -le $wa.top -and $after.right -ge $wa.right -and $after.bottom -gt $wa.bottom) {
+                $problems += "the player was still fullscreen at 14 s (window $($after.left),$($after.top),$($after.right),$($after.bottom)): a fullscreen toggle did not take effect, so the case proves nothing about the bar"
+            } elseif (-not $probes[-1].visible) { $problems += "the floating playlist was not restored after leaving fullscreen (visible at 8.5/11/14 s: $(@($probes[1..3] | ForEach-Object { [bool]$_.visible }) -join '/'))" }
         }
         Complete-Case 'floating-playlist-restored-after-fullscreen' $problems
     }

@@ -291,6 +291,22 @@ function Get-PlaylistProbe {
         }
         $probe.maximized = [MpcTest.Geometry]::IsZoomed($main)
     }
+    # The process's visible top-level windows, class and title: what else is on screen when a probe
+    # finds something unexpected (a modal, a second frame).
+    $tops = [System.Collections.Generic.List[string]]::new()
+    $cb = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $procId = [uint32] 0
+        [void] [MpcTest.User32]::GetWindowThreadProcessId($hWnd, [ref] $procId)
+        if ($procId -eq $ProcessId -and [MpcTest.User32]::IsWindowVisible($hWnd)) {
+            $cls = [Text.StringBuilder]::new(64); [void] [MpcTest.User32]::GetClassNameW($hWnd, $cls, $cls.Capacity)
+            $txt = [Text.StringBuilder]::new(128); [void] [MpcTest.User32]::GetWindowTextW($hWnd, $txt, $txt.Capacity)
+            $tops.Add("$cls|$txt")
+        }
+        return $true
+    }
+    [void] [MpcTest.User32]::EnumWindows($cb, [IntPtr]::Zero)
+    $probe.windows = @($tops)
     $wa = New-Object MpcTest.WinRect
     if ([MpcTest.Geometry]::SystemParametersInfoW(0x0030, 0, [ref] $wa, 0)) {   # SPI_GETWORKAREA, primary monitor
         $probe.workArea = [ordered]@{ left = $wa.left; top = $wa.top; right = $wa.right; bottom = $wa.bottom }
@@ -762,9 +778,14 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
                          [MpcTest.User32]::PostMessageW($main, $step.msg, [IntPtr] $step.wParam, [IntPtr]::Zero)
             $posts += [ordered]@{ at = $step.at; id = 0; msg = $step.msg; delivered = [bool] $delivered }
         } else {
+            # To the frame, found by class: Process.MainWindowHandle is a guess among the top-level windows
+            # and is cached; with a floating playlist across a fullscreen switch the second toggle went to
+            # some other window and the player stayed fullscreen.
             $p.Refresh()
-            $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
-                         [MpcTest.User32]::PostMessageW($p.MainWindowHandle, 0x0111, [IntPtr] $step.id, [IntPtr]::Zero)
+            $main = if ($p.HasExited) { [IntPtr]::Zero } else { Find-ProcessWindow -ProcessId $p.Id -Class 'MediaPlayerClassicW' }
+            if ($main -eq [IntPtr]::Zero -and -not $p.HasExited) { $main = $p.MainWindowHandle }
+            $delivered = ($main -ne [IntPtr]::Zero) -and
+                         [MpcTest.User32]::PostMessageW($main, 0x0111, [IntPtr] $step.id, [IntPtr]::Zero)
             $posts += [ordered]@{ at = $step.at; id = $step.id; delivered = [bool] $delivered }
         }
     }
