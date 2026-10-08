@@ -147,6 +147,7 @@ centre the box there. The band cases only ask which colour is present.
 | `hlg-on-evrcp-is-not-washed-out` | a 10-bit HLG flat field at signal 0.5 on EVR-CP comes out at 96.4, the HLG-to-SDR shader's own math (unfixed 2.8.2: no conversion, the 0.5 signal shows as-is, measured 126.4) | #4287; f185a85594 |
 | `api-reports-selected-audio-track` | `/slave` API, `twotracks.mkv` (default is track 2): the `CMD_LISTAUDIOTRACKS` reply ends in the selected index 1, not -1 (unfixed 2.8.2 tested `dwFlags == EXCLUSIVE`, but the switcher forwards LAV Splitter's ENABLED); the current-track query says 1 on both builds, as the control | #4213; e7053ee236 |
 | `api-volume-and-mute-round-trip` | `/slave` API: `CMD_SETVOLUME 40` / `CMD_SETMUTE 1` then 0 are answered by the volume/mute queries (40, 1, still 40 while muted, 0; the commands are new in #4075, so 2.8.0 never answers), and the capture goes silent for the muted stretch and comes back | #4075; d9f4975bff |
+| `cover-art-next-file-in-same-folder` | `art\b.wav` opened over a playing `art\a.wav` (same folder, a has no art) shows its own `b.png`: the frame on the plugged monitor has the red picture in the player's view (unfixed 2.6.4 kept the folder cached from a's empty search and shows the logo) | c9a1ceda5e |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

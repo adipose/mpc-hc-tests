@@ -156,6 +156,12 @@ try {
         New-Item -ItemType Directory 'C:\mpc-test\media\folder' | Out-Null
         Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\folder\a.mkv'
         Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\folder\b.mkv'
+        # Two audio-only files in one folder, the second with art of its own, for the cover-art case.
+        if (Test-Path 'C:\mpc-test\media\art') { Remove-Item 'C:\mpc-test\media\art' -Recurse -Force }
+        New-Item -ItemType Directory 'C:\mpc-test\media\art' | Out-Null
+        Copy-Item 'C:\mpc-test\media\dub.wav' 'C:\mpc-test\media\art\a.wav'
+        Copy-Item 'C:\mpc-test\media\dub.wav' 'C:\mpc-test\media\art\b.wav'
+        Copy-Item 'C:\mpc-test\media\still.png' 'C:\mpc-test\media\art\b.png'
         # A copy of stereo.mkv under a name the history-exclude-filter case's filter matches:
         # HistoryExcludeFilter=secret is a case-insensitive substring match on the full path.
         Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\SECRET-clip.mkv' -Force
@@ -1851,6 +1857,42 @@ try {
             }
         }
         Complete-Case 'api-volume-and-mute-round-trip' $problems
+    }
+
+    # 44. Cover art of the next file in the same folder: clsid2/mpc-hc@c9a1ceda5e ("Fix a coverart
+    #    loading issue"). UPDATE_MEDIA_ART caches the folder and author it last searched and skips
+    #    CoverArt::FindExternal while they match; the unfixed build cached them even when the search
+    #    found nothing. art\a.wav has no art, art\b.wav has its own b.png (still.png, flat red).
+    #    Opening b over a playing a queues it, so the close in between does not clear the cache
+    #    (CloseMedia runs UPDATE_MEDIA_ART only when no next file is queued), and the unfixed build
+    #    never looks for b.png: the view stays artless. Unfixed 2.6.4 (the fix is in 2.7.0).
+    if (Test-CaseSelected 'cover-art-next-file-in-same-folder') {
+        $c = Invoke-PlayerCase -Name 'cover-art-next-file-in-same-folder' -Clip 'art\a.wav' `
+            -Switches '/play /monitor 2' -PlugModes '1920x1080@60' `
+            -SecondArgumentLine '"C:\mpc-test\media\art\b.wav"' -SecondAtSec 3 -CaptureAtSec 7 -CloseAtSec 9
+        $problems = @(Get-ProcessProblem $c.Run)
+        if (-not $c.Png) {
+            $problems += 'no frame was captured'
+        } else {
+            # The player is windowed on the plugged monitor and the art is fitted into its view, so
+            # count red samples over the whole screen rather than probe one point; neither the
+            # desktop nor the logo shown without art has any saturated red. A 600x340 view is about
+            # 3200 samples at step 8.
+            $bmp = [System.Drawing.Bitmap]::FromFile($c.Png)
+            $red = 0; $total = 0
+            try {
+                for ($y = 0; $y -lt $bmp.Height; $y += 8) {
+                    for ($x = 0; $x -lt $bmp.Width; $x += 8) {
+                        $total++
+                        if ((Get-ColourName $bmp.GetPixel($x, $y)) -eq 'red') { $red++ }
+                    }
+                }
+            } finally { $bmp.Dispose() }
+            if ($red -lt 1000) {
+                $problems += "b.wav's cover art (b.png, flat red) is not shown: $red of $total samples are red (the folder cache from a.wav, which has no art, skipped the search)"
+            }
+        }
+        Complete-Case 'cover-art-next-file-in-same-folder' $problems
     }
 }
 finally {
