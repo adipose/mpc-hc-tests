@@ -78,6 +78,7 @@
     <ClCompile Include="test_GolombBuffer.cpp" />
     <ClCompile Include="test_HdmvClipInfo.cpp" />
     <ClCompile Include="test_SubRipAndSSA.cpp" />
+    <ClCompile Include="test_LibassFlatten.cpp" />
     <ClCompile Include="test_BitmapSubs.cpp" />
     <ClCompile Include="test_DSUtilText.cpp" />
     <ClCompile Include="test_Rasterizer.cpp" />
