@@ -20,6 +20,8 @@
 
 #include "stdafx.h"
 #include "HostHooks.h"
+#include "../../src/filters/renderer/VideoRenderers/RenderersSettings.h"
+#include "../../src/mpc-hc/VersionInfo.h"
 
 // What the static libraries expect their host executable to provide. In the
 // player these live in src/mpc-hc; here they return what a test set up.
@@ -36,4 +38,19 @@ SubRendererSettings& testutil::HostSubRendererSettings()
 SubRendererSettings GetSubRendererSettings()
 {
     return testutil::HostSubRendererSettings();
+}
+
+// SubPic.lib: CSubPicAllocatorPresenterImpl answers "version" from the exe's
+// VersionInfo.cpp, which needs the generated version headers.
+CString VersionInfo::GetVersionString()
+{
+    return _T("unit tests");
+}
+
+// SubPic.lib: AppSettings.cpp in the player. The presenter reads it only while
+// rendering, which no test does; constructing one would pull in
+// VideoRenderers.lib for CAdvRendererSettings::SetDefault.
+CRenderersSettings& GetRenderersSettings()
+{
+    std::abort();
 }
