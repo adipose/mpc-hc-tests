@@ -204,7 +204,9 @@ try {
                                                # 300 ms apart: close enough to arrive as one selection
             [double] $SecondAtSec = 2,
             [string] $PostCommands = '',         # comma-separated <seconds>:<command id>, posted as WM_COMMAND to the
-                                               # player's window at each time (e.g. '2:895,8:887')
+                                               # player's window at each time (e.g. '2:895,8:887'); the form
+                                               # <seconds>:msg:<msg>:<wParam> (decimal, e.g. '3:msg:16:0') posts
+                                               # that raw message to the player's frame instead
             [string] $ProbeAt = '',              # comma-separated seconds: at each, the guest reads the player's
                                                # playlist list control (count, selection, scroll, scrollbars)
                                                # into the run's probes array
@@ -215,6 +217,8 @@ try {
             [string] $CloseDialogAt = '',      # comma-separated <sec>:<window title>: at each, post IDCANCEL to
                                                # that window of the player's process (a modal it raised)
             [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
+            [switch] $NoUpdaterSetting,        # leave UpdaterAutoCheck out of the profile, so the first-run
+                                               # update-check prompt appears (the case that is about that prompt)
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
         )
@@ -224,9 +228,11 @@ try {
 
         # A fresh portable profile: an ini beside the exe puts the player in ini mode, and nothing of the last
         # case -- or of whoever used this guest before -- carries over. UpdaterAutoCheck must be present or
-        # the first-run prompt blocks an unattended player.
+        # the first-run prompt blocks an unattended player; -NoUpdaterSetting leaves it out, for the case
+        # that is about that prompt.
         $ini = [ordered]@{ UpdaterAutoCheck = 0; KeepHistory = 0; RememberFilePos = 0; Loop = 0; AllowMultipleInstances = 0; LogoFile = ''; ShowOSD = 0 }
         foreach ($k in $Settings.Keys) { $ini[$k] = $Settings[$k] }
+        if ($NoUpdaterSetting) { $ini.Remove('UpdaterAutoCheck') }
         $iniText = "[Settings]`r`n" + (($ini.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
         foreach ($section in $IniSections.Keys) {
             $body = $IniSections[$section]
@@ -286,7 +292,7 @@ try {
                 $taskArgs += " -SecondArgumentLine $secondEncoded"
                 if ($secondAtSec -ne 2) { $taskArgs += " -SecondAtSec $secondAtSec" }
             }
-            # Digits, dots, colons and commas only: survives the hand-built line with plain quoting.
+            # Digits, dots, colons, commas and the letters of "msg" only: survives the hand-built line with plain quoting.
             if ($postCommands) { $taskArgs += (' -PostCommands "{0}"' -f $postCommands) }
             if ($probeAt) { $taskArgs += (' -ProbeAt "{0}"' -f $probeAt) }
             if ($httpAt) { $taskArgs += " -HttpAt $httpAt -HttpPort $httpPort" }
@@ -1276,6 +1282,64 @@ try {
         if ($historyB -match 'SECRET-clip\.mkv') { $problems += 'the history names SECRET-clip.mkv although HistoryExcludeFilter=secret matches its path' }
         if ($historyB -notmatch 'stereo\.mkv') { $problems += 'stereo.mkv is not in the history although the filter does not match it' }
         Complete-Case 'history-exclude-filter' $problems
+    }
+
+    # 35. Closing the player while the first-run "check for updates?" prompt is up must not crash on
+    #    exit: clsid2/mpc-hc@92583276c5 (#3989). UpdateChecker::IsAutoUpdateEnabled raises the prompt
+    #    -- a modal AfxMessageBox, MB_YESNO, titled with the app name (mpc-hc64, there being no
+    #    AFX_IDS_APP_TITLE resource) -- from InitInstance, after the main frame is created and shown,
+    #    and only when the profile has no UpdaterAutoCheck, hence -NoUpdaterSetting. Because the box is
+    #    modal it pumps messages, so the WM_CLOSE posted to the frame at 3 s is dispatched while
+    #    InitInstance is still inside the box: the frame is destroyed and MFC clears m_pMainWnd.
+    #    The close goes as a raw message through -PostCommands because the runner's own -CloseAtSec
+    #    close runs only after the whole timed-event block, i.e. after the prompt was already
+    #    dismissed: a normal close that passes on the unfixed player too. Dismissing the prompt at
+    #    6 s (its modal loop ends on its own when the destroyed main window posts quit, so the close
+    #    is a backstop that may find no window, and nothing is asserted on it) hands control back to
+    #    InitInstance, which before the fix went straight to SendCommandLine(m_pMainWnd->m_hWnd) and
+    #    dereferenced the null m_pMainWnd -- 0xC0000005 on exit. Fixed, it returns FALSE, and
+    #    ExitInstance still saves the settings, so the prompt's answer (cancel, AUTOUPDATE_DISABLE) is
+    #    written. The ini check is what ties the pass to the prompt: a run in which the prompt never
+    #    appeared exits 0 too, but writes -1 (AUTOUPDATE_UNKNOWN).
+    if (Test-CaseSelected 'close-during-first-run-prompt') {
+        $c = Invoke-PlayerCase -Name 'close-during-first-run-prompt' -Clip '' -Switches '' `
+            -NoUpdaterSetting -PostCommands '3:msg:16:0' -CloseDialogAt '6:mpc-hc64'
+        $updater = Get-IniValue $c.Ini 'Settings' 'UpdaterAutoCheck'
+        Complete-Case 'close-during-first-run-prompt' @(
+            (Get-ProcessProblem $c.Run),
+            $(if (-not $c.Run.posts[0].delivered) { 'the WM_CLOSE posted at 3 s did not reach the player window' }),
+            $(if ($updater -ne '0') { "UpdaterAutoCheck came back as $updater, expected 0: the first-run prompt did not appear, or was never answered" })
+        )
+    }
+
+    # 36. A headless /thumbnails run must report its failures to the caller, not to a message box:
+    #    clsid2/mpc-hc@40de2ddea8 (#4234, of issue #4228 -- /thumbnails on a missing source or an
+    #    unwritable output raised a modal and hung forever, there being nobody to dismiss it). The
+    #    commit latches CLSW_THUMBNAILS as headless (DoMessageBox answers as if cancelled and reports
+    #    the text on stderr), and the failure paths -- the open-failed one (OnOpenMediaFailed) and the
+    #    empty-playlist one (OpenCurPlaylistItem) -- report the reason, post WM_CLOSE and exit with
+    #    m_nExitCode 1. The first run's source does not exist, so it must exit by itself with 1. The
+    #    second is the control: stereo.mkv's sheet is written beside the clip as stereo.mkv_thumbs.jpg
+    #    (MakeSnapshotFileName; bSnapShotKeepVideoExtension defaults on) and the run exits 0, so the
+    #    case cannot pass on a player that fails everything. Get-ProcessProblem would call the 1 a
+    #    failure, so the exit codes are asserted directly. The runner kills the process on a timeout,
+    #    so even an unfixed player leaves no modal behind.
+    if (Test-CaseSelected 'thumbnails-errors-exit-nonzero') {
+        $a = Invoke-PlayerCase -Name 'thumbnails-missing-source' -Clip 'does-not-exist.mkv' -Switches '/thumbnails /minimized'
+        $b = Invoke-PlayerCase -Name 'thumbnails-control' -Clip 'stereo.mkv' -Switches '/thumbnails /minimized'
+        $thumbsWritten = Invoke-Command -Session $session {
+            $f = 'C:\mpc-test\media\stereo.mkv_thumbs.jpg'
+            $written = (Test-Path $f) -and ((Get-Item $f).Length -gt 0)
+            Remove-Item $f -Force -ErrorAction SilentlyContinue
+            $written
+        }
+        $problems = @()
+        if ($a.Run.timedOut) { $problems += 'the missing-source run did not exit by itself (the pre-fix hang: a message box nobody can dismiss)' }
+        elseif ($a.Run.exitCode -ne 1) { $problems += "the missing-source run exited with code $($a.Run.exitCode), expected 1" }
+        if ($b.Run.timedOut) { $problems += 'the control run did not exit by itself' }
+        elseif ($b.Run.exitCode -ne 0) { $problems += "the control run exited with code $($b.Run.exitCode), expected 0" }
+        if (-not $thumbsWritten) { $problems += 'the control run left no stereo.mkv_thumbs.jpg beside the clip' }
+        Complete-Case 'thumbnails-errors-exit-nonzero' $problems
     }
 }
 finally {

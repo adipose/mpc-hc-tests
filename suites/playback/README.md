@@ -20,7 +20,8 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
 1. A fresh portable profile: `mpc-hc64.ini` is written beside the deployed
    exe, so the player runs in ini mode and nothing carries over from the last
    case or the guest's history. `UpdaterAutoCheck=0` is always in it; without
-   it an unattended player sits behind its first-run prompt. A case that is
+   it an unattended player sits behind its first-run prompt (one case is
+   about that prompt and leaves the key out). A case that is
    the second run of a scenario keeps the history file
    (`mpc-hc64.history.ini`, where positions and track choices live) and
    rewrites only the settings.
@@ -29,7 +30,10 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
    or, for a scenario that ends part-way, sent WM_CLOSE at a given time so
    that its own shutdown runs. A case can also post menu commands
    (WM_COMMAND) to the player's window at given times; that is how the
-   end-of-file cases seek, change rate and reopen. And a case can probe
+   end-of-file cases seek, change rate and reopen. The same mechanism can
+   post a raw message instead of a WM_COMMAND (`3:msg:16:0` posts
+   WM_CLOSE at 3 s), which is how a case closes the frame while a modal
+   prompt owns the main window handle. And a case can probe
    the player's playlist list control at given times, which is how the
    playlist cases see the list's state.
 3. Evidence is collected from outside the player:
@@ -112,6 +116,8 @@ centre the box there. The band cases only ask which colour is present.
 | `web-playlist-click-with-chapters` | the remote's playlist click (`wm_command=-3&index=1`) on chaptered media opens playlist entry 2: a second capture with twotracks.mkv's 1200 Hz, not a chapter jump | #4078, #4093; 4802b44e4b |
 | `web-status-json-escapes-paths` | `/status.json` parses, and its `path` field equals the real path of `json test\it's ünïcode & co.mkv` exactly | #4053; a77c59b537 |
 | `history-exclude-filter` | `HistoryExcludeFilter=secret` (semicolon-separated substrings, case-insensitive on the full path): `SECRET-clip.mkv` plays but leaves no entry in the history ini, while `stereo.mkv` in a second run on the same profile is recorded | #3985, #3920, #4196; f310dc2461 (#3987) |
+| `close-during-first-run-prompt` | a WM_CLOSE is posted to the frame while the first-run update-check prompt is up (the profile leaves `UpdaterAutoCheck` out so the prompt appears; the close has to be a posted message, because the runner's timed close would fire only after the prompt was dismissed); after the prompt is dismissed the player exits 0 by itself, and the saved profile's `UpdaterAutoCheck=0` proves the prompt was answered | #3989; 92583276c5 |
+| `thumbnails-errors-exit-nonzero` | `/thumbnails /minimized` on a missing source exits by itself with code 1 (pre-fix: a message box nobody could dismiss, so a hang); a control run on `stereo.mkv` exits 0 and leaves `stereo.mkv_thumbs.jpg` beside the clip | #4228; 40de2ddea8 (#4234) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

@@ -24,8 +24,10 @@ param(
     [int] $SecondIntervalMs = 300,
     [string] $PostCommands = '',         # comma-separated <seconds>:<command id>: a WM_COMMAND posted to the
                                          # player's main window at that time after start, as a menu accelerator
-                                         # the user pressed (digits, dots and colons only, so it survives the
-                                         # hand-built task line unencoded)
+                                         # the user pressed; <seconds>:msg:<msg>:<wParam> (msg and wParam in
+                                         # decimal, e.g. 3:msg:16:0 for WM_CLOSE) posts that raw message to the
+                                         # player's frame instead (digits, dots, colons and the letters of
+                                         # "msg" only, so it survives the hand-built task line unencoded)
     [string] $ProbeAt = '',              # comma-separated seconds after start: at each, read the player's
                                          # playlist list control from outside (count, selection, scroll
                                          # position, scrollbars) and the main toolbar's buttons (command ids
@@ -427,7 +429,13 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
     if ($PostCommands) {
         foreach ($entry in ($PostCommands -split ',')) {
             $parts = $entry -split ':'
-            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = [int] $parts[1]; kind = 'post' }
+            $at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture)
+            if ($parts[1] -eq 'msg') {
+                # <sec>:msg:<msg>:<wParam> in decimal: that raw message, not a WM_COMMAND
+                $events += [pscustomobject]@{ at = $at; id = 0; kind = 'post'; msg = [int] $parts[2]; wParam = [int] $parts[3] }
+            } else {
+                $events += [pscustomobject]@{ at = $at; id = [int] $parts[1]; kind = 'post'; msg = 0; wParam = 0 }
+            }
         }
     }
     if ($ProbeAt) {
@@ -464,6 +472,13 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
             $webAnswers += Send-WebProbe -At $step.at -Method $step.method -Path $step.path -Body $step.body -Port $HttpPort -OutDir (Split-Path $Out) -Index $step.id
         } elseif ($step.kind -eq 'dialog') {
             $dialogCloses += [ordered]@{ at = $step.at; title = $step.title; delivered = (Close-PlayerDialog $p.Id $step.title) }
+        } elseif ($step.msg) {
+            # A raw message to the frame itself, found by class like Send-Close: Process.MainWindowHandle
+            # is cached and behind a modal can name nothing, which is exactly when this form is used.
+            $main = Find-ProcessWindow -ProcessId $p.Id -Class 'MediaPlayerClassicW'
+            $delivered = ($main -ne [IntPtr]::Zero) -and
+                         [MpcTest.User32]::PostMessageW($main, $step.msg, [IntPtr] $step.wParam, [IntPtr]::Zero)
+            $posts += [ordered]@{ at = $step.at; id = 0; msg = $step.msg; delivered = [bool] $delivered }
         } else {
             $p.Refresh()
             $delivered = (-not $p.HasExited) -and ($p.MainWindowHandle -ne [IntPtr]::Zero) -and
