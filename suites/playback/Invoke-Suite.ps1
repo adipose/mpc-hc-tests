@@ -1963,6 +1963,36 @@ try {
         }
         Complete-Case 'reopen-dialog-after-language-change' $problems
     }
+
+    # 47. A modeless resizable dialog follows a display scale change: e704c6b7af (#3678, "dpi-aware
+    #    dialog to support modeless dialogs ..."). Organize Favorites (937; it needs a favorite to be
+    #    enabled) opens at 100%, the primary monitor goes to 150% under it, and the dialog, its tab
+    #    control (IDC_TAB1 11200) and its OK button (IDOK 1) are measured before and after.
+    #    Windows resizes the dialog window itself on both builds (measured 499x358 -> 570x472, the
+    #    same on unfixed 2.5.5), so that proves nothing; what the fix does is re-lay the controls out
+    #    from the template at the new DPI. Measured on develop: OK 101x26 -> 116x35. On 2.5.5 it
+    #    stays 102x26, a 100% button in a 150% dialog. Asserted: OK at least x1.25 taller and x1.1
+    #    wider, and still inside the dialog.
+    if (Test-CaseSelected 'modeless-dialog-follows-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'modeless-dialog-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' `
+            -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937' `
+            -ControlAt '3:probe:11200,3.2:probe:1,4:dpi:0:150,8:probe:11200,8.2:probe:1,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
+        $problems = @(Get-ProcessProblem $c.Run)
+        $steps = @($c.Run.controls)
+        $probeOf = { param([int] $Ctrl, [bool] $After) $steps | Where-Object { $_.op -eq 'probe' -and $_.ctrl -eq $Ctrl -and (($_.at -gt 5) -eq $After) } | Select-Object -First 1 }
+        $ok0 = & $probeOf 1 $false; $ok1 = & $probeOf 1 $true
+        if (-not $ok0 -or -not $ok0.found -or -not $ok1 -or -not $ok1.found) {
+            $problems += 'Organize Favorites or its OK button was not found before and after the change'
+        } else {
+            $w = { param($r) $r[2] - $r[0] }; $h = { param($r) $r[3] - $r[1] }
+            Note Gray ("      dialog {0}x{1} -> {2}x{3}, OK {4}x{5} -> {6}x{7}" -f (& $w $ok0.dialogRect), (& $h $ok0.dialogRect), (& $w $ok1.dialogRect), (& $h $ok1.dialogRect), (& $w $ok0.rect), (& $h $ok0.rect), (& $w $ok1.rect), (& $h $ok1.rect))
+            $hRatio = (& $h $ok1.rect) / (& $h $ok0.rect); $wRatio = (& $w $ok1.rect) / (& $w $ok0.rect)
+            if ($hRatio -lt 1.25 -or $wRatio -lt 1.1) { $problems += ("the OK button changed x{0:N2} wide, x{1:N2} tall for a 100%->150% change: the controls were not laid out again at the new DPI" -f $wRatio, $hRatio) }
+            $d = $ok1.dialogRect; $r = $ok1.rect
+            if ($r[2] -gt $d[2] -or $r[3] -gt $d[3]) { $problems += "after the change the OK button ($($r -join ',')) reaches outside the dialog ($($d -join ','))" }
+        }
+        Complete-Case 'modeless-dialog-follows-dpi-change' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

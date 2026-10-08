@@ -62,12 +62,16 @@ param(
                                          # selects the combo item whose item data is <data> and tells the
                                          # parent CBN_SELCHANGE; <sec>:cmd:<ctrl>:<id> posts WM_COMMAND <id>
                                          # to the top-level dialog holding the control (1 IDOK, 2 IDCANCEL);
-                                         # <sec>:size:<ctrl>:<px> grows that dialog by px each way.
+                                         # <sec>:size:<ctrl>:<px> grows that dialog by px each way;
+                                         # <sec>:dpi:0:<percent> sets the primary monitor's display scale
+                                         # (put back to 100% when the steps are done). A probe also records
+                                         # the control's and its dialog's screen rects.
                                          # Decimal. Recorded under "controls".
 )
 
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o') }
+$script:dpiChanged = $false
 
 if ($true) {   # always: Send-Close finds the player's frame by class for every close, not only these options
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
@@ -425,8 +429,64 @@ function Find-DialogControl {
     [IntPtr]::Zero
 }
 
+# The primary monitor's display scale, set live through DisplayConfig: DISPLAYCONFIG_DEVICE_INFO_SET_DPI_SCALE
+# (-4), undocumented but what Settings > Display uses since 1703. The value is a step relative to the
+# monitor's recommended scale, which GET_DPI_SCALE (-3) gives as minus its minimum. Windows sends the
+# player's windows on that monitor WM_DPICHANGED, as a user changing the scale does. Must run in the
+# console user's session, which this script does.
+function Set-PrimaryScale {
+    param([int] $Percent)
+    if (-not ('MpcTest.Dpi' -as [type])) {
+        Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace MpcTest {
+public static class Dpi {
+    [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+    [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint paths, byte[] pathArray, ref uint modes, byte[] modeArray, IntPtr topology);
+    [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(byte[] packet);
+    [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(byte[] packet);
+    static readonly int[] Steps = { 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500 };
+    static byte[] Packet(int type, int size, byte[] paths, int i) {
+        var b = new byte[size];
+        BitConverter.GetBytes(type).CopyTo(b, 0);
+        BitConverter.GetBytes(size).CopyTo(b, 4);
+        Array.Copy(paths, i * 72, b, 8, 12);   // DISPLAYCONFIG_PATH_INFO.sourceInfo: adapterId (LUID), id
+        return b;
+    }
+    public static int SetPrimary(int percent) {
+        uint np, nm;
+        GetDisplayConfigBufferSizes(2, out np, out nm);   // QDC_ONLY_ACTIVE_PATHS
+        var paths = new byte[np * 72]; var modes = new byte[nm * 64];
+        int q = QueryDisplayConfig(2, ref np, paths, ref nm, modes, IntPtr.Zero);
+        if (q != 0) return q;
+        for (int i = 0; i < np; i++) {
+            var name = Packet(1, 20 + 64, paths, i);   // DISPLAYCONFIG_SOURCE_DEVICE_NAME: viewGdiDeviceName
+            DisplayConfigGetDeviceInfo(name);
+            if (System.Text.Encoding.Unicode.GetString(name, 20, 64).TrimEnd('\0') != System.Windows.Forms.Screen.PrimaryScreen.DeviceName) continue;
+            var get = Packet(-3, 32, paths, i);
+            DisplayConfigGetDeviceInfo(get);
+            int recommended = Math.Abs(BitConverter.ToInt32(get, 20));
+            var set = Packet(-4, 24, paths, i);
+            BitConverter.GetBytes(Array.IndexOf(Steps, percent) - recommended).CopyTo(set, 20);
+            return DisplayConfigSetDeviceInfo(set);
+        }
+        return -1;
+    }
+}
+}
+'@
+    }
+    [MpcTest.Dpi]::SetPrimary($Percent)
+}
+
 function Invoke-ControlStep {
     param([int] $ProcessId, $Step)
+    if ($Step.op -eq 'dpi') {
+        # <sec>:dpi:0:<percent>, no control: the primary monitor's scale. The runner puts it back to 100%.
+        $script:dpiChanged = $true
+        return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = (Set-PrimaryScale ([int] $Step.value)) }
+    }
     $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
@@ -436,6 +496,9 @@ function Invoke-ControlStep {
     $record.dialog = $title.ToString()
     if ($Step.op -eq 'probe') {
         $record.icon = ([MpcTest.User32]::SendMessageW($ctrl, 0x0171, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)   # STM_GETICON
+        # Screen rects (left, top, right, bottom) of the control and of its top-level dialog.
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($root, $rect); $record.dialogRect = $rect
     } elseif ($Step.op -eq 'combo') {
         $count = [int] [MpcTest.User32]::SendMessageW($ctrl, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)   # CB_GETCOUNT
         $index = -1
@@ -661,6 +724,9 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
     if ($CloseDialogAt) { $result.dialogCloses = $dialogCloses }
     if ($AcceptDialogAt) { $result.dialogAccepts = $dialogAccepts }
     if ($ControlAt) { $result.controls = $controls }
+    # A case that changed the display scale leaves the guest at 100% for whoever runs next, whatever the
+    # case did; the guests run at 100%.
+    if ($script:dpiChanged) { $result.dpiRestored = Set-PrimaryScale 100 }
 }
 
 $closeWatch = $null
