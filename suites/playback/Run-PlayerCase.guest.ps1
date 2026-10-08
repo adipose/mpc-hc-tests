@@ -1,8 +1,9 @@
 # Runs on the target, in the console session (the player needs a desktop). Starts the player with the given
 # arguments, optionally captures the virtual monitor part-way through, optionally posts WM_COMMAND messages to
-# the player's window at given times, optionally probes the player's playlist list control and main toolbar at
-# given times, optionally makes timed HTTP requests to the player's web server and dismisses dialogs those
-# requests raised, waits for the player to exit by itself, and kills it if it does not.
+# the player's window at given times, optionally probes the player's playlist list control, main toolbar and
+# main window geometry at given times, optionally makes timed HTTP requests to the player's web server and
+# dismisses (or accepts) dialogs those requests or the open raise, waits for the player to exit by itself,
+# and kills it if it does not.
 # Writes one JSON object to -Out; the host does the asserting.
 param(
     [Parameter(Mandatory)] [string] $Exe,
@@ -47,10 +48,13 @@ param(
                                          # A 4xx/5xx is a status, not an exception; a refused connection
                                          # is status 0.
     [int] $HttpPort = 0,
-    [string] $CloseDialogAt = ''         # comma-separated <sec>:<window title>: at that time, find a
+    [string] $CloseDialogAt = '',        # comma-separated <sec>:<window title>: at that time, find a
                                          # top-level window of the player's process with this title (a modal
                                          # it raised) and post it IDCANCEL, so the player can still be
                                          # closed afterwards. Titles may not contain commas or colons.
+    [string] $AcceptDialogAt = ''        # same shape as CloseDialogAt, but posts IDOK instead (accepts the
+                                         # dialog -- the RAR entry selector's Select button, which no other
+                                         # mechanism here can press). Recorded under "dialogAccepts".
 )
 
 $ErrorActionPreference = 'Continue'
@@ -102,6 +106,25 @@ public static extern bool VirtualFreeEx(System.IntPtr process, System.IntPtr add
 public static extern bool ReadProcessMemory(System.IntPtr process, System.IntPtr address, byte[] buffer, System.UIntPtr size, out System.UIntPtr read);
 [System.Runtime.InteropServices.DllImport("kernel32.dll")]
 public static extern bool CloseHandle(System.IntPtr handle);
+'@
+
+    # The window-geometry part of the probe: the main window's rect (invisible resize
+    # borders included, what the player's GetWindowRect sees), its DWM extended frame
+    # bounds (the visible part -- their difference is the invisible border the player
+    # inflates its work area by), whether it is maximized, and the primary monitor's
+    # work area. The zoom cases assert on all four.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace MpcTest {
+    public struct WinRect { public int left; public int top; public int right; public int bottom; }
+    public static class Geometry {
+        [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out WinRect rect);
+        [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(int action, int param, out WinRect rect, int winIni);
+        [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out WinRect rect, int size);
+    }
+}
 '@
 }
 
@@ -189,7 +212,9 @@ function Find-PlayerToolbar {
 # focused), LVM_GETTOPINDEX, LVM_GETCOUNTPERPAGE, visibility and the scrollbar style bits. A list view
 # sets WS_HSCROLL/WS_VSCROLL while the scrollbar is shown, so the style says whether one is there.
 # Also one probe of the player toolbar: TB_BUTTONCOUNT (WM_USER + 24) and, per button, the idCommand
-# of its TBBUTTON, recorded as toolbarIds in button order.
+# of its TBBUTTON, recorded as toolbarIds in button order. And one probe of the main window's
+# geometry: window rect, DWM extended frame bounds (frameRect), maximized, and the primary
+# monitor's work area.
 function Get-PlaylistProbe {
     param([double] $At, [int] $ProcessId)
     $h = Find-PlaylistListView $ProcessId
@@ -224,6 +249,28 @@ function Get-PlaylistProbe {
         } finally {
             [void] [MpcTest.Kernel32]::CloseHandle($hProc)
         }
+    }
+    # Window geometry: the main frame by class, like Send-Close (Process.MainWindowHandle
+    # is cached and behind a modal can name nothing).
+    $probe.mainRect = $null
+    $probe.frameRect = $null
+    $probe.maximized = $null
+    $probe.workArea = $null
+    $main = Find-ProcessWindow -ProcessId $ProcessId -Class 'MediaPlayerClassicW'
+    if ($main -ne [IntPtr]::Zero) {
+        $wr = New-Object MpcTest.WinRect
+        if ([MpcTest.Geometry]::GetWindowRect($main, [ref] $wr)) {
+            $probe.mainRect = [ordered]@{ left = $wr.left; top = $wr.top; right = $wr.right; bottom = $wr.bottom }
+        }
+        $fr = New-Object MpcTest.WinRect
+        if ([MpcTest.Geometry]::DwmGetWindowAttribute($main, 9, [ref] $fr, 16) -eq 0) {   # DWMWA_EXTENDED_FRAME_BOUNDS
+            $probe.frameRect = [ordered]@{ left = $fr.left; top = $fr.top; right = $fr.right; bottom = $fr.bottom }
+        }
+        $probe.maximized = [MpcTest.Geometry]::IsZoomed($main)
+    }
+    $wa = New-Object MpcTest.WinRect
+    if ([MpcTest.Geometry]::SystemParametersInfoW(0x0030, 0, [ref] $wa, 0)) {   # SPI_GETWORKAREA, primary monitor
+        $probe.workArea = [ordered]@{ left = $wa.left; top = $wa.top; right = $wa.right; bottom = $wa.bottom }
     }
     $probe
 }
@@ -318,6 +365,18 @@ function Close-PlayerDialog {
     return ((Find-ProcessWindow -ProcessId $ProcessId -Title $Title) -eq [IntPtr]::Zero)
 }
 
+# The accepting twin of Close-PlayerDialog: post IDOK (the modal's default button) and
+# report whether the dialog is gone afterwards. A modal pumps messages, so a posted
+# WM_COMMAND is dispatched the same as a button click.
+function Accept-PlayerDialog {
+    param([int] $ProcessId, [string] $Title)
+    $dlg = Find-ProcessWindow -ProcessId $ProcessId -Title $Title
+    if ($dlg -eq [IntPtr]::Zero) { return $false }
+    [void] [MpcTest.User32]::PostMessageW($dlg, 0x0111, [IntPtr] 1, [IntPtr]::Zero)   # WM_COMMAND, IDOK
+    Start-Sleep -Milliseconds 500
+    return ((Find-ProcessWindow -ProcessId $ProcessId -Title $Title) -eq [IntPtr]::Zero)
+}
+
 function Send-Close {
     param($Process, [string] $Kind)
     if ($Kind -eq 'SC_CLOSE') {
@@ -358,13 +417,10 @@ if ($RendererFile -and (Test-Path $RendererFile)) {
 $p = if ($ArgumentLine) { Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru } else { Start-Process -FilePath $Exe -PassThru }
 $result.pid = $p.Id
 
-if ($CaptureAtSec -gt 0) {
-    Start-Sleep -Milliseconds ([int]($CaptureAtSec * 1000))
-    $result.aliveAtCapture = -not $p.HasExited
-    $result.capture = (& 'C:\vdisplay\vdisplayctl.exe' capture $CaptureConnector $CapturePath | Out-String).Trim()
-    $result.captureExit = $LASTEXITCODE
-}
-
+# The frame capture is an event in the time-ordered sequence below (kind 'capture'), so a
+# case can drive the player first and capture after: posting commands at 4 and 6 s and
+# capturing at 8.5 s captures the player those commands drove. No capture happens outside
+# the sequence.
 if ($RedirectStorm -gt 0) {
     # With AllowMultipleInstances=0 each further instance hands its file to the running player over WM_COPYDATA
     # and exits, and the running player closes what it has and opens the new file: the redirect path, at speed.
@@ -417,7 +473,7 @@ if ($SecondArgumentLine) {
     }
 }
 
-if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
+if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogAt -or $CaptureAtSec -gt 0) {
     # Posts, probes, web requests and dialog closes are one time-ordered sequence; at the same
     # second the post goes first, so a probe can observe what its command did. Delivered (for a
     # post) means a main window existed and PostMessageW accepted the message; MFC still drops a
@@ -457,12 +513,23 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
             $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'dialog'; title = $parts[1] }
         }
     }
-    # At the same second: post first, then http, then dialog close, then probe (the probe sees the rest).
-    $kindOrder = @{ post = 0; http = 1; dialog = 2; probe = 3 }
+    if ($AcceptDialogAt) {
+        foreach ($entry in ($AcceptDialogAt -split ',')) {
+            $parts = $entry -split ':', 2
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'accept'; title = $parts[1] }
+        }
+    }
+    if ($CaptureAtSec -gt 0) {
+        $events += [pscustomobject]@{ at = $CaptureAtSec; id = 0; kind = 'capture' }
+    }
+    # At the same second: post first, then http, then dialog close or accept, then the frame
+    # capture, then probe (the probe sees the rest).
+    $kindOrder = @{ post = 0; http = 1; dialog = 2; accept = 3; capture = 4; probe = 5 }
     $posts = @()
     $probes = @()
     $webAnswers = @()
     $dialogCloses = @()
+    $dialogAccepts = @()
     foreach ($step in ($events | Sort-Object at, { $kindOrder[$_.kind] })) {
         $elapsed = ((Get-Date) - [datetime]$result.started).TotalSeconds
         if ($step.at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($step.at - $elapsed) * 1000)) }
@@ -472,6 +539,12 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
             $webAnswers += Send-WebProbe -At $step.at -Method $step.method -Path $step.path -Body $step.body -Port $HttpPort -OutDir (Split-Path $Out) -Index $step.id
         } elseif ($step.kind -eq 'dialog') {
             $dialogCloses += [ordered]@{ at = $step.at; title = $step.title; delivered = (Close-PlayerDialog $p.Id $step.title) }
+        } elseif ($step.kind -eq 'accept') {
+            $dialogAccepts += [ordered]@{ at = $step.at; title = $step.title; delivered = (Accept-PlayerDialog $p.Id $step.title) }
+        } elseif ($step.kind -eq 'capture') {
+            $result.aliveAtCapture = -not $p.HasExited
+            $result.capture = (& 'C:\vdisplay\vdisplayctl.exe' capture $CaptureConnector $CapturePath | Out-String).Trim()
+            $result.captureExit = $LASTEXITCODE
         } elseif ($step.msg) {
             # A raw message to the frame itself, found by class like Send-Close: Process.MainWindowHandle
             # is cached and behind a modal can name nothing, which is exactly when this form is used.
@@ -490,6 +563,7 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt) {
     if ($ProbeAt) { $result.probes = $probes }
     if ($HttpAt) { $result.http = $webAnswers }
     if ($CloseDialogAt) { $result.dialogCloses = $dialogCloses }
+    if ($AcceptDialogAt) { $result.dialogAccepts = $dialogAccepts }
 }
 
 $closeWatch = $null

@@ -5,14 +5,16 @@ the output devices -- not on what the player says it did.
 
 ```
 New-PlaybackClips.ps1     ffmpeg-synthesised clips and clips.json, the
-                          declaration of what each contains (media\, gitignored)
+                          declaration of what each contains (media\, gitignored);
+                          the RAR fixture is built only when WinRAR's rar.exe
+                          is on the host (stored members)
 Invoke-Suite.ps1          the suite: deploy the player, run the cases, assert
 Run-PlayerCase.guest.ps1  target side: start the player in the console session,
                           grab a frame part-way, post menu commands and probe
-                          the playlist's list control and the toolbar at given
-                          times, make timed HTTP requests to the player's web
-                          server (and close dialogs they raise), wait for the
-                          player to exit
+                          the playlist's list control, the toolbar and the main
+                          window geometry at given times, make timed HTTP
+                          requests to the player's web server (and close or
+                          accept dialogs they raise), wait for the player to exit
 ```
 
 ## How a case works
@@ -55,13 +57,17 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
      into memory allocated in the player, read back over
      `ReadProcessMemory`, and the toolbar is the `ToolbarWindow32` whose
      first button is `ID_LEFTSEPARATOR` -- PlaceButtons adds it before
-     anything else;
+     anything else. And it records the main window's geometry: the window
+     rect, the DWM extended frame bounds (their difference is the invisible
+     border the player inflates its work area by), the maximized state and
+     the primary monitor's work area;
    - **web answers** -- for a case with the web interface on, timed HTTP
      requests to `http://127.0.0.1:<port>` (the server binds IPv4 only):
      status, elapsed ms, and the body (saved as `http-<n>.bin`). A
      4xx/5xx is an answer; a refused connection is status 0. A case can
      also close a dialog a web command raised (WM_CLOSE, then IDCANCEL,
-     to the dialog window) so the player can still be closed;
+     to the dialog window) so the player can still be closed, or accept
+     one (IDOK, e.g. the RAR entry selector's Select button);
    - **process** -- exited by itself, exit code 0.
 
 The clips are built so that content identifies itself: four flat colour
@@ -121,6 +127,11 @@ centre the box there. The band cases only ask which colour is present.
 | `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: `Get-ToneTimeline.ps1` hears the 800 Hz segment more than once through and nothing at 1000 Hz or above (unfixed: it starts at mark A and plays on to the end, 800 Hz once, then 900-1200 Hz) | #3863; patch760 |
 | `toolbar-older-layout-keeps-its-order` | a layout as 2.5.4 saved it (no left separator, no ButtonLayoutRevision) loads in its saved order | patch759 |
 | `secondary-sub-position-defaults-to-8` | a profile without `SecondarySubVerPos` saves it back as 8, the constructor's default (unfixed: 0, the missing-key fallback `LoadSettings` used) | #4299; 51937d1eee |
+| `floating-playlist-restored-after-fullscreen` | with `HideWindowedControls=1`, a seeded floating playlist (`[ToolBars\Playlist] DockState=59423, Visible=1`) is hidden entering fullscreen and visible again after leaving it (unfixed 2.8.0: the autohide path can't reveal a floating bar and it stays hidden) | #4083; 5f9e5d66df |
+| `zoom-stays-in-work-area` | zoom-in on an audio-only file showing the logo moves the window nowhere; a window seeded to fill the work area stays inside it and maximises on one zoom-in (unfixed 2.6.4: zooms the logo's window, and grows a full window past the work area without maximising) | #3826; a9d0cf671b |
+| `rar-skip-within-archive` | a two-entry stored rar (selector dialog accepted with IDOK): skip-forward opens the second entry — 1600 Hz follows 440/880 Hz, not the next file in the folder (unfixed 2.5.5: `twotracks.mkv`, 1200 Hz) | #3644; 19432a0678 |
+| `replaygain-track-gain` | a FLAC tagged `REPLAYGAIN_TRACK_GAIN=-6.00 dB`: `ReplayGainMode=1` captures about 6 dB quieter than `ReplayGainMode=0` (FLAC only; the commit reads container metadata as ffmpeg keeps it, which covers FLAC, MP4 and ID3v2 but not Opus) | #4155; 2607141ae5 |
+| `hlg-on-evrcp-is-not-washed-out` | a 10-bit HLG flat field at signal 0.5 on EVR-CP comes out at 96.4, the HLG-to-SDR shader's own math (unfixed 2.8.2: no conversion, the 0.5 signal shows as-is, measured 126.4) | #4287; f185a85594 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

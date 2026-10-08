@@ -146,7 +146,7 @@ try {
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
-    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png', '.flac', '.rar' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -220,7 +220,9 @@ try {
             [switch] $NoUpdaterSetting,        # leave UpdaterAutoCheck out of the profile, so the first-run
                                                # update-check prompt appears (the case that is about that prompt)
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
-            [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
+            [hashtable] $IniSections = @{},    # whole ini sections besides [Settings], for the internal filters
+            [string] $AcceptDialogAt = ''     # like CloseDialogAt, but posts IDOK: accepts the dialog (the RAR
+                                               # entry selector's Select button, which no other option can press)
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
         $guestOut = "C:\mpc-test\out\$tag.json"
@@ -250,8 +252,8 @@ try {
         $httpEncoded = (@($HttpAt | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -297,12 +299,16 @@ try {
             if ($probeAt) { $taskArgs += (' -ProbeAt "{0}"' -f $probeAt) }
             if ($httpAt) { $taskArgs += " -HttpAt $httpAt -HttpPort $httpPort" }
             if ($closeDialogAt) { $taskArgs += (' -CloseDialogAt "{0}"' -f $closeDialogAt) }
+            if ($acceptDialogAt) { $taskArgs += (' -AcceptDialogAt "{0}"' -f $acceptDialogAt) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
             Start-ScheduledTask -TaskName 'MpcPlaybackCase'
-            $deadline = (Get-Date).AddSeconds(90)
-            while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            $taskStarted = Get-Date
+            $deadline = $taskStarted.AddSeconds(90)
+            while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 2
+            }
             Unregister-ScheduledTask -TaskName 'MpcPlaybackCase' -Confirm:$false
             Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
 
@@ -413,6 +419,22 @@ try {
         [ordered]@{ ButtonSequence = $text.ToString(); ButtonSequenceSize = 4 * $Ids.Count }
     }
 
+    # A RECT (four little-endian int32s, left/top/right/bottom) in the same 'A'..'P'
+    # ini binary encoding -- which is how [Settings] LastWindowRect is stored, so a
+    # case can seed the player's window position and size (with RememberWindowPos and
+    # RememberWindowSize on).
+    function Get-RectIniBinary {
+        param([int] $Left, [int] $Top, [int] $Right, [int] $Bottom)
+        $text = [Text.StringBuilder]::new()
+        foreach ($v in @($Left, $Top, $Right, $Bottom)) {
+            foreach ($byte in [BitConverter]::GetBytes($v)) {
+                [void] $text.Append([char](65 + ($byte -band 0x0F)))
+                [void] $text.Append([char](65 + (($byte -shr 4) -band 0x0F)))
+            }
+        }
+        $text.ToString()
+    }
+
     function Test-Audio {
         param([string] $Wav, [int[]] $Tones, [double] $Seconds, [double] $Tolerance = 0.4, [double] $SkipSeconds = 0.1)
         if (-not $Wav) { return 'no audio reached the endpoint' }
@@ -488,6 +510,18 @@ try {
         return "the band is $other, expected $Expected"
     }
 
+    # The average RMS of a capture's non-silent windows (Get-ToneTimeline.ps1 reads one per
+    # window; hz > 0 marks the non-silent ones), skipping the first and the last window where
+    # the stream starts and stops. For the case that compares loudness between two runs.
+    function Get-CaptureRms {
+        param([string] $Wav)
+        if (-not $Wav) { return $null }
+        $windows = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $Wav | Where-Object { $_.hz -gt 0 })
+        if ($windows.Count -lt 4) { return $null }
+        $windows = $windows[1..($windows.Count - 2)]
+        [double] ($windows | Measure-Object rms -Average).Average
+    }
+
     # A case runs when -Case was not given or its name matches one of the patterns. A case the filter skips is
     # not counted at all: its Complete-Case never runs, so it is neither a pass, a fail, nor a skip.
     function Test-CaseSelected {
@@ -505,6 +539,18 @@ try {
         $black = if ($Field.depth -eq 10) { 64.0 } else { 16.0 }
         $white = if ($Field.depth -eq 10) { 940.0 } else { 235.0 }
         $signal = if ($Field.range -eq 'limited') { ($Field.code - $black) / ($white - $black) } else { $Field.code / $peak }
+        if ($Field.transfer -eq 'hlg') {
+            # The fixed EVR-CP/Sync HLG-to-SDR pass (f185a85594, src/filters/renderer/VideoRenderers/
+            # HLGToSDR.h): the inverse OETF, the 1.2 system gamma, the GAIN over REF_WHITE^gamma
+            # scaling, a soft knee at 0.60, and gamma 2.0 back. A neutral field is unaffected by
+            # the BT.2020->BT.709 matrix (its rows sum to 1), so the level is exact for a grey.
+            $e = $signal
+            if ($e -le 0.5) { $scene = $e * $e / 3.0 } else { $scene = ([math]::Exp(($e - 0.55991073) / 0.17883277) + 0.28466892) / 12.0 }
+            $display = [math]::Pow($scene, 1.2)
+            $sdr = $display * (0.57 / [math]::Pow(0.2640, 1.2))
+            if ($sdr -gt 0.60) { $knee = $sdr - 0.60; $sdr = 0.60 + 0.40 * $knee / ($knee + 0.40) }
+            return [math]::Round([math]::Pow([math]::Min([math]::Max($sdr, 0.0), 1.0), 0.5) * 255.0, 1)
+        }
         if ($Field.transfer -ne 'pq') { return [math]::Round($signal * 255.0, 1) }   # SDR: the expansion, no curve
 
         $m1 = 0.1593017578125; $m2 = 78.84375
@@ -1416,6 +1462,178 @@ try {
         Complete-Case 'secondary-sub-position-defaults-to-8' @(
             (Get-ProcessProblem $c.Run),
             $(if ($verPos -ne '8') { "the saved profile's SecondarySubVerPos is $verPos, expected 8 (the default for a profile without the key)" })
+        )
+    }
+
+    # 37. A floating playlist must be restored when leaving fullscreen, even with windowed
+    #    controls on autohide: clsid2/mpc-hc@5f9e5d66df (#4083). On leaving fullscreen the
+    #    autohide path (SetHiddenDueToFullscreen(false, true)) only knows dock zones, so a
+    #    floating bar handed to it stays hidden; the fix restores a floating bar right away.
+    #    The seed floats the bar: [ToolBars\Playlist] DockState=59423 (AFX_IDW_DOCKBAR_FLOAT,
+    #    CPlayerBar::LoadState) with Visible=1 (CPlayerPlaylistBar::SaveState's key).
+    #    HidePlaylistFullScreen and HideWindowedControls are the settings the fix's condition
+    #    reads. Fullscreen on and off are posted at 2.5 and 5 s; the probe at 6.5 s must find
+    #    the playlist's list view visible again. Unfixed 2.8.0: the bar stays hidden after
+    #    leaving fullscreen. The 1.5 s probe guards the seed: the bar must be visible then.
+    if (Test-CaseSelected 'floating-playlist-restored-after-fullscreen') {
+        $c = Invoke-PlayerCase -Name 'floating-playlist-restored-after-fullscreen' -Clip 'stereo.mkv' -Switches '/play' `
+            -Settings @{ HideWindowedControls = 1; HidePlaylistFullScreen = 1 } `
+            -IniSections @{ 'ToolBars\Playlist' = @{ Visible = 1; DockState = 59423 } } `
+            -PostCommands '2.5:830,5:830' -ProbeAt '1.5,6.5' -CloseAtSec 8.5
+        $posts = @($c.Run.posts)
+        $probes = @($c.Run.probes)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (@($posts | Where-Object delivered).Count -ne 2) { $problems += 'not every posted fullscreen toggle reached a window' }
+        if ($probes.Count -ne 2 -or @($probes | Where-Object found).Count -ne 2) {
+            $problems += 'the playlist list control was not found at every probe'
+        } else {
+            if (-not $probes[0].visible) { $problems += 'the seeded floating playlist was not visible before fullscreen' }
+            if (-not $probes[1].visible) { $problems += 'the floating playlist was not restored after leaving fullscreen' }
+        }
+        Complete-Case 'floating-playlist-restored-after-fullscreen' $problems
+    }
+
+    # 38. Zoom +/- must keep the window inside the work area, must maximise when the zoom
+    #    fills it, and must do nothing on an audio-only file showing the logo:
+    #    clsid2/mpc-hc@a9d0cf671b (#3826). Two runs. The logo run plays dub.wav and posts
+    #    ID_VIEW_ZOOM_ADD (33457) three times: after the fix each is a no-op and the probed
+    #    window rect does not move; 2.6.4 zooms the logo's window by 2% of the work area per
+    #    press. The fill run seeds the window (LastWindowRect, RememberWindowPos/Size on,
+    #    AutoZoom off so the open does not resize it) at the player's idea of a full work
+    #    area: the work area probed in the logo run, inflated by the invisible borders the
+    #    same probe read off the window (the player's GetWorkAreaRect inflates by exactly
+    #    that, so the seed is its maxRect, 4 px wider per side to be past any rounding).
+    #    One zoom-in then ends at newRect == maxRect and the fix's step 5 maximises. On
+    #    2.6.4 the zoom grows the window past the work area (the old default rect was never
+    #    clamped) or, if Windows clamps the move, fills it without maximising -- either way
+    #    one of the two asserts fails.
+    if (Test-CaseSelected 'zoom-stays-in-work-area') {
+        $problems = @()
+        $a = Invoke-PlayerCase -Name 'zoom-stays-in-work-area-logo' -Clip 'dub.wav' -Switches '/play' `
+            -PostCommands '3:33457,3.6:33457,4.2:33457' -ProbeAt '2,5.5' -CloseAtSec 7
+        $logoProbes = @($a.Run.probes)
+        $problems += (Get-ProcessProblem $a.Run)
+        if (@($a.Run.posts | Where-Object delivered).Count -ne 3) { $problems += 'not every posted zoom reached a window' }
+        if ($logoProbes.Count -ne 2 -or -not $logoProbes[0].mainRect -or -not $logoProbes[1].mainRect) {
+            $problems += 'the main window rect was not probed at both times'
+        } else {
+            foreach ($edge in 'left', 'top', 'right', 'bottom') {
+                $moved = [math]::Abs($logoProbes[0].mainRect.$edge - $logoProbes[1].mainRect.$edge)
+                if ($moved -gt 2) { $problems += "zooming the logo moved the window's $edge edge by $moved px (a no-op was expected)" }
+            }
+        }
+        $wa = $logoProbes[0].workArea; $mr = $logoProbes[0].mainRect; $fr = $logoProbes[0].frameRect
+        if (-not $wa -or -not $mr -or -not $fr) {
+            $problems += 'no work area or frame bounds from the logo run to seed the fill run from'
+        } else {
+            # The invisible borders as the probe read them, then the seed rect: the work area
+            # inflated by the borders (the player's maxRect) plus 4 px per side.
+            $bL = $fr.left - $mr.left; $bT = $fr.top - $mr.top; $bR = $mr.right - $fr.right; $bB = $mr.bottom - $fr.bottom
+            $seedRect = [ordered]@{ left = $wa.left - $bL - 4; top = $wa.top - $bT - 4; right = $wa.right + $bR + 4; bottom = $wa.bottom + $bB + 4 }
+            $seed = Get-RectIniBinary $seedRect.left $seedRect.top $seedRect.right $seedRect.bottom
+            $b = Invoke-PlayerCase -Name 'zoom-stays-in-work-area-fill' -Clip 'stereo.mkv' -Switches '/play' `
+                -Settings @{ RememberWindowPos = 1; RememberWindowSize = 1; AutoZoom = 0; LastWindowRect = $seed } `
+                -PostCommands '3:33457' -ProbeAt '2,4.5' -CloseAtSec 6.5
+            $fillProbes = @($b.Run.probes)
+            $fillPosts = @($b.Run.posts)
+            $problems += (Get-ProcessProblem $b.Run)
+            if (-not $fillPosts -or -not $fillPosts[0] -or -not $fillPosts[0].delivered) { $problems += 'the posted zoom-in did not reach a window' }
+            if ($fillProbes.Count -ne 2 -or -not $fillProbes[0].mainRect -or -not $fillProbes[1].mainRect) {
+                $problems += 'the main window rect was not probed at both times'
+            } else {
+                foreach ($edge in 'left', 'top', 'right', 'bottom') {
+                    $off = [math]::Abs($fillProbes[0].mainRect.$edge - $seedRect.$edge)
+                    if ($off -gt 10) { $problems += "the seeded window's $edge edge is at $($fillProbes[0].mainRect.$edge), seeded $($seedRect.$edge): the seed did not land" }
+                }
+                $p = $fillProbes[1]
+                if ($p.mainRect.left -lt $wa.left - 16 -or $p.mainRect.top -lt $wa.top - 16 -or $p.mainRect.right -gt $wa.right + 16 -or $p.mainRect.bottom -gt $wa.bottom + 16) {
+                    $problems += "after zoom-in the window ($($p.mainRect.left),$($p.mainRect.top),$($p.mainRect.right),$($p.mainRect.bottom)) is outside the work area ($($wa.left),$($wa.top),$($wa.right),$($wa.bottom))"
+                }
+                if (-not $p.maximized) { $problems += 'the zoom that fills the work area did not maximise the window' }
+            }
+        }
+        Complete-Case 'zoom-stays-in-work-area' $problems
+    }
+
+    # The RAR case needs a fixture the generator builds only when rar.exe is on the host.
+    $rarCases = @('rar-skip-within-archive')
+    $rarReady = Test-Path (Join-Path $media 'two-entry.rar')
+    if (-not $rarReady) {
+        $wanted = @($rarCases | Where-Object { Test-CaseSelected $_ })
+        if ($wanted.Count) {
+            $skipped += $wanted.Count
+            Note Yellow "skipped $($wanted -join ', '): the RAR fixtures are missing from $media (New-PlaybackClips.ps1 builds them only when C:\Program Files\WinRAR\Rar.exe exists)"
+        }
+        $rarCases = @()
+    }
+
+    # 39. Skip-forward inside a multi-entry RAR must open the next ENTRY, not the next file
+    #    in the folder: clsid2/mpc-hc@19432a0678 (#3644). two-entry.rar holds stereo.mkv
+    #    (440/880 Hz) and third.mkv (1600 Hz), stored, in that order. Opening it raises the
+    #    "Select Media from RAR" dialog (RarEntrySelectorDialog, entry 0 preselected), which
+    #    the guest accepts with IDOK at 2 s (-AcceptDialogAt); the ID_NAVIGATE_SKIPFORWARDFILE
+    #    (920) posted at 6 s must then produce a second capture sounding 1600 Hz. Unfixed
+    #    2.5.5: the skip falls through to SearchInDir and opens the next file in the folder
+    #    (twotracks.mkv, 1200 Hz) instead.
+    if ($rarCases -contains 'rar-skip-within-archive' -and (Test-CaseSelected 'rar-skip-within-archive')) {
+        $c = Invoke-PlayerCase -Name 'rar-skip-within-archive' -Clip 'two-entry.rar' -Switches '/play' `
+            -AcceptDialogAt '2:Select Media from RAR,3.5:Select Media from RAR' -PostCommands '6:920' -CloseAtSec 12
+        $accepts = @($c.Run.dialogAccepts)
+        $posts = @($c.Run.posts)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $accepts -or -not @($accepts | Where-Object delivered)) { $problems += 'the RAR entry selector was not accepted (the "Select Media from RAR" dialog)' }
+        if (-not $posts -or -not $posts[0] -or -not $posts[0].delivered) { $problems += 'the posted skip did not reach a window' }
+        if ($c.Wavs.Count -ne 2) {
+            $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (the first entry, then the second)"
+        } else {
+            $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones 4 1.0)
+            $problems += (Test-Audio $c.Wavs[1] $clips.clips.'third.mkv'.audio[0].tones 4 1.0)
+        }
+        Complete-Case 'rar-skip-within-archive' $problems
+    }
+
+    # 40. ReplayGain must apply the track gain from the tags: clsid2/mpc-hc@2607141ae5
+    #    (#4155). rg.flac is 8 s of 440 Hz stereo at half amplitude tagged
+    #    REPLAYGAIN_TRACK_GAIN=-6.00 dB (no peak tag, so the clipping guard has nothing to
+    #    clamp). Two runs on the same clip, ReplayGainMode 1 (track) vs 0 (off); the on
+    #    run's RMS must be about 6 dB below the off run's. FLAC only: the commit reads the
+    #    tags from the container metadata as ffmpeg keeps them (FLAC, MP4, ID3v2), and Opus
+    #    is not among them. Unfixed 2.8.1 does not know the setting and both runs come out
+    #    equal.
+    if (Test-CaseSelected 'replaygain-track-gain') {
+        $on = Invoke-PlayerCase -Name 'replaygain-track-gain-on' -Clip 'rg.flac' -Settings @{ ReplayGainMode = 1 }
+        $off = Invoke-PlayerCase -Name 'replaygain-track-gain-off' -Clip 'rg.flac' -Settings @{ ReplayGainMode = 0 }
+        $rmsOn = Get-CaptureRms $on.Wav
+        $rmsOff = Get-CaptureRms $off.Wav
+        $problems = @((Get-ProcessProblem $on.Run), (Get-ProcessProblem $off.Run))
+        $problems += (Test-Audio $on.Wav $clips.clips.'rg.flac'.audio[0].tones 8 1.0)
+        $problems += (Test-Audio $off.Wav $clips.clips.'rg.flac'.audio[0].tones 8 1.0)
+        if ($null -eq $rmsOn -or $null -eq $rmsOff) {
+            $problems += 'could not measure the capture RMS for both runs'
+        } else {
+            $db = 20 * [math]::Log10($rmsOn / $rmsOff)
+            if ([math]::Abs($db - (-6.0)) -gt 1.0) {
+                $problems += "ReplayGain on vs off is $([math]::Round($db, 1)) dB, expected -6.0 +/- 1 (rms $([math]::Round($rmsOn, 4)) vs $([math]::Round($rmsOff, 4)))"
+            }
+        }
+        Complete-Case 'replaygain-track-gain' $problems
+    }
+
+    # 41. HLG on EVR-CP must be converted to SDR, not passed through washed out:
+    #    clsid2/mpc-hc@f185a85594 (#4287) runs an HLG-to-SDR pixel shader first in the
+    #    DX9 chain. flat_hlg.mkv is a 10-bit HLG flat field at signal 0.5 (Y=502 limited,
+    #    BT.2020 primaries, neutral chroma, so the BT.2020->BT.709 matrix is a no-op on it).
+    #    The expected level, 96.4, is computed from the shader's own constants in
+    #    Get-FieldLevel; 2.8.2 has no conversion and shows the 0.5 signal as-is: measured
+    #    126.4. DSVidRen 11 is EVR-CP. The 8-wide tolerance keeps 96.4 far from 126.4.
+    if (Test-CaseSelected 'hlg-on-evrcp-is-not-washed-out') {
+        $field = $clips.clips.'flat_hlg.mkv'.field
+        $c = Invoke-PlayerCase -Name 'hlg-on-evrcp-is-not-washed-out' -Clip 'flat_hlg.mkv' `
+            -Switches '/play /close /fullscreen /monitor 2' -PlugModes '1920x1080@60' -CaptureAtSec 3.5 `
+            -Settings @{ DSVidRen = 11 } -IniSections $rendererLav
+        Complete-Case 'hlg-on-evrcp-is-not-washed-out' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-FlatField $c.Png $field 200 8)
         )
     }
 }

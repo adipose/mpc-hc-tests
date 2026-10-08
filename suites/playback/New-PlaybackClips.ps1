@@ -259,8 +259,9 @@ function New-FlatField {
             $chroma = [byte[]]::new($w * $h)      # 512 little endian, neutral
             for ($i = 0; $i -lt $chroma.Length; $i += 2) { $chroma[$i] = 0; $chroma[$i + 1] = 2 }
             $pix = 'yuv420p10le'
+            $transferParam = if ($Transfer -eq 'hlg') { 'arib-std-b67' } else { 'smpte2084' }
             $enc = @('-c:v', 'libx265', '-x265-params',
-                     "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:crf=16:range=limited")
+                     "colorprim=bt2020:transfer=${transferParam}:colormatrix=bt2020nc:crf=16:range=limited")
         } else {
             $luma = [byte[]]::new($w * $h)
             for ($i = 0; $i -lt $luma.Length; $i++) { $luma[$i] = $Y }
@@ -293,11 +294,49 @@ function New-FlatField {
     }
 }
 
-# 10 bit limited range code for a PQ level, and 8 bit for the SDR one
+# 10 bit limited range code for a PQ or HLG signal level, and 8 bit for the SDR one
 $pq = { param([double] $v) [int][math]::Round($v * (940 - 64) + 64) }
 New-FlatField (Join-Path $OutDir 'flat_sdr.mkv')   128          8  'bt709'
 New-FlatField (Join-Path $OutDir 'flat_pq065.mkv') (& $pq 0.65) 10 'pq'
 New-FlatField (Join-Path $OutDir 'flat_pq025.mkv') (& $pq 0.25) 10 'pq'
+# HLG at signal 0.5, for the EVR-CP HLG-to-SDR case: the conversion's math gives 96.4,
+# an unconverted (washed-out) rendering shows the signal as-is (measured 126.4 on 2.8.2).
+New-FlatField (Join-Path $OutDir 'flat_hlg.mkv')   (& $pq 0.5)  10 'hlg' 15
+
+# --- rg.flac: 8 s of 440 Hz stereo at half amplitude, tagged with a ----------
+# REPLAYGAIN_TRACK_GAIN of -6.00 dB. For the ReplayGain case: gain on vs gain
+# off must differ by 6 dB in the captured RMS. No peak tag, so the clipping
+# guard (on by default) has nothing to clamp.
+$rg = Join-Path $OutDir 'rg.flac'
+Invoke-FFmpeg $rg @(
+    '-f', 'lavfi', '-i', (Tone 440 8),
+    '-af', 'aformat=channel_layouts=stereo,volume=0.5',
+    '-c:a', 'flac',
+    '-metadata', 'REPLAYGAIN_TRACK_GAIN=-6.00 dB'
+)
+
+# --- RAR fixtures, for the RARFileSource cases. Stored (-m0): the source -----
+# filter only plays uncompressed members. They need rar.exe on the host;
+# without it they stay absent and the RAR cases report themselves skipped.
+$rarExe = 'C:\Program Files\WinRAR\Rar.exe'
+$rarNames = @('two-entry.rar')
+$rarMissing = @($rarNames | Where-Object { -not (Test-Path (Join-Path $OutDir $_)) })
+if ((Test-Path $rarExe) -and ($Force -or $rarMissing.Count)) {
+    $rarWork = Join-Path $OutDir 'rar-work'
+    if (Test-Path $rarWork) { Remove-Item $rarWork -Recurse -Force }
+    New-Item -ItemType Directory $rarWork | Out-Null
+    try {
+        # Two entries in one archive, stereo.mkv first: the order ScanArchive lists them.
+        & $rarExe a -m0 -ep -idq (Join-Path $rarWork 'two-entry.rar') $stereo $third | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "rar failed producing two-entry.rar" }
+        Copy-Item (Join-Path $rarWork 'two-entry.rar') $OutDir
+        Write-Host "  RAR fixture: two-entry.rar"
+    } finally {
+        Remove-Item $rarWork -Recurse -Force
+    }
+} elseif ($rarMissing.Count) {
+    Write-Host "  rar.exe not found at $rarExe -- the RAR fixtures ($($rarMissing -join ', ')) were not built and their cases will report skipped"
+}
 
 $clips = [ordered]@{
     generated = (Get-Date).ToString('o')
@@ -372,6 +411,15 @@ $clips = [ordered]@{
         'flat_pq025.mkv' = [ordered]@{
             seconds = 25
             field   = [ordered]@{ code = (& $pq 0.25); depth = 10; range = 'limited'; transfer = 'pq'; pq = 0.25 }
+        }
+        'flat_hlg.mkv' = [ordered]@{
+            seconds = 15
+            field   = [ordered]@{ code = (& $pq 0.5); depth = 10; range = 'limited'; transfer = 'hlg'; hlg = 0.5 }
+        }
+        'rg.flac' = [ordered]@{
+            seconds = 8
+            audio   = @([ordered]@{ track = 1; default = $true; tones = @(440, 440) })
+            replayGainTrackDb = -6.0
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
