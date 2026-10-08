@@ -155,6 +155,14 @@ try {
         New-Item -ItemType Directory 'C:\mpc-test\media\folder' | Out-Null
         Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\folder\a.mkv'
         Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\folder\b.mkv'
+        # A copy of stereo.mkv under a name the history-exclude-filter case's filter matches:
+        # HistoryExcludeFilter=secret is a case-insensitive substring match on the full path.
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\SECRET-clip.mkv' -Force
+        # A copy of stereo.mkv in a folder and under a name that need escaping in JSON, for the
+        # /status.json case. Built from char codes so this file can stay plain ASCII.
+        if (Test-Path 'C:\mpc-test\media\json test') { Remove-Item 'C:\mpc-test\media\json test' -Recurse -Force }
+        New-Item -ItemType Directory 'C:\mpc-test\media\json test' | Out-Null
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' ("C:\mpc-test\media\json test\it's " + [char]0x00FC + "n" + [char]0x00EF + "code & co.mkv")
         # Thirty copies of stereo.mkv, for the playlist cases: more entries than fit in the list, with
         # two-character names so no column goes wide. list30.mpcpl lists them; a case that needs the
         # startup-restore path copies it to C:\mpc-test\player\default.mpcpl for its own run only.
@@ -200,6 +208,12 @@ try {
             [string] $ProbeAt = '',              # comma-separated seconds: at each, the guest reads the player's
                                                # playlist list control (count, selection, scroll, scrollbars)
                                                # into the run's probes array
+            [string[]] $HttpAt = @(),          # '<sec>|<method>|<path>|<body>' web requests, run in the same
+                                               # time-ordered sequence as the posts and probes; answers land in
+                                               # the run's http array, bodies in http-<n>.bin files
+            [int] $HttpPort = 13579,           # the port the profile's WebServerPort must match
+            [string] $CloseDialogAt = '',      # comma-separated <sec>:<window title>: at each, post IDCANCEL to
+                                               # that window of the player's process (a modal it raised)
             [switch] $KeepProfile,             # keep the history file of the previous case: this case is its second run
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{}     # whole ini sections besides [Settings], for the internal filters
@@ -225,11 +239,13 @@ try {
         $argumentLine = if ($Clip) { ('"C:\mpc-test\media\{0}" {1}' -f $Clip, $Switches).Trim() } else { $Switches.Trim() }
         # Each later command line carries quoted paths, and no quoting survives the hand-built task line: each goes
         # over as base64 of the UTF-8 string (nothing but [A-Za-z0-9+/=]), comma-joined, and the guest decodes them.
+        # The web requests go the same way: their bodies hold ampersands and quotes.
         $secondEncoded = (@($SecondArgumentLine | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
+        $httpEncoded = (@($HttpAt | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -273,6 +289,8 @@ try {
             # Digits, dots, colons and commas only: survives the hand-built line with plain quoting.
             if ($postCommands) { $taskArgs += (' -PostCommands "{0}"' -f $postCommands) }
             if ($probeAt) { $taskArgs += (' -ProbeAt "{0}"' -f $probeAt) }
+            if ($httpAt) { $taskArgs += " -HttpAt $httpAt -HttpPort $httpPort" }
+            if ($closeDialogAt) { $taskArgs += (' -CloseDialogAt "{0}"' -f $closeDialogAt) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -327,10 +345,22 @@ try {
         $png = $null
         if ($guest.HasPng) { $png = Join-Path $OutDir "$Name.png"; Copy-Item -FromSession $session $guestPng $png -Force }
 
+        # The bodies of the case's web requests, saved by the guest beside the result JSON as http-<n>.bin.
+        $httpFiles = @()
+        if ($HttpAt.Count -gt 0 -and $run.http) {
+            foreach ($answer in @($run.http)) {
+                if ($answer.file) {
+                    $local = Join-Path $OutDir ('{0}.{1}' -f $Name, $answer.file)
+                    Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $answer.file) $local -Force
+                    $httpFiles += $local
+                }
+            }
+        }
+
         if ($guest.History) { Set-Content (Join-Path $OutDir "$Name.history.ini") $guest.History }
         if ($guest.Ini) { Set-Content (Join-Path $OutDir "$Name.ini") $guest.Ini }
 
-        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History; Ini = $guest.Ini }
+        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History; Ini = $guest.Ini; HttpFiles = $httpFiles }
     }
 
     # The value of a key in one section of an ini read as text; $null when the ini, the section or the key
@@ -1133,7 +1163,151 @@ try {
         Complete-Case 'toolbar-old-layout-has-no-duplicates' $problems
     }
 
-    # 31. The same for a layout saved before the left separator existed (2.5.2 to 2.5.4, before 750b3d2bfc):
+    # 31-35. The web interface: the profile turns it on (EnableWebServer, WebServerPort,
+    #    WebServerLocalhostOnly -- checked against SettingsDefines.h) and the guest talks to it
+    #    over plain HTTP on 127.0.0.1 (the server binds IPv4 only, so never "localhost"). The
+    #    requests ride in the same time-ordered sequence as posted commands; answers land in the
+    #    run's http array with their bodies copied back as <case>.http-<n>.bin.
+    $web = @{ EnableWebServer = 1; WebServerPort = 13579; WebServerLocalhostOnly = 1 }
+
+    # 31. A web command that opens a modal dialog must not freeze the web server:
+    #    clsid2/mpc-hc@a77c59b537 (#4053) -- OnCommand dispatched with a synchronous SendMessage,
+    #    and wm_command=815 (ID_VIEW_OPTIONS) opens the modal Options dialog, so the web thread
+    #    stayed stuck behind it until someone dismissed the dialog at the player; the fix
+    #    dispatches with SendMessageTimeout (5000 ms) instead, so a request holds the web thread
+    #    for at most 5 s. The guest makes its requests one after another, so the POST at 3 s
+    #    that opens Options holds it for about 5 s (its own 5 s timeout and the server's 5 s
+    #    bound race, and the POST's status is not asserted) and the GET scheduled at 4 s is
+    #    really sent at about 8 s, with Options still open. Fixed, the web thread is free by
+    #    then and the GET answers 200 well within 3000 ms; unfixed it is still stuck behind the
+    #    modal, and the GET times out with status 0. The dialog close at 6 s (a modal left open
+    #    can leave the player's own WM_CLOSE unanswered) and the player close at 8 s are overdue
+    #    by then and happen right after the GET.
+    if (Test-CaseSelected 'web-modal-command-does-not-freeze') {
+        $c = Invoke-PlayerCase -Name 'web-modal-command-does-not-freeze' -Clip 'long.mkv' -Switches '/play' `
+            -Settings $web -CloseAtSec 8 `
+            -HttpAt '3|POST|/command.html|wm_command=815', '4|GET|/variables.html|' `
+            -CloseDialogAt '6:Options'
+        $answers = @($c.Run.http)
+        $closes = @($c.Run.dialogCloses)
+        $behind = if ($answers.Count -ge 2) { $answers[1] } else { $null }
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.closeSent) { $problems += 'the close request did not reach a window' }
+        if (-not $closes -or -not $closes[0].delivered) { $problems += 'the Options dialog was not found to close (did the command open it?)' }
+        if (-not $behind) {
+            $problems += 'the request behind the modal command was never made'
+        } else {
+            if ($behind.status -ne 200) { $problems += "the request behind the modal command got status $($behind.status), expected 200" }
+            if ($behind.ms -gt 3000) { $problems += "the request behind the modal command took $($behind.ms) ms, expected at most 3000" }
+        }
+        Complete-Case 'web-modal-command-does-not-freeze' $problems
+    }
+
+    # 32. A playlist click in the web remote must open the playlist entry, not a chapter:
+    #    clsid2/mpc-hc@4802b44e4b (#4093, of #4078) -- the remote sent the entry's
+    #    ID_NAVIGATE_JUMPTO_SUBITEM_START + index id as a plain wm_command, which on chaptered
+    #    media the player reads as a chapter jump. The fixed remote.html sends
+    #    wm_command=-3&index=<n> (CMD_SETPLAYLISTINDEX), which SetSelIdx + posted
+    #    WM_MPC_OPENCURPLAYLIST turn into an open of that entry. chapters.mkv (three chapters)
+    #    and twotracks.mkv on the command line are a two-entry playlist; the click on entry 2
+    #    (index 1) at 3 s must open twotracks.mkv: a second capture sounding its default track's
+    #    1200 Hz. On the unfixed player nothing opens (the id means nothing without the fix), so
+    #    only chapters.mkv's 12 s are heard. LoopMode=0 keeps the player from advancing by itself
+    #    once twotracks.mkv ends; the window is closed at 9 s.
+    if (Test-CaseSelected 'web-playlist-click-with-chapters') {
+        $c = Invoke-PlayerCase -Name 'web-playlist-click-with-chapters' `
+            -Clip 'chapters.mkv' -Switches '"C:\mpc-test\media\twotracks.mkv" /play' `
+            -Settings ($web + @{ LoopMode = 0 }) -CloseAtSec 9 `
+            -HttpAt '3|POST|/command.html|wm_command=-3&index=1'
+        $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
+        $answers = @($c.Run.http)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.closeSent) { $problems += 'the close request did not reach a window' }
+        if (-not $answers -or $answers[0].status -ne 200) { $problems += "the playlist-click command got status $(if ($answers) { $answers[0].status } else { 'none' }), expected 200" }
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (chapters.mkv, then the clicked entry)" }
+        else { $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds 1.0) }
+        Complete-Case 'web-playlist-click-with-chapters' $problems
+    }
+
+    # 33. The JSON endpoints must escape what they quote: clsid2/mpc-hc@a77c59b537 (#4053) added
+    #    /status.json with JSONString/JSONEscape doing the quoting. The clip is a copy of
+    #    stereo.mkv in a folder "json test" whose name holds an apostrophe, a U+00FC, a U+00EF
+    #    and an ampersand (built from char codes so this file stays ASCII), and the path back
+    #    through the guest is all base64. The "path" field (m_wndPlaylistBar.GetCurFileName())
+    #    must parse and equal the real path exactly.
+    if (Test-CaseSelected 'web-status-json-escapes-paths') {
+        $jsonClip = "json test\it's " + [char]0x00FC + "n" + [char]0x00EF + "code & co.mkv"
+        $c = Invoke-PlayerCase -Name 'web-status-json-escapes-paths' -Clip $jsonClip -Settings $web -HttpAt '2.5|GET|/status.json|'
+        $answers = @($c.Run.http)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $answers -or $answers[0].status -ne 200) {
+            $problems += "the status request got status $(if ($answers) { $answers[0].status } else { 'none' }), expected 200"
+        } else {
+            $status = $null
+            try { $status = $answers[0].bodyText | ConvertFrom-Json } catch { }
+            if (-not $status) {
+                $problems += 'the /status.json body did not parse as JSON'
+            } else {
+                $want = 'C:\mpc-test\media\' + $jsonClip
+                if ($status.path -cne $want) { $problems += "the path field is '$($status.path)', expected exactly '$want'" }
+            }
+        }
+        Complete-Case 'web-status-json-escapes-paths' $problems
+    }
+
+    # 34. A filter that keeps matching files out of the history: clsid2/mpc-hc@f310dc2461
+    #    (#3987, of #3985, #3920 and #4196). HistoryExcludeFilter is semicolon-separated
+    #    substrings, matched case-insensitively against the file's full path
+    #    (MatchesHistoryExcludeFilter in AppSettings.cpp); a match is kept out of the recent
+    #    files list, the resume positions and the Windows recent documents. SECRET-clip.mkv is
+    #    a stereo.mkv copy made on the guest at deploy time, so its path contains "secret".
+    #    Two runs on one profile: the matching clip must leave no entry in the history, and
+    #    stereo.mkv under the same filter must be recorded, so the case cannot pass on a player
+    #    that records nothing. The history is mpc-hc64.history.ini since #3979 (2.8.0) and the
+    #    main ini before it, so both are read.
+    if (Test-CaseSelected 'history-exclude-filter') {
+        $historySettings = @{ KeepHistory = 1; RememberFilePos = 1; RememberPosForLongerThan = 0; HistoryExcludeFilter = 'secret' }
+        $a = Invoke-PlayerCase -Name 'history-exclude-filter' -Clip 'SECRET-clip.mkv' -Settings $historySettings
+        $b = Invoke-PlayerCase -Name 'history-exclude-filter-control' -Clip 'stereo.mkv' -Settings $historySettings -KeepProfile
+        $problems = @((Get-ProcessProblem $a.Run), (Get-ProcessProblem $b.Run))
+        $historyA = "$($a.History)`r`n$($a.Ini)"
+        $historyB = "$($b.History)`r`n$($b.Ini)"
+        if ($historyA -match 'SECRET-clip\.mkv') { $problems += 'the filtered clip is in the history after its own run' }
+        if ($historyB -match 'SECRET-clip\.mkv') { $problems += 'the history names SECRET-clip.mkv although HistoryExcludeFilter=secret matches its path' }
+        if ($historyB -notmatch 'stereo\.mkv') { $problems += 'stereo.mkv is not in the history although the filter does not match it' }
+        Complete-Case 'history-exclude-filter' $problems
+    }
+
+    # A favorite with an A-B range, opened while another file is playing, must loop its range.
+    # Closing the playing file cleared the range before the favorite opened, and the call that
+    # should have carried it passed it as the bool reopen argument, so playback ran on from mark A
+    # to the end. Opened with no file loaded it always worked, which is why stereo.mkv plays first.
+    # steps.mkv's segment 5 (10-12 s) is 800 Hz, so every window heard must be 800 Hz.
+    if (Test-CaseSelected 'favorite-restores-its-own-ab-range') {
+        $steps = 'C:\mpc-test\media\steps.mkv'
+        $favs = [ordered]@{
+            Name0 = "Steps two to four;0:20000000:40000000;0;$steps"
+            Name1 = "Steps ten to twelve;0:100000000:120000000;0;$steps"
+        }
+        $c = Invoke-PlayerCase -Name 'favorite-restores-its-own-ab-range' -Clip 'stereo.mkv' -Switches '/play' `
+            -IniSections @{ 'Favorites' = @{ RememberABMarks = 1 }; 'Favorites\Files' = $favs } `
+            -PostCommands '2:2801' -CloseAtSec 12
+        $problems = @((Get-ProcessProblem $c.Run))
+        $wav = @($c.Wavs)[-1]          # the last capture is steps.mkv's: each file opened is its own stream
+        if (-not $wav) { $problems += 'no audio reached the endpoint for the favorite' }
+        else {
+            $heard = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $wav | Where-Object { $_.hz -gt 0 })
+            $off = @($heard | Where-Object { $_.hz -ne 800 })
+            if ($heard.Count -eq 0) { $problems += 'the favorite played nothing' }
+            elseif ($off.Count -gt [math]::Floor($heard.Count * 0.1)) {
+                $byHz = ($off | Group-Object hz | ForEach-Object { "$($_.Name) Hz x$($_.Count)" }) -join ', '
+                $problems += "$($off.Count) of $($heard.Count) windows are not the favorite's 800 Hz segment ($byHz)"
+            }
+        }
+        Complete-Case 'favorite-restores-its-own-ab-range' $problems
+    }
+
+    # 36. The same as 30 for a layout saved before the left separator existed (2.5.2 to 2.5.4, before 750b3d2bfc):
     #    play, pause, stop, skipforward, framestep, skipback, dummysep, volume, no revision key. Byte for
     #    byte what 2.5.4 itself saves (measured: seeded with an unknown id among the buttons, its customize
     #    dialog opened and closed, it wrote this back without the unknown id). Here the movable part starts

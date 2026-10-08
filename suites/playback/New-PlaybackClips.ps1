@@ -72,6 +72,29 @@ Invoke-FFmpeg $long @(
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
 )
 
+# --- chapters.mkv: stereo.mkv's content for 12 seconds, with three chapters --
+# at 0, 4 and 8 s, written by ffmpeg from an ffmetadata file. For the web remote
+# case: a playlist click on chaptered media must open the playlist entry, not
+# jump to a chapter.
+$chapterSeconds = 12
+$chapterQuad = $quad.Replace("d=$seconds", "d=$chapterSeconds")
+$chaptersMeta = Join-Path $OutDir 'chapters.ffmetadata'
+$ffmetadata = @(
+    'FFMETADATA1',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=0',    'END=4000',  'title=one',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=4000', 'END=8000',  'title=two',
+    '[CHAPTER]', 'TIMEBASE=1/1000', 'START=8000', 'END=12000', 'title=three'
+)
+[IO.File]::WriteAllLines($chaptersMeta, $ffmetadata, [Text.UTF8Encoding]::new($false))
+$chapters = Join-Path $OutDir 'chapters.mkv'
+Invoke-FFmpeg $chapters @(
+    '-f', 'lavfi', '-i', (Tone 440 $chapterSeconds), '-f', 'lavfi', '-i', (Tone 880 $chapterSeconds),
+    '-f', 'ffmetadata', '-i', $chaptersMeta, '-map_chapters', '2',
+    '-filter_complex', "$chapterQuad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
 # --- third.mkv: stereo.mkv's picture with a tone of its own, 1600 Hz on ----
 # both channels, so three clips are told apart by tone: stereo.mkv 440/880,
 # twotracks.mkv (default track) 1200, third.mkv 1600. For the case that checks
@@ -184,6 +207,17 @@ Invoke-FFmpeg $still @(
     '-frames:v', '1', '-update', '1'
 )
 
+# --- steps.mkv: 20 s of one sine stepping 300, 400, ... 1200 Hz every 2 s ---
+# Segment k (2k..2k+2 s) is 300+100k Hz, so the audio says where playback is.
+# Get-ToneTimeline.ps1 reads it back from a capture.
+$steps = Join-Path $OutDir 'steps.mkv'
+Invoke-FFmpeg $steps @(
+    '-f', 'lavfi', '-i', "color=c=red:s=640x360:r=30:d=20",
+    '-f', 'lavfi', '-i', "aevalsrc='0.5*sin(2*PI*(300+100*floor(t/2))*t)':s=48000:d=20",
+    '-map', '0:v', '-map', '1:a', '-ac', '2',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
 # Read the reference back: which colour ended up in which corner, and the
 # rotated picture's shape. A quarter of the way in from each corner is well
 # inside a quadrant.
@@ -292,6 +326,16 @@ $clips = [ordered]@{
                 [ordered]@{ track = 2; default = $true;  forced = $false; tones = @(1200, 1200) }
             )
         }
+        'chapters.mkv' = [ordered]@{
+            seconds  = $chapterSeconds
+            picture  = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
+            audio    = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+            chapters = @(
+                [ordered]@{ start = 0; end = 4 }
+                [ordered]@{ start = 4; end = 8 }
+                [ordered]@{ start = 8; end = 12 }
+            )
+        }
         'third.mkv' = [ordered]@{
             picture = [ordered]@{ width = 1280; height = 720; corners = [ordered]@{ topLeft = 'red'; topRight = 'green'; bottomLeft = 'blue'; bottomRight = 'white' } }
             audio   = @([ordered]@{ track = 1; default = $true; tones = @(1600, 1600) })
@@ -336,6 +380,7 @@ $clips = [ordered]@{
         'still.png' = [ordered]@{
             note = 'a single flat red 640x360 frame; played through the still-image source it has no duration and no audio'
         }
+        'steps.mkv' = [ordered]@{ seconds = 20; note = 'sine 300+100k Hz in segment k = 2k..2k+2 s' }
     }
 }
 $clips | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'clips.json')
