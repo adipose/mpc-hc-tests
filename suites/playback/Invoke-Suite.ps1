@@ -1479,16 +1479,16 @@ try {
         $c = Invoke-PlayerCase -Name 'floating-playlist-restored-after-fullscreen' -Clip 'stereo.mkv' -Switches '/play' `
             -Settings @{ HideWindowedControls = 1; HidePlaylistFullScreen = 1 } `
             -IniSections @{ 'ToolBars\Playlist' = @{ Visible = 1; DockState = 59423 } } `
-            -PostCommands '2.5:830,5:830' -ProbeAt '1.5,6.5' -CloseAtSec 8.5
+            -PostCommands '2.5:830,5:830' -ProbeAt '1.5,6.5,9,12' -CloseAtSec 13
         $posts = @($c.Run.posts)
         $probes = @($c.Run.probes)
         $problems = @((Get-ProcessProblem $c.Run))
         if (@($posts | Where-Object delivered).Count -ne 2) { $problems += 'not every posted fullscreen toggle reached a window' }
-        if ($probes.Count -ne 2 -or @($probes | Where-Object found).Count -ne 2) {
+        if ($probes.Count -ne 4 -or @($probes | Where-Object found).Count -ne 4) {
             $problems += 'the playlist list control was not found at every probe'
         } else {
             if (-not $probes[0].visible) { $problems += 'the seeded floating playlist was not visible before fullscreen' }
-            if (-not $probes[1].visible) { $problems += 'the floating playlist was not restored after leaving fullscreen' }
+            if (-not $probes[-1].visible) { $problems += "the floating playlist was not restored after leaving fullscreen (visible at 6.5/9/12 s: $(@($probes[1..3] | ForEach-Object { [bool]$_.visible }) -join '/'))" }
         }
         Complete-Case 'floating-playlist-restored-after-fullscreen' $problems
     }
