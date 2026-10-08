@@ -146,6 +146,7 @@ try {
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
+    Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-ApiCase.guest.ps1') 'C:\mpc-test\' -Force
     Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png', '.flac', '.rar' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
@@ -373,6 +374,86 @@ try {
         if ($guest.Ini) { Set-Content (Join-Path $OutDir "$Name.ini") $guest.Ini }
 
         [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs; Png = $png; Plug = $guest.Plug; History = $guest.History; Ini = $guest.Ini; HttpFiles = $httpFiles }
+    }
+
+    # One /slave API case: the profile is written exactly as for Invoke-PlayerCase, then
+    # Run-ApiCase.guest.ps1 runs as the console user. The guest hosts a window the player
+    # connects back to (started with /slave <hwnd>), sends the case's commands as WM_COPYDATA
+    # at their times -- dwData the CMD_ code, lpData the UTF-16 payload, as src/MPCTestAPI does --
+    # records every reply in order, and closes the player with CMD_CLOSEAPP. Commands is a list
+    # of '<seconds>:<CMD name or number>:<payload>' (MpcApi.h names; the payload may be empty);
+    # they ride base64 because quoting does not survive the hand-built task line. The asserting
+    # below reads the recorded replies from the result JSON.
+    function Invoke-ApiCase {
+        param(
+            [string] $Name,
+            [string] $Clip,
+            [string[]] $Commands = @(),
+            [hashtable] $Settings = @{},
+            [double] $CloseAtSec = 0          # zero: CMD_CLOSEAPP two seconds after the last command
+        )
+        $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
+        $guestOut = "C:\mpc-test\out\$tag.json"
+
+        # The same fresh portable profile as a player case; nothing of the last case carries over.
+        $ini = [ordered]@{ UpdaterAutoCheck = 0; KeepHistory = 0; RememberFilePos = 0; Loop = 0; AllowMultipleInstances = 0; LogoFile = ''; ShowOSD = 0 }
+        foreach ($k in $Settings.Keys) { $ini[$k] = $Settings[$k] }
+        $iniText = "[Settings]`r`n" + (($ini.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`r`n") + "`r`n"
+
+        $commandsEncoded = (@($Commands | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
+
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $Clip, $commandsEncoded, $CloseAtSec, $guestOut, $consoleUser {
+            param($iniText, $clip, $commandsEncoded, $closeAtSec, $out, $user)
+            # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
+            # writing to stderr would then end the case instead of being a result.
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+            Get-ChildItem 'C:\mpc-test\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            [IO.File]::WriteAllText('C:\mpc-test\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-ApiCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -Clip `"C:\mpc-test\media\$clip`" -Out $out"
+            if ($commandsEncoded) { $taskArgs += " -Commands $commandsEncoded" }
+            if ($closeAtSec -gt 0) { $taskArgs += " -CloseAtSec $closeAtSec" }
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcApiCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcApiCase'
+            $deadline = (Get-Date).AddSeconds(90)
+            while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 2
+            }
+            Unregister-ScheduledTask -TaskName 'MpcApiCase' -Confirm:$false
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+
+            [pscustomobject]@{
+                Json = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
+            }
+        }
+        if (-not $guest.Json) { throw "case $Name produced no result on the guest" }
+        $run = $guest.Json | ConvertFrom-Json
+        Set-Content (Join-Path $OutDir "$Name.guest.json") $guest.Json
+
+        # The audio captures of the run, same window and copy-back as Invoke-PlayerCase: the mute
+        # case reads the muted stretch off the WAV.
+        $from = [datetime]$run.started; $to = ([datetime]$run.finished).AddSeconds(1)
+        $wav = $null; $wavs = @()
+        $hits = @(Invoke-Command -Session $session -ArgumentList $from, $to {
+            param($from, $to)
+            Get-ChildItem 'C:\Windows\System32\drivers\DriverData\Audio_Samples\SimpleAudioSample' -Filter *.wav -ErrorAction SilentlyContinue |
+                Where-Object { $_.Length -gt 1000 -and $_.LastWriteTime -ge $from -and $_.LastWriteTime -le $to } |
+                Sort-Object LastWriteTime | Select-Object FullName, Length
+        })
+        for ($i = 0; $i -lt $hits.Count; $i++) {
+            $local = Join-Path $OutDir ('{0}.{1}.wav' -f $Name, ($i + 1))
+            Copy-Item -FromSession $session $hits[$i].FullName $local -Force
+            $wavs += $local
+        }
+        if ($hits.Count) {
+            $largest = $hits | Sort-Object Length | Select-Object -Last 1
+            $wav = $wavs[[array]::IndexOf(@($hits.FullName), $largest.FullName)]
+        }
+
+        [pscustomobject]@{ Run = $run; Wav = $wav; Wavs = $wavs }
     }
 
     # The value of a key in one section of an ini read as text; $null when the ini, the section or the key
@@ -1635,6 +1716,141 @@ try {
             (Get-ProcessProblem $c.Run),
             (Test-FlatField $c.Png $field 200 8)
         )
+    }
+
+    # 42-43. The /slave API (MpcApi.h): the guest hosts a window the player connects back to over
+    #    WM_COPYDATA, sends commands as src/MPCTestAPI does and records every reply, so these
+    #    cases assert on the protocol itself -- what the player tells a controlling application.
+    #
+    #    api-setposition-before-load (3d06f27984) is not among them, on purpose. The commit
+    #    ignored CMD_SETPOSITION until the file is LOADED, but an early SETPOSITION was already a
+    #    no-op on the unfixed build: SeekTo returns when m_pMS is still null, and once the graph
+    #    exists mid-load the seek either waits out the duration check or is discarded by the
+    #    load's own positioning, so both builds start at 0 and honour the post-load seek -- there
+    #    is no observable difference to aim an assertion at. The commit's user-visible fix was
+    #    posting the command's action instead of running it inside the media-close chain that
+    #    delivered it (a synchronous CloseMedia re-entering a close), which needs a close already
+    #    in flight when the command lands: a race this harness cannot stage deterministically.
+
+    # 42. The selected audio track as the API reports it: clsid2/mpc-hc@e7053ee236 (#4213,
+    #    unfixed 2.8.2). SendAudioTracksToApi marked the current stream with
+    #    `dwFlags == AMSTREAMSELECTINFO_EXCLUSIVE`, but the audio switcher forwards the upstream
+    #    splitter's flags for the selected input (StreamSwitcher.cpp Info: *pdwFlags = dwFlags
+    #    from the splitter's own Info), and LAV Splitter reports its enabled stream
+    #    AMSTREAMSELECTINFO_ENABLED -- the equality never held, and CMD_LISTAUDIOTRACKS always
+    #    ended in |-1. twotracks.mkv's default is track 2, so the list must come back
+    #    name|name|1. The current-track query is the control: GetCurrentAudioTrackIdx tested
+    #    & ENABLED, which held, so it answers 1 on the unfixed build too and proves the second
+    #    track really is the one selected -- a pass cannot come from the wrong track playing.
+    #    The subtitle half of the fix (iSelected = j, the per-filter index, instead of i, the
+    #    running index) sits in the IAMStreamSelect branch, which only external subtitle source
+    #    filters take; subs.mkv's embedded tracks go through the ISubStream branch, where the two
+    #    indices coincide, so no fixture here can show it.
+    if (Test-CaseSelected 'api-reports-selected-audio-track') {
+        $c = Invoke-ApiCase -Name 'api-reports-selected-audio-track' -Clip 'twotracks.mkv' -CloseAtSec 5 -Commands @(
+            '3:CMD_GETAUDIOTRACKS:',
+            '3.3:CMD_GETCURRENTAUDIOTRACK:'
+        )
+        $problems = @((Get-ProcessProblem $c.Run))
+        $replies = @($c.Run.replies)
+        if (-not $c.Run.connect) {
+            $problems += 'the player never connected to the API host'
+        } else {
+            $list = $replies | Where-Object { $_.cmd -eq 'CMD_LISTAUDIOTRACKS' } | Select-Object -Last 1
+            $current = $replies | Where-Object { $_.cmd -eq 'CMD_CURRENTAUDIOTRACK' } | Select-Object -Last 1
+            if (-not $list) {
+                $problems += 'CMD_GETAUDIOTRACKS got no CMD_LISTAUDIOTRACKS reply'
+            } else {
+                # name|name|...|selected, a literal | inside a name escaped as \| (MpcApi.h)
+                $fields = $list.payload -split '(?<!\\)\|'
+                $selected = $fields[-1]
+                if ($fields.Count -ne 3) { $problems += "the audio track list has $($fields.Count - 1) entries, expected 2 ($($list.payload))" }
+                if ($selected -ne '1') { $problems += "the API reports selected audio track $selected, expected 1 (the container's default is track 2; unfixed 2.8.2 reports -1)" }
+            }
+            if (-not $current) {
+                $problems += 'CMD_GETCURRENTAUDIOTRACK got no CMD_CURRENTAUDIOTRACK reply'
+            } elseif ($current.payload -ne '1') {
+                $problems += "the current-track query reports $($current.payload), expected 1 (the control: it answers this on the unfixed build too)"
+            }
+        }
+        Complete-Case 'api-reports-selected-audio-track' $problems
+    }
+
+    # 43. Volume and mute over the API: clsid2/mpc-hc@d9f4975bff (#4075, unfixed 2.8.0) added
+    #    CMD_SETVOLUME and CMD_SETMUTE plus the CMD_GETVOLUME/CMD_GETMUTE queries, which answer
+    #    CMD_CURRENTVOLUME/CMD_CURRENTMUTE. On the unfixed build the command ids mean nothing:
+    #    the player ignores them and never answers, so every reply assert fails there -- and the
+    #    capture never goes quiet. The setters are honored only from the connected host's window
+    #    (MpcApi.h), which the guest's host window is. The mute must not move the volume (the
+    #    query after it still says 40), and the WAV must go silent for the muted stretch and come
+    #    back after the unmute.
+    if (Test-CaseSelected 'api-volume-and-mute-round-trip') {
+        $c = Invoke-ApiCase -Name 'api-volume-and-mute-round-trip' -Clip 'long.mkv' -CloseAtSec 9.5 -Commands @(
+            '2.5:CMD_GETVOLUME:',
+            '3:CMD_SETVOLUME:40',
+            '3.3:CMD_GETVOLUME:',
+            '5:CMD_SETMUTE:1',
+            '5.3:CMD_GETMUTE:',
+            '5.6:CMD_GETVOLUME:',
+            '7.5:CMD_SETMUTE:0',
+            '7.8:CMD_GETMUTE:'
+        )
+        $problems = @((Get-ProcessProblem $c.Run))
+        $replies = @($c.Run.replies)
+        if (-not $c.Run.connect) {
+            $problems += 'the player never connected to the API host'
+        } else {
+            # The first reply of a kind at or after a time: what the player reported then. A
+            # setter's own change notification and the answer to the query both qualify.
+            $replyAt = {
+                param([string] $Cmd, [double] $At)
+                $replies | Where-Object { $_.cmd -eq $Cmd -and $_.at -ge $At } | Select-Object -First 1
+            }
+            if (-not @($replies | Where-Object { $_.cmd -eq 'CMD_CURRENTVOLUME' })) {
+                $problems += 'CMD_GETVOLUME was never answered (the volume/mute commands are new in #4075; the unfixed build never answers)'
+            }
+            $vol40 = & $replyAt 'CMD_CURRENTVOLUME' 3.0
+            $muteOn = & $replyAt 'CMD_CURRENTMUTE' 5.0
+            $volWhileMuted = & $replyAt 'CMD_CURRENTVOLUME' 5.3
+            $muteOff = & $replyAt 'CMD_CURRENTMUTE' 7.5
+            if (-not $vol40 -or $vol40.payload -ne '40') { $problems += "after CMD_SETVOLUME 40 the player reports volume $(if ($vol40) { $vol40.payload } else { 'nothing' }), expected 40" }
+            if (-not $muteOn -or $muteOn.payload -ne '1') { $problems += "after CMD_SETMUTE 1 the player reports mute $(if ($muteOn) { $muteOn.payload } else { 'nothing' }), expected 1" }
+            if ($muteOn -and (-not $volWhileMuted -or $volWhileMuted.payload -ne '40')) { $problems += "muted, the volume query reports $(if ($volWhileMuted) { $volWhileMuted.payload } else { 'nothing' }), expected 40 (mute must not move the volume)" }
+            if (-not $muteOff -or $muteOff.payload -ne '0') { $problems += "after CMD_SETMUTE 0 the player reports mute $(if ($muteOff) { $muteOff.payload } else { 'nothing' }), expected 0" }
+        }
+        if (-not $c.Wav) {
+            $problems += 'no audio reached the endpoint'
+        } else {
+            # The capture starts when the render stream opens (about a second into the run), so
+            # its clock is not the case's: the muted stretch is found in the data -- a contiguous
+            # silent run mid-capture, closed by sound again -- not read off absolute times.
+            $timeline = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $c.Wav)
+            $sound = @($timeline | Where-Object { $_.hz -gt 0 })
+            if (-not $sound) {
+                $problems += 'the capture never sounds'
+            } else {
+                $firstSound = $sound[0].t
+                $head = @($timeline | Where-Object { $_.t -ge $firstSound -and $_.t -le $firstSound + 2.5 })
+                if (@($head | Where-Object { $_.hz -eq 0 }).Count) { $problems += 'the capture is silent before the mute command' }
+                # The longest silent run after playback was underway that a sounding window
+                # closes; a run still open at the end (the stream closing) does not count.
+                $runStart = -1.0; $runLen = 0; $bestLen = 0
+                foreach ($w in $timeline) {
+                    if ($w.t -le $firstSound + 2.0) { continue }
+                    if ($w.hz -eq 0) {
+                        if ($runStart -lt 0) { $runStart = $w.t; $runLen = 0 }
+                        $runLen++
+                    } else {
+                        if ($runLen -gt $bestLen) { $bestLen = $runLen }
+                        $runStart = -1.0; $runLen = 0
+                    }
+                }
+                if ($bestLen -lt 6) {   # 6 windows of 0.25 s = 1.5 s; the mute holds for 2.5
+                    $problems += 'no muted stretch in the capture, followed by sound again (expected about 2.5 s of silence after CMD_SETMUTE 1, sound after CMD_SETMUTE 0)'
+                }
+            }
+        }
+        Complete-Case 'api-volume-and-mute-round-trip' $problems
     }
 }
 finally {

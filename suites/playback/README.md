@@ -15,6 +15,10 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
                           window geometry at given times, make timed HTTP
                           requests to the player's web server (and close or
                           accept dialogs they raise), wait for the player to exit
+Run-ApiCase.guest.ps1     target side for the /slave API cases: host a window
+                          the player connects back to, send it WM_COPYDATA
+                          commands at given times (as src/MPCTestAPI does),
+                          record every reply in order, close with CMD_CLOSEAPP
 ```
 
 ## How a case works
@@ -68,6 +72,15 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
      also close a dialog a web command raised (WM_CLOSE, then IDCANCEL,
      to the dialog window) so the player can still be closed, or accept
      one (IDOK, e.g. the RAR entry selector's Select button);
+   - **API replies** -- for a `/slave` case, the guest hosts a window the
+     player connects back to (`CMD_CONNECT` carries its window handle),
+     sends commands as `WM_COPYDATA` at given times and records every
+     notification that comes back, in order, with timestamps. The player
+     sends its notifications with a blocking `SendMessage`, so the guest
+     pumps messages on its own thread through every wait; a reply to a
+     query arrives re-entrantly, before the query's `SendMessage` returns.
+     What is asserted is the protocol itself: the track list's selected
+     index, the volume and mute round trip;
    - **process** -- exited by itself, exit code 0.
 
 The clips are built so that content identifies itself: four flat colour
@@ -132,6 +145,8 @@ centre the box there. The band cases only ask which colour is present.
 | `rar-skip-within-archive` | a two-entry stored rar (selector dialog accepted with IDOK): skip-forward opens the second entry — 1600 Hz follows 440/880 Hz, not the next file in the folder (unfixed 2.5.5: `twotracks.mkv`, 1200 Hz) | #3644; 19432a0678 |
 | `replaygain-track-gain` | a FLAC tagged `REPLAYGAIN_TRACK_GAIN=-6.00 dB`: `ReplayGainMode=1` captures about 6 dB quieter than `ReplayGainMode=0` (FLAC only; the commit reads container metadata as ffmpeg keeps it, which covers FLAC, MP4 and ID3v2 but not Opus) | #4155; 2607141ae5 |
 | `hlg-on-evrcp-is-not-washed-out` | a 10-bit HLG flat field at signal 0.5 on EVR-CP comes out at 96.4, the HLG-to-SDR shader's own math (unfixed 2.8.2: no conversion, the 0.5 signal shows as-is, measured 126.4) | #4287; f185a85594 |
+| `api-reports-selected-audio-track` | `/slave` API, `twotracks.mkv` (default is track 2): the `CMD_LISTAUDIOTRACKS` reply ends in the selected index 1, not -1 (unfixed 2.8.2 tested `dwFlags == EXCLUSIVE`, but the switcher forwards LAV Splitter's ENABLED); the current-track query says 1 on both builds, as the control | #4213; e7053ee236 |
+| `api-volume-and-mute-round-trip` | `/slave` API: `CMD_SETVOLUME 40` / `CMD_SETMUTE 1` then 0 are answered by the volume/mute queries (40, 1, still 40 while muted, 0; the commands are new in #4075, so 2.8.0 never answers), and the capture goes silent for the muted stretch and comes back | #4075; d9f4975bff |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
@@ -195,8 +210,14 @@ the captured PNG, so a failure can be looked at rather than re-run.
 
 Driving a running player goes as far as posted WM_COMMAND messages
 (seek, play, change rate, reopen), read-only probes of the playlist's
-list control and the main toolbar's buttons, and HTTP requests against
-the web interface; anything that needs a finer hand waits for the
-`/slave` host described in `..\..\PLAN.md`. HDR cases
+list control and the main toolbar's buttons, HTTP requests against
+the web interface, and the `/slave` API (WM_COPYDATA commands to the
+player, its replies recorded). A `CMD_SETPOSITION`-before-load case
+for 3d06f27984 was considered and dropped: an early SETPOSITION is a
+no-op on the unfixed build too (`SeekTo` has no graph yet), so there
+is no observable difference to assert -- the commit's real fix needs
+a media close already in flight when the command lands, a race the
+harness cannot stage (the comment at the API cases in
+Invoke-Suite.ps1 says more). HDR cases
 need a Windows 11 guest (the virtual monitor does HDR there) and a
 renderer that outputs HDR.
