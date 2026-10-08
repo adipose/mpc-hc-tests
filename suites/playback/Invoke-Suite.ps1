@@ -1306,6 +1306,20 @@ try {
         }
         Complete-Case 'favorite-restores-its-own-ab-range' $problems
     }
+
+    # A profile without SecondarySubVerPos must start the secondary subtitle at the default 8, the value the
+    # constructor and the out-of-range fallback use. clsid2/mpc-hc@fd6c17dc16 moved both from 15 to 8 but
+    # changed LoadSettings' GetProfileInt default to 0, so a fresh profile put the secondary track at the top
+    # (patch757). The suite's profile never sets the key; the player's exit writes back what it loaded.
+    if (Test-CaseSelected 'secondary-sub-position-default') {
+        $c = Invoke-PlayerCase -Name 'secondary-sub-position-default' -Clip 'stereo.mkv'
+        $pos = Get-IniValue $c.Ini 'Settings' 'SecondarySubVerPos'
+        Complete-Case 'secondary-sub-position-default' @(
+            (Get-ProcessProblem $c.Run),
+            $(if ($null -eq $c.Ini) { 'no mpc-hc64.ini came back from the guest' }
+              elseif ($pos -ne '8') { "SecondarySubVerPos came back as '$pos' from a profile without it, expected 8" })
+        )
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
