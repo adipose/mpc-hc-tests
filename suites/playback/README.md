@@ -111,6 +111,7 @@ centre the box there. The band cases only ask which colour is present.
 | `web-modal-command-does-not-freeze` | a `wm_command=815` (Options) POST holds the web thread for the 5 s SendMessageTimeout, so the GET after it goes out at ~8 s with Options still open and answers 200 within 3000 ms (unfixed: the thread stays stuck behind the modal, status 0); the overdue dialog and player closes follow | #4053; a77c59b537 |
 | `web-playlist-click-with-chapters` | the remote's playlist click (`wm_command=-3&index=1`) on chaptered media opens playlist entry 2: a second capture with twotracks.mkv's 1200 Hz, not a chapter jump | #4078, #4093; 4802b44e4b |
 | `web-status-json-escapes-paths` | `/status.json` parses, and its `path` field equals the real path of `json test\it's ünïcode & co.mkv` exactly | #4053; a77c59b537 |
+| `history-exclude-filter` | `HistoryExcludeFilter=secret` (semicolon-separated substrings, case-insensitive on the full path): `SECRET-clip.mkv` plays but leaves no entry in the history ini, while `stereo.mkv` in a second run on the same profile is recorded | #3985, #3920, #4196; f310dc2461 (#3987) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

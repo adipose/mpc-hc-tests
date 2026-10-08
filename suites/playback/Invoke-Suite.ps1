@@ -155,6 +155,9 @@ try {
         New-Item -ItemType Directory 'C:\mpc-test\media\folder' | Out-Null
         Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\folder\a.mkv'
         Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\folder\b.mkv'
+        # A copy of stereo.mkv under a name the history-exclude-filter case's filter matches:
+        # HistoryExcludeFilter=secret is a case-insensitive substring match on the full path.
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\SECRET-clip.mkv' -Force
         # A copy of stereo.mkv in a folder and under a name that need escaping in JSON, for the
         # /status.json case. Built from char codes so this file can stay plain ASCII.
         if (Test-Path 'C:\mpc-test\media\json test') { Remove-Item 'C:\mpc-test\media\json test' -Recurse -Force }
@@ -1250,6 +1253,29 @@ try {
             }
         }
         Complete-Case 'web-status-json-escapes-paths' $problems
+    }
+
+    # 34. A filter that keeps matching files out of the history: clsid2/mpc-hc@f310dc2461
+    #    (#3987, of #3985, #3920 and #4196). HistoryExcludeFilter is semicolon-separated
+    #    substrings, matched case-insensitively against the file's full path
+    #    (MatchesHistoryExcludeFilter in AppSettings.cpp); a match is kept out of the recent
+    #    files list, the resume positions and the Windows recent documents. SECRET-clip.mkv is
+    #    a stereo.mkv copy made on the guest at deploy time, so its path contains "secret".
+    #    Two runs on one profile: the matching clip must leave no entry in the history, and
+    #    stereo.mkv under the same filter must be recorded, so the case cannot pass on a player
+    #    that records nothing. The history is mpc-hc64.history.ini since #3979 (2.8.0) and the
+    #    main ini before it, so both are read.
+    if (Test-CaseSelected 'history-exclude-filter') {
+        $historySettings = @{ KeepHistory = 1; RememberFilePos = 1; RememberPosForLongerThan = 0; HistoryExcludeFilter = 'secret' }
+        $a = Invoke-PlayerCase -Name 'history-exclude-filter' -Clip 'SECRET-clip.mkv' -Settings $historySettings
+        $b = Invoke-PlayerCase -Name 'history-exclude-filter-control' -Clip 'stereo.mkv' -Settings $historySettings -KeepProfile
+        $problems = @((Get-ProcessProblem $a.Run), (Get-ProcessProblem $b.Run))
+        $historyA = "$($a.History)`r`n$($a.Ini)"
+        $historyB = "$($b.History)`r`n$($b.Ini)"
+        if ($historyA -match 'SECRET-clip\.mkv') { $problems += 'the filtered clip is in the history after its own run' }
+        if ($historyB -match 'SECRET-clip\.mkv') { $problems += 'the history names SECRET-clip.mkv although HistoryExcludeFilter=secret matches its path' }
+        if ($historyB -notmatch 'stereo\.mkv') { $problems += 'stereo.mkv is not in the history although the filter does not match it' }
+        Complete-Case 'history-exclude-filter' $problems
     }
 }
 finally {
