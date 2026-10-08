@@ -112,7 +112,7 @@ centre the box there. The band cases only ask which colour is present.
 | `web-playlist-click-with-chapters` | the remote's playlist click (`wm_command=-3&index=1`) on chaptered media opens playlist entry 2: a second capture with twotracks.mkv's 1200 Hz, not a chapter jump | #4078, #4093; 4802b44e4b |
 | `web-status-json-escapes-paths` | `/status.json` parses, and its `path` field equals the real path of `json test\it's ünïcode & co.mkv` exactly | #4053; a77c59b537 |
 | `history-exclude-filter` | `HistoryExcludeFilter=secret` (semicolon-separated substrings, case-insensitive on the full path): `SECRET-clip.mkv` plays but leaves no entry in the history ini, while `stereo.mkv` in a second run on the same profile is recorded | #3985, #3920, #4196; f310dc2461 (#3987) |
-| `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: every window `Get-ToneTimeline.ps1` hears is the 800 Hz segment (unfixed: it plays on from 10 s to the end, 900-1200 Hz) | #3863; patch760 |
+| `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: `Get-ToneTimeline.ps1` hears the 800 Hz segment more than once through and nothing at 1000 Hz or above (unfixed: it starts at mark A and plays on to the end, 800 Hz once, then 900-1200 Hz) | #3863; patch760 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
