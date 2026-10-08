@@ -50,6 +50,11 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `playlist-type-to-find` | typing a name's first letter with the selection just before two entries that match it | the selection lands on the entry the search starts from, not past it (#3844) |
 | `playlist-click-time-column-no-edit` | a click on an entry's time column | the editor that may open holds the entry's name, never the time cell's text (#3885 item 1) |
 | `keys-double-click-edits` | a real double-click on a key entry's hotkey cell in Options > Player > Keys | the in-place hotkey editor opens within 1 s (#3853) |
+| `options-d3d9-device-hidden-on-one-adapter` | Options > Output, renderer switched to EVR Custom, the D3D9 device controls found on the page (old layout) or in the renderer settings popup | with one adapter the checkbox and combo are hidden, and stay hidden over an enable/disable cycle (#4033) |
+
+The Options/theme case runs in `Run-OptionsThemeCase.guest.ps1`, one case per
+job. The theme comes from the ini (`MPCTheme`, `ModernThemeMode` 0 = Dark / 1 =
+Light).
 
 The playlist cases run in one player instance, driven by
 `Run-PlaylistInputCase.guest.ps1`, which types with keyboard `SendInput` as

@@ -20,6 +20,9 @@
     (Run-KeysEditCase.guest.ps1) double-clicks a key entry's hotkey cell in Options > Player > Keys, which
     must open the in-place hotkey editor (#3853).
 
+    One more case (Run-OptionsThemeCase.guest.ps1) sits in the Options dialog: the D3D9 render
+    device selection must be hidden on a one-adapter guest (#4033).
+
     Two control cases run first, against combocase.exe, a small program with no player code in it:
 
       control-plain-windows-combo    a plain comctl32 combo never shows the hovered item, which is what
@@ -42,7 +45,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -86,6 +89,15 @@ $idKeysList     = Get-ResourceId 'IDC_LIST1' 11160               # the keys list
 $idWinHotkey    = Get-ResourceId 'IDC_WINHOTKEY1' 11070          # the in-place hotkey editor
 $idFontCombo    = Get-ResourceId 'IDC_COMBO5' 11004           # OSD font: over a hundred items
 $idSeekbarCombo = Get-ResourceId 'IDC_TIMEONSEEKBAR' 22100    # three items
+
+# The Options/theme case (theme 14b). IDC_BUTTON1 is reused across pages; only the shown page's is
+# visible, which is how the guest knows where it is.
+$idOutputPage   = Get-ResourceId 'IDD_PPAGEOUTPUT' 10039
+$idD3D9Check    = Get-ResourceId 'IDC_D3D9DEVICE' 22041       # "Select D3D9 Render Device" checkbox
+$idD3D9Combo    = Get-ResourceId 'IDC_D3D9DEVICE_COMBO' 22045
+$idVidRndCombo  = Get-ResourceId 'IDC_VIDRND_COMBO' 22060     # renderer selection on the Output page
+$idButton1      = Get-ResourceId 'IDC_BUTTON1' 11120          # Output page gear
+$idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the renderer settings popup
 
 # The hover lands this long after the click that opens the list. The defect shows up to about 100 ms; the
 # last value is the settled reference the others are compared with.
@@ -152,7 +164,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
@@ -312,6 +324,48 @@ try {
         [pscustomobject]@{ Run = $run; Dir = $local }
     }
 
+    # The Options/theme job: one launch of the player, Run-OptionsThemeCase driving the case the job
+    # file names. Same scheduled-task shape as the other jobs.
+    function Invoke-OptionsThemeJob {
+        param([string] $Name, [string] $Case, [string] $ArgumentLine, [string] $IniText, [hashtable] $Ids)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $job = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = $ArgumentLine; OutDir = $guestOut
+            Case = $Case; PostCommand = $idOptions; DialogTitle = 'Options'; Ids = $Ids
+        } | ConvertTo-Json -Depth 4
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-OptionsThemeCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(300)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
     Add-Type -AssemblyName System.Drawing
 
     # How many pixels of a combo's face differ between two captures. The face is the part that shows the
@@ -454,6 +508,25 @@ try {
         $problems
     }
 
+    # With one adapter the D3D9 device checkbox and combo must be hidden, at open and after an
+    # enable/disable cycle. The unfixed build only disables them: on the old page layout they are
+    # visible on the Output page itself, on the current one visible (disabled) in the renderer
+    # settings popup, so IsWindowVisible is the whole assertion.
+    function Test-OptionsD3D9Hidden {
+        param($Job)
+        $run = $Job.Run
+        $problems = @()
+        if (-not $run.layout) { return @('the guest run ended before the D3D9 controls were found') }
+        if ($run.rendererSetToEvrCustom -eq $false) { $problems += 'the renderer combo did not take the EVR Custom selection' }
+        foreach ($phase in 'atOpen', 'afterEnable') {
+            $p = $run.$phase
+            if (-not $p) { $problems += "the guest run ended before the $phase check"; continue }
+            if ($p.checkVisible) { $problems += "the D3D9 device checkbox (IDC_D3D9DEVICE) is visible ($phase, layout $($run.layout)): with one adapter it must be hidden (#4033)" }
+            if ($p.comboVisible) { $problems += "the D3D9 device combo (IDC_D3D9DEVICE_COMBO) is visible ($phase, layout $($run.layout)): with one adapter it must be hidden (#4033)" }
+        }
+        $problems
+    }
+
     # --- cases ------------------------------------------------------------------
 
     # 1. The controls. 101 is a plain comctl32 combo; 105 is the same combo, invalidated on mouse-leave.
@@ -503,6 +576,26 @@ try {
     $keysIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idKeysPage`r`n"
     $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
     Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c)
+
+    # The Options/theme case (theme 14b), one guest script driven through Invoke-OptionsThemeJob;
+    #    Run-OptionsThemeCase.guest.ps1's header says what the unfixed build does. The theme
+    #    is set through the ini like the combo cases do (MPCTheme, ModernThemeMode: 0 = Dark, 1 =
+    #    Light).
+    $themeIds = @{
+        D3D9Check = $idD3D9Check; D3D9Combo = $idD3D9Combo; VidRndCombo = $idVidRndCombo
+        GearButton = $idButton1; ResetButton = $idResetButton; ModalTitle = 'Video Renderer Settings'
+    }
+
+    # 6. With one display adapter the D3D9 render device selection is hidden, and stays hidden
+    #    when the page enables/disables controls (#4033, 0654c07e01). Modern Dark.
+    $d3d9Ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=1`r`nModernThemeMode=0`r`nLastUsedPage=$idOutputPage`r`n"
+    $c = Invoke-OptionsThemeJob -Name 'options-d3d9' -Case 'd3d9' -ArgumentLine '' -IniText $d3d9Ini -Ids $themeIds
+    if ($c.Run.d3d9Adapters -gt 1) {
+        $skipped++
+        Note Yellow "options-d3d9-device-hidden-on-one-adapter not testable here: the guest has $($c.Run.d3d9Adapters) D3D9 adapters, the controls are only hidden with one"
+    } else {
+        Complete-Case 'options-d3d9-device-hidden-on-one-adapter' (Test-OptionsD3D9Hidden $c)
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

@@ -55,6 +55,8 @@ public class MouseRig {
   [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO g);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr p);
@@ -82,6 +84,16 @@ public class MouseRig {
     IntPtr found = IntPtr.Zero;
     EnumChildWindows(root, delegate(IntPtr h, IntPtr l) {
       if (GetDlgCtrlID(h) == id && IsWindowVisible(h)) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  // A descendant with the given control id, visible or not. Some cases assert that a control is
+  // hidden, so visibility must not be part of the lookup.
+  public static IntPtr FindDescendant(IntPtr root, int id) {
+    IntPtr found = IntPtr.Zero;
+    EnumChildWindows(root, delegate(IntPtr h, IntPtr l) {
+      if (GetDlgCtrlID(h) == id) { found = h; return false; }
       return true;
     }, IntPtr.Zero);
     return found;
