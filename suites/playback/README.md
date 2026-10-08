@@ -113,6 +113,7 @@ centre the box there. The band cases only ask which colour is present.
 | `web-status-json-escapes-paths` | `/status.json` parses, and its `path` field equals the real path of `json test\it's ünïcode & co.mkv` exactly | #4053; a77c59b537 |
 | `history-exclude-filter` | `HistoryExcludeFilter=secret` (semicolon-separated substrings, case-insensitive on the full path): `SECRET-clip.mkv` plays but leaves no entry in the history ini, while `stereo.mkv` in a second run on the same profile is recorded | #3985, #3920, #4196; f310dc2461 (#3987) |
 | `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: `Get-ToneTimeline.ps1` hears the 800 Hz segment more than once through and nothing at 1000 Hz or above (unfixed: it starts at mark A and plays on to the end, 800 Hz once, then 900-1200 Hz) | #3863; patch760 |
+| `toolbar-older-layout-keeps-its-order` | a layout as 2.5.4 saved it (no left separator, no ButtonLayoutRevision) loads in its saved order | patch759 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
