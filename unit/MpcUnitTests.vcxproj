@@ -81,6 +81,7 @@
     <ClCompile Include="test_DSUtilText.cpp" />
     <ClCompile Include="test_Rasterizer.cpp" />
     <ClCompile Include="test_Resources.cpp" />
+    <ClCompile Include="test_SubPicMatrix.cpp" />
     <ClCompile Include="test_TextFile.cpp" />
     <ClCompile Include="test_WebVTT.cpp" />
     <!-- CProfile lives in the exe project, so it is compiled in directly. Its

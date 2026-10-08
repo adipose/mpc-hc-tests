@@ -20,6 +20,8 @@
 
 #include "stdafx.h"
 #include "HostHooks.h"
+#include "mpc-hc/VersionInfo.h"
+#include "filters/renderer/VideoRenderers/RenderersSettings.h"
 
 // What the static libraries expect their host executable to provide. In the
 // player these live in src/mpc-hc; here they return what a test set up.
@@ -36,4 +38,28 @@ SubRendererSettings& testutil::HostSubRendererSettings()
 SubRendererSettings GetSubRendererSettings()
 {
     return testutil::HostSubRendererSettings();
+}
+
+// SubPic.lib: GetString("version") on CSubPicAllocatorPresenterImpl answers
+// with this; the player defines it in VersionInfo.cpp. The matrix guess under
+// test never calls it.
+namespace VersionInfo
+{
+    CString GetVersionString() { return CString(L"1.0.0.0-test"); }
+}
+
+// SubPic.lib: CSubPicAllocatorPresenterImpl reads the renderer settings in
+// SetVideoSize and AlphaBltSubPic; the player defines this in AppSettings.cpp.
+// The matrix guess under test never calls it.
+CRenderersSettings& GetRenderersSettings()
+{
+    static CRenderersSettings settings;
+    return settings;
+}
+
+// CRenderersSettings' constructor calls this; the player defines it in the
+// renderer project's RenderersSettings.cpp, not linked here. The tests never
+// read the settings, so the defaults it would set are immaterial.
+void CRenderersSettings::CAdvRendererSettings::SetDefault()
+{
 }
