@@ -34,6 +34,12 @@
                              Both streams must run most of the 6 s. Skipped
                              when the video device has no audio output pin.
 
+      preview-with-mpcvr     Preview with MPC Video Renderer as the output
+                             renderer, which capture must replace with
+                             EVR-CP: the graph log must not try MPCVR (#4280,
+                             be66b4b8b1; unfixed 2.8.2 connects it). Skipped
+                             without MPCVR\ beside the player.
+
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
     audio source is the first audio capture device, or the one whose friendly
@@ -203,12 +209,18 @@ if ($VMName) {
     # from distrib\x64, two levels above bin\mpc-hc_x64.
     $playerDir = Split-Path (Resolve-Path $PlayerBinary).Path -Parent
     $stage = Join-Path $OutDir 'player-stage'
-    if (Test-Path $stage) { Get-ChildItem $stage -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+    if (Test-Path $stage) { Get-ChildItem $stage -File -Recurse | ForEach-Object { [IO.File]::Delete($_.FullName) } }
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item $PlayerBinary (Join-Path $stage 'mpc-hc64.exe')
     foreach ($dep in (Join-Path $playerDir 'mpciconlib.dll'), (Join-Path $playerDir 'D3DX9_43.dll'), (Join-Path $playerDir '..\..\distrib\x64\D3DX9_43.dll')) {
         $leaf = Split-Path $dep -Leaf
         if ((Test-Path $dep) -and -not (Test-Path (Join-Path $stage $leaf))) { Copy-Item $dep $stage }
+    }
+    # MPC Video Renderer, for preview-with-mpcvr: the player loads it from MPCVR\ beside the exe, which only
+    # the installer and the release zips have.
+    if (Test-Path (Join-Path $playerDir 'MPCVR\MpcVideoRenderer64.ax')) {
+        New-Item -ItemType Directory -Force (Join-Path $stage 'MPCVR') | Out-Null
+        Copy-Item (Join-Path $playerDir 'MPCVR\*.ax') (Join-Path $stage 'MPCVR')
     }
 
     $guestRoot = 'C:\mpc-test\capture'
@@ -228,7 +240,7 @@ if ($VMName) {
             if (Test-Path $root) { Remove-Item $root -Recurse -Force }
             foreach ($d in $root, "$root\suites\capture", "$root\player", "$root\out") { New-Item -ItemType Directory -Force $d | Out-Null }
         }
-        Copy-Item -ToSession $session (Join-Path $stage '*') "$guestRoot\player\" -Force
+        Copy-Item -ToSession $session (Join-Path $stage '*') "$guestRoot\player\" -Recurse -Force
         Copy-Item -ToSession $session $PSCommandPath "$guestRoot\suites\capture\Invoke-Suite.ps1" -Force
         $version = Invoke-Command -Session $session -ArgumentList $guestRoot {
             param($root)
@@ -328,16 +340,20 @@ function Start-CapturePlayer {
     # A private copy of the exe with a portable ini beside it: the settings
     # (device, output flags, file name) are the test's, not the machine's.
     # An empty -AudioDisplayName configures no audio device: the player then takes audio from the video device.
-    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName)
+    # -Settings adds [Settings] keys (the renderer, for preview-with-mpcvr).
+    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName, [hashtable] $Settings = @{})
     $dir = Join-Path $OutDir "$Name\player"
     New-Item -ItemType Directory -Force $dir | Out-Null
     Copy-Item $PlayerBinary (Join-Path $dir 'mpc-hc64.exe') -Force
+    $mpcvr = Join-Path (Split-Path $PlayerBinary -Parent) 'MPCVR'
+    if (Test-Path $mpcvr) { Copy-Item $mpcvr $dir -Recurse -Force }
+    $extra = ($Settings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)`r`n" }) -join ''
     @"
 [Settings]
 UpdaterAutoCheck=0
 DefaultCapture=0
 DebugLogMask=3
-[Capture]
+$extra[Capture]
 VidDispName=$($video.DisplayName)
 AudDispName=$AudioDisplayName
 VidOutput=1
@@ -398,7 +414,7 @@ function Read-AviStreams {
     $streams
 }
 
-$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio')
+$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr')
 if ($Case) { $cases = $cases | Where-Object { $n = $_; $Case | Where-Object { $n -like $_ } } }
 
 # --- record-with-previews, record-camera-audio --------------------------------------------
@@ -476,6 +492,48 @@ if ($cases -contains 'record-camera-audio') {
         $skipped++; Note Yellow "SKIP record-camera-audio: $($video.FriendlyName) has no audio output pin"
     } else {
         Test-Recording 'record-camera-audio' '' -CheckAudioLength
+    }
+}
+
+# --- preview-with-mpcvr ------------------------------------------------------------------
+#
+# Preview with MPC Video Renderer as the output renderer (DSVidRen 14; LastGPUCheck as the playback suite's
+# MPCVR cases set it). MPCVR cannot run a capture graph, so CFGManagerPlayer substitutes EVR-CP
+# (594b674b30) when m_bIsCapture -- but CFGManagerCapture set that flag only after its base constructor had
+# picked the renderers, so the substitute never applied and MPCVR went into the capture graph
+# (clsid2/mpc-hc#4280, where it hung; be66b4b8b1 passes the flag into the constructor). The graph log says
+# which renderers were tried: unfixed 2.8.2 logs "Trying MPC Video Renderer" and connects it to the Smart
+# Tee, the fix never tries it. No recording, so the case does not depend on the #4285 mux fix. Skipped
+# when the player has no MPCVR\ beside it.
+
+if ($cases -contains 'preview-with-mpcvr') {
+    $name = 'preview-with-mpcvr'
+    if (-not (Test-Path (Join-Path (Split-Path $PlayerBinary -Parent) 'MPCVR\MpcVideoRenderer64.ax'))) {
+        $skipped++; Note Yellow "SKIP $name`: no MPCVR\MpcVideoRenderer64.ax beside $PlayerBinary"
+    } else {
+        $problems = @()
+        New-Item -ItemType Directory -Force (Join-Path $OutDir $name) | Out-Null
+        try {
+            $player = Start-CapturePlayer $name (Join-Path $OutDir "$name\unused.avi") $audio.DisplayName @{ DSVidRen = 14; LastGPUCheck = 500000 }
+            try {
+                Start-Sleep -Seconds 4
+                if (-not $W::Answers($player.Main, 3000)) { $problems += 'main window not answering while previewing' }
+            } finally {
+                if (-not (Stop-CapturePlayer $player)) { $problems += 'player did not close on WM_CLOSE within 20 s' }
+            }
+            $log = Join-Path $player.Dir 'filtergraph.log'
+            if (-not (Test-Path $log)) { $problems += 'no filtergraph.log' }
+            else {
+                $lines = Get-Content $log
+                if ($lines -match 'Trying MPC Video Renderer') { $problems += 'MPC Video Renderer was tried in the capture graph: ' + ((($lines -match 'MPC Video Renderer') | Select-Object -First 2) -join ' / ') }
+                if (-not ($lines -match 'Renderer.* connected to')) { $problems += 'no video renderer connected' }
+            }
+        } catch {
+            # A player that never shows its Live window throws from Start-CapturePlayer: this case's failure.
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$OutDir\$name\*" } | Stop-Process -Force
+            $problems += "$_"
+        }
+        Report $name $problems
     }
 }
 
