@@ -1344,9 +1344,12 @@ try {
 
     # A favorite with an A-B range, opened while another file is playing, must loop its range.
     # Closing the playing file cleared the range before the favorite opened, and the call that
-    # should have carried it passed it as the bool reopen argument, so playback ran on from mark A
-    # to the end. Opened with no file loaded it always worked, which is why stereo.mkv plays first.
-    # steps.mkv's segment 5 (10-12 s) is 800 Hz, so every window heard must be 800 Hz.
+    # should have carried it passed it as the bool reopen argument. The favorite still started at
+    # mark A, but played on from there to the end. Opened with no file loaded it always worked,
+    # which is why stereo.mkv plays first.
+    # steps.mkv's segment 5 (10-12 s) is 800 Hz. Looped, the favorite plays 800 Hz more than once
+    # through (8 windows) and never reaches 1000 Hz. 900 Hz is allowed: a busy guest can run up to
+    # a second past B before the loop seeks back. Unfixed, it is 800 Hz once, then 900-1200 Hz.
     if (Test-CaseSelected 'favorite-restores-its-own-ab-range') {
         $steps = 'C:\mpc-test\media\steps.mkv'
         $favs = [ordered]@{
@@ -1355,20 +1358,50 @@ try {
         }
         $c = Invoke-PlayerCase -Name 'favorite-restores-its-own-ab-range' -Clip 'stereo.mkv' -Switches '/play' `
             -IniSections @{ 'Favorites' = @{ RememberABMarks = 1 }; 'Favorites\Files' = $favs } `
-            -PostCommands '2:2801' -CloseAtSec 12
+            -PostCommands '3:2801' -CloseAtSec 13
+        $posts = @($c.Run.posts)
         $problems = @((Get-ProcessProblem $c.Run))
-        $wav = @($c.Wavs)[-1]          # the last capture is steps.mkv's: each file opened is its own stream
-        if (-not $wav) { $problems += 'no audio reached the endpoint for the favorite' }
+        # The favorite's capture is the largest, about 10 s against stereo.mkv's 3 s. Not the last: the
+        # split varies, stereo.mkv sometimes has no capture of its own and the close can leave a tiny
+        # one after the favorite's. Read against steps.mkv's tones, stereo.mkv's 440/880 Hz come out
+        # as 300-600 Hz, which looks like steps.mkv from its start.
+        if (-not $posts -or -not $posts[0] -or -not $posts[0].delivered) { $problems += 'the posted favorite command did not reach a window' }
+        elseif (-not $c.Wav) { $problems += 'no audio reached the endpoint for the favorite' }
         else {
-            $heard = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $wav | Where-Object { $_.hz -gt 0 })
-            $off = @($heard | Where-Object { $_.hz -ne 800 })
+            $heard = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $c.Wav | Where-Object { $_.hz -gt 0 })
+            $byHz = ($heard | Group-Object hz | ForEach-Object { "$($_.Name) Hz x$($_.Count)" }) -join ', '
+            $inRange = @($heard | Where-Object { $_.hz -eq 800 }).Count
+            $past = @($heard | Where-Object { $_.hz -ge 1000 }).Count
+            $before = @($heard | Where-Object { $_.hz -lt 800 }).Count
             if ($heard.Count -eq 0) { $problems += 'the favorite played nothing' }
-            elseif ($off.Count -gt [math]::Floor($heard.Count * 0.1)) {
-                $byHz = ($off | Group-Object hz | ForEach-Object { "$($_.Name) Hz x$($_.Count)" }) -join ', '
-                $problems += "$($off.Count) of $($heard.Count) windows are not the favorite's 800 Hz segment ($byHz)"
-            }
+            elseif ($before) { $problems += "the favorite played before mark A ($byHz)" }
+            elseif ($past) { $problems += "the favorite played on past mark B instead of looping ($byHz)" }
+            elseif ($inRange -le 8) { $problems += "the favorite's 10-12 s range did not repeat ($byHz)" }
         }
         Complete-Case 'favorite-restores-its-own-ab-range' $problems
+    }
+
+    # 36. The same as 30 for a layout saved before the left separator existed (2.5.2 to 2.5.4, before 750b3d2bfc):
+    #    play, pause, stop, skipforward, framestep, skipback, dummysep, volume, no revision key. Byte for
+    #    byte what 2.5.4 itself saves (measured: seeded with an unknown id among the buttons, its customize
+    #    dialog opened and closed, it wrote this back without the unknown id). Here the movable part starts
+    #    at index 3, not 4. develop already reads this one right; the case guards the fix for case 30, where
+    #    starting every revision-0 layout at 4 would drop skipforward from this one.
+    if (Test-CaseSelected 'toolbar-older-layout-keeps-its-order') {
+        $layout = Get-ButtonSequenceIni @(887, 888, 890, 922, 891, 921, 945, 909)
+        $c = Invoke-PlayerCase -Name 'toolbar-older-layout-keeps-its-order' -Clip 'stereo.mkv' `
+            -IniSections @{ 'Toolbars\PlayerToolBar' = $layout } -ProbeAt '2'
+        $tbProbe = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $tbProbe -or $null -eq $tbProbe.toolbarIds) {
+            $problems += 'the player toolbar was not found'
+        } else {
+            $ids = @($tbProbe.toolbarIds)
+            $buttonsInOrder = @($ids | Where-Object { $_ -ne 957 -and $_ -ne 945 }) -join ','
+            $saved = '887,888,890,922,891,921,909'
+            if ($buttonsInOrder -ne $saved) { $problems += "the saved layout was not kept: buttons $buttonsInOrder, saved $saved ($($ids -join ','))" }
+        }
+        Complete-Case 'toolbar-older-layout-keeps-its-order' $problems
     }
 }
 finally {
