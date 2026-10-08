@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Provisions one guest with the two virtual output devices the playback
-    suite needs, proves they work there, and checkpoints the result.
+    suite needs and the virtual camera the capture suite needs, proves they
+    work there, and checkpoints the result.
 
 .DESCRIPTION
     This changes what a guest IS. On a pooled rig, run it for every guest of
@@ -9,14 +10,16 @@
     a time -- the guests do not survive being started together.
 
     Per guest: start it, confirm it is the guest it claims to be
-    (C:\vtuner\rig-id.txt), install vaudio-endpoint and idd-vdisplay, then
-    verify rather than trust the installer:
+    (C:\vtuner\rig-id.txt), install vaudio-endpoint, idd-vdisplay and
+    avs-vcamera, then verify rather than trust the installer:
 
       display  plug a monitor, wait for frames, capture one, unplug;
       audio    play a two-tone test through the endpoint in the console
-               session and check the driver's capture for those tones.
+               session and check the driver's capture for those tones;
+      camera   record 3 s from the camera through DirectShow's AVI mux and
+               check the frame numbers advance and its audio carries its tones.
 
-    Only a guest that passes both is shut down and checkpointed.
+    Only a guest that passes all three is shut down and checkpointed.
 
 .PARAMETER VMName
     The Hyper-V guest.
@@ -45,7 +48,9 @@ $ErrorActionPreference = 'Stop'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $vaudio = if ($env:MPC_TEST_VAUDIO) { $env:MPC_TEST_VAUDIO } else { Join-Path $testsRoot 'vaudio' }
 $vdisplay = if ($env:MPC_TEST_VDISPLAY) { $env:MPC_TEST_VDISPLAY } else { Join-Path $testsRoot 'vdisplay' }
-foreach ($need in (Join-Path $vaudio 'build\out\x64\vaudio.sys'), (Join-Path $vaudio 'build\out\x64\wasapiprobe.exe'), (Join-Path $vdisplay 'build\out\x64\vdisplay.dll')) {
+$vcamera = if ($env:MPC_TEST_VCAMERA) { $env:MPC_TEST_VCAMERA } else { Join-Path $testsRoot 'vcamera' }
+foreach ($need in (Join-Path $vaudio 'build\out\x64\vaudio.sys'), (Join-Path $vaudio 'build\out\x64\wasapiprobe.exe'), (Join-Path $vdisplay 'build\out\x64\vdisplay.dll'),
+                  (Join-Path $vcamera 'build\out\x64\vcamera.sys'), (Join-Path $vcamera 'build\out\x64\vcamprobe.exe')) {
     if (-not (Test-Path $need)) { throw "Build the drivers first: $need is missing (tools\Install-Toolchain.ps1, then tools\Build.ps1, in that submodule)." }
 }
 . (Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1')
@@ -78,6 +83,7 @@ try {
 
     & (Join-Path $vaudio 'tools\Install-VAudio.ps1') -Session $session 6>&1 | Where-Object { "$_" -match 'Drivers installed|failed' } | ForEach-Object { Write-Host "  audio:   $_" }
     & (Join-Path $vdisplay 'tools\Install-VDisplay.ps1') -Session $session 6>&1 | Where-Object { "$_" -match 'Drivers installed|failed' } | ForEach-Object { Write-Host "  display: $_" }
+    & (Join-Path $vcamera 'tools\Install-VCamera.ps1') -Session $session 6>&1 | Where-Object { "$_" -match 'Drivers installed|failed' } | ForEach-Object { Write-Host "  camera:  $_" }
 
     # --- verify the display ---------------------------------------------------
     $display = Invoke-Command -Session $session {
@@ -122,8 +128,23 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "audio verification failed on ${VMName}: $($check -join ' | ')" }
     Write-Host "  audio verified: exclusive 48 kHz/16, 400 Hz left, 700 Hz right, 2.0 s" -ForegroundColor Green
 
+    # --- verify the camera ------------------------------------------------------
+    # A recording through the AVI mux, video and the camera's own audio together. Needs no desktop: nothing
+    # is shown. avicheck reads the frame numbers the driver draws into each frame and the tone per channel.
+    $camRec = Invoke-Command -Session $session {
+        & 'C:\vcamera\vcamprobe.exe' record 'C:\vcamera\provision-check.avi' --seconds 3 --size 320x240 --format UYVY --device avs-vcamera 2>&1 | Out-String
+    }
+    $aviLocal = Join-Path ([IO.Path]::GetTempPath()) "provision-$VMName.avi"
+    try { Copy-Item -FromSession $session 'C:\vcamera\provision-check.avi' $aviLocal -Force }
+    catch { throw "camera verification failed on ${VMName}: nothing was recorded. vcamprobe said: $($camRec.Trim())" }
+    $camCheck = & python (Join-Path $vcamera 'tests\avicheck.py') $aviLocal --min-seconds 2 --expect-tones '1000,1500' --max-gap 3
+    if ($LASTEXITCODE -ne 0) { throw "camera verification failed on ${VMName}: $(($camCheck | ConvertFrom-Json).problems -join '; ')" }
+    $camVideo = ($camCheck | ConvertFrom-Json).streams | Where-Object type -eq 'vids' | Select-Object -First 1
+    Write-Host "  camera verified: 320x240 UYVY, frames $($camVideo.frames.first)..$($camVideo.frames.last) advancing, 1000 Hz left, 1500 Hz right" -ForegroundColor Green
+
     # Leave nothing of the verification behind in the state that gets checkpointed.
     Invoke-Command -Session $session {
+        if (Test-Path 'C:\vcamera\provision-check.avi') { [IO.File]::Delete('C:\vcamera\provision-check.avi') }
         Get-ChildItem 'C:\Windows\System32\drivers\DriverData\Audio_Samples\SimpleAudioSample' -Filter *.wav -ErrorAction SilentlyContinue | ForEach-Object { [IO.File]::Delete($_.FullName) }
         if (Test-Path 'C:\vdisplay\provision-check.png') { [IO.File]::Delete('C:\vdisplay\provision-check.png') }
     }
