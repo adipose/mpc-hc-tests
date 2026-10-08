@@ -1132,6 +1132,29 @@ try {
         }
         Complete-Case 'toolbar-old-layout-has-no-duplicates' $problems
     }
+
+    # 31. The same for a layout saved before the left separator existed (2.5.2 to 2.5.4, before 750b3d2bfc):
+    #    play, pause, stop, skipforward, framestep, skipback, dummysep, volume, no revision key. Byte for
+    #    byte what 2.5.4 itself saves (measured: seeded with an unknown id among the buttons, its customize
+    #    dialog opened and closed, it wrote this back without the unknown id). Here the movable part starts
+    #    at index 3, not 4. develop already reads this one right; the case guards the fix for case 30, where
+    #    starting every revision-0 layout at 4 would drop skipforward from this one.
+    if (Test-CaseSelected 'toolbar-older-layout-keeps-its-order') {
+        $layout = Get-ButtonSequenceIni @(887, 888, 890, 922, 891, 921, 945, 909)
+        $c = Invoke-PlayerCase -Name 'toolbar-older-layout-keeps-its-order' -Clip 'stereo.mkv' `
+            -IniSections @{ 'Toolbars\PlayerToolBar' = $layout } -ProbeAt '2'
+        $tbProbe = @($c.Run.probes)[0]
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $tbProbe -or $null -eq $tbProbe.toolbarIds) {
+            $problems += 'the player toolbar was not found'
+        } else {
+            $ids = @($tbProbe.toolbarIds)
+            $buttonsInOrder = @($ids | Where-Object { $_ -ne 957 -and $_ -ne 945 }) -join ','
+            $saved = '887,888,890,922,891,921,909'
+            if ($buttonsInOrder -ne $saved) { $problems += "the saved layout was not kept: buttons $buttonsInOrder, saved $saved ($($ids -join ','))" }
+        }
+        Complete-Case 'toolbar-older-layout-keeps-its-order' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
