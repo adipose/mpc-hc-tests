@@ -120,6 +120,7 @@ centre the box there. The band cases only ask which colour is present.
 | `thumbnails-errors-exit-nonzero` | `/thumbnails /minimized` on a missing source exits by itself with code 1 (pre-fix: a message box nobody could dismiss, so a hang); a control run on `stereo.mkv` exits 0 and leaves `stereo.mkv_thumbs.jpg` beside the clip | #4228; 40de2ddea8 (#4234) |
 | `favorite-restores-its-own-ab-range` | a favorite with A-B 10-12 s on `steps.mkv`, opened over a playing `stereo.mkv`, loops its range: `Get-ToneTimeline.ps1` hears the 800 Hz segment more than once through and nothing at 1000 Hz or above (unfixed: it starts at mark A and plays on to the end, 800 Hz once, then 900-1200 Hz) | #3863; patch760 |
 | `toolbar-older-layout-keeps-its-order` | a layout as 2.5.4 saved it (no left separator, no ButtonLayoutRevision) loads in its saved order | patch759 |
+| `secondary-sub-position-defaults-to-8` | a profile without `SecondarySubVerPos` saves it back as 8, the constructor's default (unfixed: 0, the missing-key fallback `LoadSettings` used) | #4299; 51937d1eee |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

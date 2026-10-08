@@ -1403,6 +1403,21 @@ try {
         }
         Complete-Case 'toolbar-older-layout-keeps-its-order' $problems
     }
+
+    # A profile without SecondarySubVerPos must default the secondary subtitle's vertical
+    # position to 8, the constructor's value: LoadSettings read the key with a GetProfileInt
+    # fallback of 0 while the out-of-range fallback and the constructor used 8, so a profile
+    # missing the key put the secondary subtitle at the very top. clsid2/mpc-hc@51937d1eee
+    # (#4299). The case's ini never carries the key, and the player's own shutdown writes the
+    # settings back, so the saved ini holds what LoadSettings made of it.
+    if (Test-CaseSelected 'secondary-sub-position-defaults-to-8') {
+        $c = Invoke-PlayerCase -Name 'secondary-sub-position-defaults-to-8' -Clip 'stereo.mkv'
+        $verPos = Get-IniValue $c.Ini 'Settings' 'SecondarySubVerPos'
+        Complete-Case 'secondary-sub-position-defaults-to-8' @(
+            (Get-ProcessProblem $c.Run),
+            $(if ($verPos -ne '8') { "the saved profile's SecondarySubVerPos is $verPos, expected 8 (the default for a profile without the key)" })
+        )
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
