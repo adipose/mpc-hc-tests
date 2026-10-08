@@ -207,6 +207,17 @@ Invoke-FFmpeg $still @(
     '-frames:v', '1', '-update', '1'
 )
 
+# --- steps.mkv: 20 s of one sine stepping 300, 400, ... 1200 Hz every 2 s ---
+# Segment k (2k..2k+2 s) is 300+100k Hz, so the audio says where playback is.
+# Get-ToneTimeline.ps1 reads it back from a capture.
+$steps = Join-Path $OutDir 'steps.mkv'
+Invoke-FFmpeg $steps @(
+    '-f', 'lavfi', '-i', "color=c=red:s=640x360:r=30:d=20",
+    '-f', 'lavfi', '-i', "aevalsrc='0.5*sin(2*PI*(300+100*floor(t/2))*t)':s=48000:d=20",
+    '-map', '0:v', '-map', '1:a', '-ac', '2',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le'
+)
+
 # Read the reference back: which colour ended up in which corner, and the
 # rotated picture's shape. A quarter of the way in from each corner is well
 # inside a quadrant.
@@ -369,6 +380,7 @@ $clips = [ordered]@{
         'still.png' = [ordered]@{
             note = 'a single flat red 640x360 frame; played through the still-image source it has no duration and no audio'
         }
+        'steps.mkv' = [ordered]@{ seconds = 20; note = 'sine 300+100k Hz in segment k = 2k..2k+2 s' }
     }
 }
 $clips | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'clips.json')

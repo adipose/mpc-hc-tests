@@ -1277,6 +1277,35 @@ try {
         if ($historyB -notmatch 'stereo\.mkv') { $problems += 'stereo.mkv is not in the history although the filter does not match it' }
         Complete-Case 'history-exclude-filter' $problems
     }
+
+    # A favorite with an A-B range, opened while another file is playing, must loop its range.
+    # Closing the playing file cleared the range before the favorite opened, and the call that
+    # should have carried it passed it as the bool reopen argument, so playback ran on from mark A
+    # to the end. Opened with no file loaded it always worked, which is why stereo.mkv plays first.
+    # steps.mkv's segment 5 (10-12 s) is 800 Hz, so every window heard must be 800 Hz.
+    if (Test-CaseSelected 'favorite-restores-its-own-ab-range') {
+        $steps = 'C:\mpc-test\media\steps.mkv'
+        $favs = [ordered]@{
+            Name0 = "Steps two to four;0:20000000:40000000;0;$steps"
+            Name1 = "Steps ten to twelve;0:100000000:120000000;0;$steps"
+        }
+        $c = Invoke-PlayerCase -Name 'favorite-restores-its-own-ab-range' -Clip 'stereo.mkv' -Switches '/play' `
+            -IniSections @{ 'Favorites' = @{ RememberABMarks = 1 }; 'Favorites\Files' = $favs } `
+            -PostCommands '2:2801' -CloseAtSec 12
+        $problems = @((Get-ProcessProblem $c.Run))
+        $wav = @($c.Wavs)[-1]          # the last capture is steps.mkv's: each file opened is its own stream
+        if (-not $wav) { $problems += 'no audio reached the endpoint for the favorite' }
+        else {
+            $heard = @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $wav | Where-Object { $_.hz -gt 0 })
+            $off = @($heard | Where-Object { $_.hz -ne 800 })
+            if ($heard.Count -eq 0) { $problems += 'the favorite played nothing' }
+            elseif ($off.Count -gt [math]::Floor($heard.Count * 0.1)) {
+                $byHz = ($off | Group-Object hz | ForEach-Object { "$($_.Name) Hz x$($_.Count)" }) -join ', '
+                $problems += "$($off.Count) of $($heard.Count) windows are not the favorite's 800 Hz segment ($byHz)"
+            }
+        }
+        Complete-Case 'favorite-restores-its-own-ab-range' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
