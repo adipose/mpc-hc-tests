@@ -16,6 +16,12 @@ against the encoding matrix. The scripts below are the deeper standalone
 layer: dialog-driven scans exercise the interactive path the headless
 switch bypasses, and the frame probes assert on rendered pixels.
 
+On ATSC the headless scan also asserts that every service carries its VCT
+virtual channel number (`atscMajor`.`atscMinor`, with `originNumber` =
+major * 1000 + minor). No release has `/dvbscan` without that fix (#4136,
+425a3b1d75), so the failing side was shown on develop with only its
+`Mpeg2SectionData.cpp` hunks reverted: 20 of 20 channels at 0.
+
 ## Layout
 
 | | |

@@ -141,6 +141,23 @@ try {
             continue
         }
 
+        if ($std -eq 'ATSC') {
+            # Every ATSC service is known by the two-part virtual channel number in its VCT, and the player
+            # orders by originNumber = major * 1000 + minor (CBDAChannel::SetATSCNumber). Before #4136
+            # (425a3b1d75) ParseVCT read the numbers and dropped them, so every service came out 0 and
+            # the list stayed in discovery order. This holds for whatever the rig carries, so it needs no
+            # declaration of the rig's services. The encrypted count is a note: access_controlled is
+            # read since the same fix, but which services set it is the rig's business.
+            $unnumbered = @($channels | Where-Object { -not $_.atscMajor -or $_.originNumber -ne ($_.atscMajor * 1000 + $_.atscMinor) })
+            if ($unnumbered.Count) {
+                $failed++; Note Red ("ATSC: {0} of {1} channel(s) carry no virtual channel number (e.g. '{2}': atscMajor {3}, atscMinor {4}, originNumber {5})" -f
+                    $unnumbered.Count, $channels.Count, $unnumbered[0].name, $unnumbered[0].atscMajor, $unnumbered[0].atscMinor, $unnumbered[0].originNumber)
+            } else {
+                $passed++; Note Green "ATSC: every channel carries its VCT virtual number ($((@($channels | ForEach-Object { "$($_.atscMajor).$($_.atscMinor)" }) | Sort-Object -Unique) -join ', '))"
+            }
+            Note DarkGray "      $(@($channels | Where-Object encrypted).Count) of $($channels.Count) ATSC channel(s) report access-controlled"
+        }
+
         if ($std -eq 'DVBT') {
             # The matrix streams are provisioned on the DVB-T tuner; assert the
             # channel records against the emulator's declarations. The assert
