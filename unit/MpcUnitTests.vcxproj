@@ -54,7 +54,8 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <AdditionalLibraryDirectories>$(SolutionDir)bin\lib\$(Configuration)_$(PlatformName);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>strmiids.lib;Uuid.lib;Version.lib;Vfw32.lib;Winmm.lib;Shlwapi.lib;dxguid.lib;d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- bcrypt: ffmpeg-min's libavutil random_seed calls BCrypt* -->
+      <AdditionalDependencies>strmiids.lib;Uuid.lib;Version.lib;Vfw32.lib;Winmm.lib;Shlwapi.lib;dxguid.lib;d3d9.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SetChecksum>false</SetChecksum>
     </Link>
   </ItemDefinitionGroup>
@@ -97,7 +98,17 @@
     <ClCompile Include="..\..\src\mpc-hc\Profile.cpp">
       <PreprocessorDefinitions>_SH_SECURE=0x80;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <!-- CoverArt::FindExternal (00904b77b4) lives in the exe project too. The
+         /Yu boundary keeps the exe's stdafx.h closed; everything it uses -
+         FindFiles and the BeginEnumFilters macros (DSUtil.lib), IDSMResourceBag
+         (DSMPropertyBag.h, header-only), CComPtr/CComBSTR (atlcomcli.h, added to
+         this project's stdafx.h for it) - is already linked or included. -->
+    <ClCompile Include="..\..\src\mpc-hc\CoverArt.cpp" />
     <ClCompile Include="test_Profile.cpp" />
+    <ClCompile Include="test_CoverArt.cpp" />
+    <ClCompile Include="test_Mixer.cpp" />
+    <ClCompile Include="test_USFSubtitles.cpp" />
+    <ClCompile Include="test_VobFile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="HostHooks.h" />
@@ -159,6 +170,25 @@
     </ProjectReference>
     <ProjectReference Include="..\..\src\Subtitles\Subtitles.vcxproj">
       <Project>{5e56335f-0fb1-4eea-b240-d8dc5e0608e4}</Project>
+    </ProjectReference>
+    <!-- DeCSS: CVobFile::GetTitleInfo (#4230). Includes DSUtil headers but a
+         static lib never links one, so its place in the build order is free. -->
+    <ProjectReference Include="..\..\src\DeCSS\DeCSS.vcxproj">
+      <Project>{1a2dfd1a-3c6c-44d1-909d-294af646b575}</Project>
+    </ProjectReference>
+    <!-- AudioTools: CMixer's upmix matrix (8366e3d833). It shells out to
+         swresample, so the ffmpeg-min and soxr libraries come with it; soxr is
+         also AudioTools' own project reference, but the linker only walks
+         references listed here, so both are named. ffmpeg-min's 150 C files are
+         the bulk of a first build with these added. -->
+    <ProjectReference Include="..\..\src\thirdparty\soxr\soxr.vcxproj">
+      <Project>{7cbde5a1-9cbb-4139-93f5-09d8dba4427f}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\src\thirdparty\ffmpeg\ffmpeg.vcxproj">
+      <Project>{438286b7-a9f4-411d-bcc5-948c40e37d8f}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\src\thirdparty\AudioTools\AudioTools.vcxproj">
+      <Project>{1b6de4c0-9d27-4150-a327-e7f3b492b5f0}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

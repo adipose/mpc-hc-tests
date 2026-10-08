@@ -32,6 +32,11 @@
 #include <atlcoll.h>
 #include <atlpath.h>
 
+// The exe's stdafx.h supplies these to CoverArt.cpp (compiled into this
+// project); the test for USFSubtitles uses CComPtr<IXMLDOMNode> too.
+#include <atlbase.h>
+#include <atlcomcli.h>
+
 #include "BaseClasses/streams.h"
 
 #include "../../src/DSUtil/DSUtil.h"

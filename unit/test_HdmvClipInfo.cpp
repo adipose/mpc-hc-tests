@@ -57,12 +57,13 @@ namespace
     Bytes AudioAttrs(BDVM_ChannelLayout layout, BDVM_SampleRate rate, const char* lang) { return Bytes().u8((BYTE)(layout << 4 | rate)).str(lang); }
     Bytes PgAttrs(const char* lang) { return Bytes().str(lang); }
 
-    Bytes StnTable(const std::vector<Bytes>& video, const std::vector<Bytes>& audio, const std::vector<Bytes>& pg)
+    Bytes StnTableCounted(const std::vector<Bytes>& video, const std::vector<Bytes>& audio,
+                          BYTE numPg, BYTE numPipPg, const std::vector<Bytes>& pg)
     {
         Bytes body;
         body.u16(0)                                 // reserved
-            .u8((BYTE)video.size()).u8((BYTE)audio.size()).u8((BYTE)pg.size())
-            .u8(0).u8(0).u8(0).u8(0)                // ig, secondary audio, secondary video, pip pg
+            .u8((BYTE)video.size()).u8((BYTE)audio.size()).u8(numPg)
+            .u8(0).u8(0).u8(0).u8(numPipPg)         // ig, secondary audio, secondary video, pip pg
             .fill(5);                               // reserved
         for (const auto& s : video) { body.add(s); }
         for (const auto& s : audio) { body.add(s); }
@@ -70,6 +71,11 @@ namespace
         Bytes t;
         t.u16((WORD)body.size()).add(body);
         return t;
+    }
+
+    Bytes StnTable(const std::vector<Bytes>& video, const std::vector<Bytes>& audio, const std::vector<Bytes>& pg)
+    {
+        return StnTableCounted(video, audio, (BYTE)pg.size(), 0, pg);
     }
 
     Bytes Hd1080Stn(WORD videoPid = 0x1011)
@@ -334,6 +340,35 @@ TEST(Hdmv, PlaylistRejectsBadMagicAndBadItem)
     EXPECT_EQ(info.ReadPlaylist(root + L"\\BDMV\\PLAYLIST\\item.mpls", duration, playlist), VFW_E_INVALID_FILE_FORMAT);
     EXPECT_EQ(info.ReadPlaylist(root + L"\\BDMV\\PLAYLIST\\short.mpls", duration, playlist), VFW_E_INVALID_FILE_FORMAT);
     EXPECT_TRUE(FAILED(info.ReadPlaylist(root + L"\\BDMV\\PLAYLIST\\missing.mpls", duration, playlist)));
+}
+
+// #4208 (d7c56e1778): ReadSTNInfo looped over the stream counts with a BYTE
+// counter, so a PlayItem whose pg + pip-pg count reached 256 wrapped the
+// counter 255 -> 0 and the loop never ended; ReadPlaylist hung on the disc's
+// own file. Isolated, because unfixed this never returns and the child process
+// has to be stopped by the timeout.
+TEST_ISOLATED(Hdmv, PlaylistWith256PgStreamsCompletes)
+{
+    std::vector<Bytes> pg;
+    for (int i = 0; i < 256; i++) {
+        pg.push_back(StnStream((WORD)(0x1200 + i), PRESENTATION_GRAPHICS_STREAM, PgAttrs("eng")));
+    }
+    CStringW root = MakeDisc(L"bd-many-pg", {
+        { L"PLAYLIST\\00000.mpls", Mpls({ PlayItem("00001", 0, 60,
+            StnTableCounted({ StnStream(0x1011, VIDEO_STREAM_H264, VideoAttrs(BDVM_VideoFormat_1080p, BDVM_FrameRate_23_976)) },
+                            { StnStream(0x1100, AUDIO_STREAM_AC3, AudioAttrs(BDVM_ChannelLayout_MULTI, BDVM_SampleRate_48, "eng")) },
+                            255, 1, pg)) }) },
+    });
+
+    CHdmvClipInfo info;
+    REFERENCE_TIME duration = -1;
+    CHdmvClipInfo::HdmvPlaylist playlist;
+    EXPECT_EQ(info.ReadPlaylist(root + L"\\BDMV\\PLAYLIST\\00000.mpls", duration, playlist), S_OK);
+    ASSERT_EQ(playlist.size(), (size_t)1);
+    EXPECT_EQ(playlist[0].m_strFileName, root + L"\\BDMV\\STREAM\\00001.M2TS");
+    EXPECT_EQ(duration, 60 * kSecond);
+    // the video stream is in there too, so the resolution was read
+    EXPECT_EQ(playlist.m_max_video_res, 1080u);
 }
 
 // Chapter marks are per PlayItem, timed from that clip's own zero; the player

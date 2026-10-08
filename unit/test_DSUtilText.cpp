@@ -23,6 +23,7 @@
 #include "../../src/DSUtil/ISOLang.h"
 #include "../../src/DSUtil/PathUtils.h"
 #include "../../src/DSUtil/text.h"
+#include "moreuuids.h"
 
 // Pure helpers in src/DSUtil: language-code mapping (ISOLang.cpp), path and
 // filename handling (PathUtils.cpp) and the text helpers (text.cpp, DSUtil.cpp).
@@ -99,6 +100,21 @@ TEST(ISOLang, RoundTripThrough6391And6392)
     EXPECT_FALSE(ISOLang::IsISO6392("en"));
 }
 
+// #4225 (e7f72cb70f): the table's first entry with an empty 639-1 column is
+// "Achinese", so an empty code matched it instead of finding nothing.
+TEST(ISOLang, EmptyCodeMatchesNothing)
+{
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage(""), L"");
+    EXPECT_EQ(ISOLang::ISO6391ToLcid(""), (LCID)0);
+    EXPECT_FALSE(ISOLang::IsISO6391(""));
+    EXPECT_EQ(ISOLang::ISO6391To6392(""), "");
+    EXPECT_EQ(ISOLang::ISO6391ToISOLang("").name, nullptr);
+
+    // a real code still resolves, one lookup past the empty one
+    EXPECT_EQ(ISOLang::ISO6391ToLanguage("en"), L"English");
+    EXPECT_TRUE(ISOLang::IsISO6391("en"));
+}
+
 // --- PathUtils --------------------------------------------------------------
 
 TEST(PathUtils, NameAndExtension)
@@ -171,6 +187,20 @@ TEST(PathUtils, StripPathOrUrl)
 {
     EXPECT_EQ(PathUtils::StripPathOrUrl(L"C:\\movies\\clip.mkv"), L"clip.mkv");
     EXPECT_EQ(PathUtils::StripPathOrUrl(L"http://example.com/path/clip%20one.mkv"), L"clip one.mkv");
+}
+
+// #4041 (17b48e2f94): external subtitle/audio lookup for a multi-volume rar
+// needs both suffixes off, not just the last extension.
+TEST(PathUtils, StripExtensionAndRarVolumeSuffix)
+{
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"base.mkv"), L"base");
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"base.part01.rar"), L"base");
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"BASE.PART12.RAR"), L"BASE");
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"base.r00"), L"base");
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"no extension"), L"no extension");
+    // a dot in a directory name is not an extension
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"C:\\dir.with.dot\\file"), L"C:\\dir.with.dot\\file");
+    EXPECT_EQ(PathUtils::StripExtensionAndRarVolumeSuffix(L"C:\\dir.with.dot\\file.mkv"), L"C:\\dir.with.dot\\file");
 }
 
 // --- CLongPath (PR #4236) -----------------------------------------------------
@@ -447,4 +477,58 @@ TEST(Text, SanitizeMenuLabel)
     CStringW label = SanitizeMenuLabel(longName);
     EXPECT_TRUE(label.GetLength() <= MENU_NAME_MAX);
     EXPECT_EQ(label.Right(1), L"\x2026"); // truncated with a horizontal-ellipsis character
+}
+
+// #4039 (1717e6cd75): the recent-files list hides the file entry when its
+// title says the same thing, but a title with characters that are illegal in
+// file names never matched the sanitized name a downloader saved it as.
+// youtube-dl turns '/' into '_', deletes '?', expands ':' to " -" and turns
+// '"' into '\''.
+TEST(Text, NameSimilarWhenSanitizedByDownloader)
+{
+    EXPECT_TRUE(IsNameSimilar(L"AC/DC Live At Donington", L"AC_DC Live At Donington.mkv"));
+    EXPECT_TRUE(IsNameSimilar(L"Who Framed Roger Rabbit?", L"Who Framed Roger Rabbit.mkv"));
+    EXPECT_TRUE(IsNameSimilar(L"Movie Title: The Sequel?", L"Movie Title - The Sequel.mkv"));
+    EXPECT_TRUE(IsNameSimilar(L"The \"Best\" Of 1999 Rock", L"The 'Best' Of 1999 Rock.mkv"));
+    // and the "ReleaseGroup | FileName" title shape contains the file name
+    EXPECT_TRUE(IsNameSimilar(L"SomeGroup | A Movie About Trains", L"A Movie About Trains.mkv"));
+}
+
+TEST(Text, NameSimilarRejectsShortOrUnrelatedTitles)
+{
+    // a handful of stripped characters must not be enough
+    EXPECT_FALSE(IsNameSimilar(L"Hi?", L"Hi.mkv"));
+    EXPECT_FALSE(IsNameSimilar(L"Short: Film?", L"Short - Film.mkv")); // stripped to 9 chars
+    EXPECT_FALSE(IsNameSimilar(L"Documentary Part 1?", L"Another Film 2.mkv"));
+    // ...but the same name with the illegal character dropped must be
+    EXPECT_TRUE(IsNameSimilar(L"Documentary Part 1?", L"Documentary Part 1.mkv"));
+}
+
+// 16ccbeeb1c: AC4 was only recognised under one of its two GUID spellings,
+// ALAC not at all, and a printable FourCC subtype came out as a hex dump
+// ("74786574" instead of "text").
+TEST(MediaTypeNames, ShortAudioNames)
+{
+    AM_MEDIA_TYPE mt = {};
+    mt.majortype = MEDIATYPE_Audio;
+
+    mt.subtype = MEDIASUBTYPE_DOLBY_AC4;
+    EXPECT_EQ(GetShortAudioNameFromMediaType(&mt), L"AC4");
+    // the lower-case spelling of the same codec id
+    mt.subtype = MEDIASUBTYPE_DOLBY_AC4_lc;
+    EXPECT_EQ(GetShortAudioNameFromMediaType(&mt), L"AC4");
+    mt.subtype = MEDIASUBTYPE_ALAC;
+    EXPECT_EQ(GetShortAudioNameFromMediaType(&mt), L"ALAC");
+}
+
+TEST(MediaTypeNames, FourCCSubtypeNames)
+{
+    AM_MEDIA_TYPE mt = {};
+    mt.majortype = MEDIATYPE_Audio;
+    // a FourCC is stored little-endian in Data1: 'text'
+    mt.subtype = { 0x74786574, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+    EXPECT_EQ(GetShortAudioNameFromMediaType(&mt), L"text");
+    // a non-printable one still comes out as hex (b is 0x02, so all four bytes)
+    mt.subtype = { 0x00020001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+    EXPECT_EQ(GetShortAudioNameFromMediaType(&mt), L"00020001");
 }
