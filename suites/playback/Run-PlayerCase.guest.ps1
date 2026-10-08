@@ -65,7 +65,9 @@ param(
                                          # <sec>:size:<ctrl>:<px> grows that dialog by px each way;
                                          # <sec>:dpi:0:<percent> sets the primary monitor's display scale
                                          # (put back to 100% when the steps are done). A probe also records
-                                         # the control's and its dialog's screen rects.
+                                         # the control's and its dialog's screen rects. <sec>:fprobe:<ctrl>
+                                         # probes a control of the player's frame instead (status bar,
+                                         # toolbars): its screen rect and window text.
                                          # Decimal. Recorded under "controls".
 )
 
@@ -402,7 +404,7 @@ function Accept-PlayerDialog {
 # level of children (a property sheet's page is a dialog inside the sheet). Dialog ids are not unique
 # across dialogs, which is why only dialogs are searched and not the player's frame.
 function Find-DialogControl {
-    param([int] $ProcessId, [int] $ControlId)
+    param([int] $ProcessId, [int] $ControlId, [string] $TopClass = '#32770')
     $dialogs = [System.Collections.Generic.List[IntPtr]]::new()
     $top = [MpcTest.User32+EnumWindowsProc] {
         param($hWnd, $lParam)
@@ -411,7 +413,7 @@ function Find-DialogControl {
         if ($procId -eq $ProcessId -and [MpcTest.User32]::IsWindowVisible($hWnd)) {
             $cls = [Text.StringBuilder]::new(64)
             [void] [MpcTest.User32]::GetClassNameW($hWnd, $cls, $cls.Capacity)
-            if ($cls.ToString() -eq '#32770') { $dialogs.Add($hWnd) }
+            if ($cls.ToString() -eq $TopClass) { $dialogs.Add($hWnd) }
         }
         return $true
     }
@@ -487,14 +489,21 @@ function Invoke-ControlStep {
         $script:dpiChanged = $true
         return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = (Set-PrimaryScale ([int] $Step.value)) }
     }
-    $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl
+    # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog.
+    $topClass = if ($Step.op -eq 'fprobe') { 'MediaPlayerClassicW' } else { '#32770' }
+    $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl -TopClass $topClass
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
     $root = [MpcTest.User32]::GetAncestor($ctrl, 2)   # GA_ROOT: the top-level dialog
     $title = [Text.StringBuilder]::new(256)
     [void] [MpcTest.User32]::GetWindowTextW($root, $title, $title.Capacity)
     $record.dialog = $title.ToString()
-    if ($Step.op -eq 'probe') {
+    if ($Step.op -eq 'fprobe') {
+        $text = [Text.StringBuilder]::new(1024)
+        [void] [MpcTest.User32]::GetWindowTextW($ctrl, $text, $text.Capacity)
+        $record.text = $text.ToString()
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+    } elseif ($Step.op -eq 'probe') {
         $record.icon = ([MpcTest.User32]::SendMessageW($ctrl, 0x0171, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)   # STM_GETICON
         # Screen rects (left, top, right, bottom) of the control and of its top-level dialog.
         $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect

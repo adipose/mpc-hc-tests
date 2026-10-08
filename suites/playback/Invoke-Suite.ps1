@@ -1993,6 +1993,27 @@ try {
         }
         Complete-Case 'modeless-dialog-follows-dpi-change' $problems
     }
+
+    # 48. The status pane reaches the time pane: a99d7ce7c9 ("Simplify statusbar relayout", #3782).
+    #    CPlayerStatusBar::Relayout used to size the status label (IDC_PLAYERSTATUS 12026) to the
+    #    text it held at that moment, so text that grew later was cut short; it now spans up to 8 px
+    #    before the time label (IDC_PLAYERTIME 12027). Both are read from the frame while long.mkv
+    #    plays. Unfixed 2.6.1.
+    if (Test-CaseSelected 'status-pane-reaches-time-pane') {
+        $c = Invoke-PlayerCase -Name 'status-pane-reaches-time-pane' -Clip 'long.mkv' -Switches '/play' `
+            -ControlAt '4:fprobe:12026,4.2:fprobe:12027' -CloseAtSec 6
+        $problems = @(Get-ProcessProblem $c.Run)
+        $status = @($c.Run.controls) | Where-Object { $_.ctrl -eq 12026 } | Select-Object -First 1
+        $time = @($c.Run.controls) | Where-Object { $_.ctrl -eq 12027 } | Select-Object -First 1
+        if (-not $status -or -not $status.found -or -not $time -or -not $time.found) {
+            $problems += 'the status bar labels were not found'
+        } else {
+            Note Gray "      status '$($status.text)' $($status.rect -join ','); time '$($time.text)' $($time.rect -join ',')"
+            $gap = $time.rect[0] - $status.rect[2]
+            if ([math]::Abs($gap - 8) -gt 1) { $problems += "the status label ends $gap px before the time label, expected 8: it was sized to its text ('$($status.text)', $($status.rect[2] - $status.rect[0]) px)" }
+        }
+        Complete-Case 'status-pane-reaches-time-pane' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
