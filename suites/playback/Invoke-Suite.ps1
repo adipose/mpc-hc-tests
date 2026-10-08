@@ -390,6 +390,13 @@ try {
             }
         }
 
+        # Files the control steps saved beside the result (the grip crops), named after it on the guest.
+        foreach ($step in @($(if ($run.PSObject.Properties['controls']) { $run.controls }))) {
+            if ($step.PSObject.Properties['file'] -and $step.file) {
+                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-grip-', "$Name-grip-")) -Force
+            }
+        }
+
         if ($guest.History) { Set-Content (Join-Path $OutDir "$Name.history.ini") $guest.History }
         if ($guest.Ini) { Set-Content (Join-Path $OutDir "$Name.ini") $guest.Ini }
 
@@ -2013,6 +2020,68 @@ try {
             if ([math]::Abs($gap - 8) -gt 1) { $problems += "the status label ends $gap px before the time label, expected 8: it was sized to its text ('$($status.text)', $($status.rect[2] - $status.rect[0]) px)" }
         }
         Complete-Case 'status-pane-reaches-time-pane' $problems
+    }
+
+    # 49. The size grip after a live DPI change, modern dark theme: #4085, 410e511aa6 (of #4037, #4140).
+    #    Organize Favorites at 100%, then the primary monitor to 150%; the grip's corner is captured
+    #    before and after (the runner's grip step). The grip glyph is six equal squares in the theme's
+    #    grip colour (191,191,191 in Dark). Unfixed 2.8.0 redraws it after the change into a grid of
+    #    the wrong size, and the squares come out clipped into bars; the fix draws six whole squares.
+    #    The capture before the change is the control: six squares on both builds.
+    function Get-GripSquares {
+        # The glyph's connected components: pixels within 12 of (191,191,191) and neutral, inside the grip's
+        # own rect. The crop also holds the window's shadow edge, whose greys reach that value.
+        param([string] $Png, $Grip)
+        $cw = [math]::Min(2 * ($Grip.rect[2] - $Grip.rect[0]), $Grip.dialogRect[2] - $Grip.dialogRect[0])
+        $ch = [math]::Min(2 * ($Grip.rect[3] - $Grip.rect[1]), $Grip.dialogRect[3] - $Grip.dialogRect[1])
+        $gx0 = $Grip.rect[0] - ($Grip.dialogRect[2] - $cw); $gx1 = $Grip.rect[2] - ($Grip.dialogRect[2] - $cw)
+        $gy0 = $Grip.rect[1] - ($Grip.dialogRect[3] - $ch); $gy1 = $Grip.rect[3] - ($Grip.dialogRect[3] - $ch)
+        $bmp = [System.Drawing.Bitmap]::FromFile($Png)
+        try {
+            $on = [bool[,]]::new($bmp.Width, $bmp.Height)
+            for ($y = [math]::Max(0, $gy0); $y -lt [math]::Min($bmp.Height, $gy1); $y++) { for ($x = [math]::Max(0, $gx0); $x -lt [math]::Min($bmp.Width, $gx1); $x++) {
+                $px = $bmp.GetPixel($x, $y)
+                $on[$x, $y] = [math]::Abs($px.R - 191) -le 12 -and [math]::Abs($px.R - $px.G) -le 4 -and [math]::Abs($px.R - $px.B) -le 4
+            } }
+            $seen = [bool[,]]::new($bmp.Width, $bmp.Height)
+            $parts = @()
+            for ($y = 0; $y -lt $bmp.Height; $y++) { for ($x = 0; $x -lt $bmp.Width; $x++) {
+                if (-not $on[$x, $y] -or $seen[$x, $y]) { continue }
+                $stack = [System.Collections.Generic.Stack[int[]]]::new(); $stack.Push(@($x, $y)); $seen[$x, $y] = $true
+                $x0 = $x; $x1 = $x; $y0 = $y; $y1 = $y; $n = 0
+                while ($stack.Count) {
+                    $q = $stack.Pop(); $n++
+                    $x0 = [math]::Min($x0, $q[0]); $x1 = [math]::Max($x1, $q[0]); $y0 = [math]::Min($y0, $q[1]); $y1 = [math]::Max($y1, $q[1])
+                    foreach ($dxy in @(@(1, 0), @(-1, 0), @(0, 1), @(0, -1))) {
+                        $nx = $q[0] + $dxy[0]; $ny = $q[1] + $dxy[1]
+                        if ($nx -ge 0 -and $ny -ge 0 -and $nx -lt $bmp.Width -and $ny -lt $bmp.Height -and $on[$nx, $ny] -and -not $seen[$nx, $ny]) { $seen[$nx, $ny] = $true; $stack.Push(@($nx, $ny)) }
+                    }
+                }
+                $parts += [pscustomobject]@{ w = $x1 - $x0 + 1; h = $y1 - $y0 + 1; n = $n }
+            } }
+            $parts
+        } finally { $bmp.Dispose() }
+    }
+    if (Test-CaseSelected 'size-grip-after-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'size-grip-after-dpi-change' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ MPCTheme = 1; ModernThemeMode = 0 } `
+            -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937' `
+            -ControlAt '3:grip:11200,4:dpi:0:150,8:grip:11200,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
+        $problems = @(Get-ProcessProblem $c.Run)
+        foreach ($at in 3, 8) {
+            $when = if ($at -eq 3) { 'at 100%' } else { 'after the change to 150%' }
+            $png = Join-Path $OutDir "size-grip-after-dpi-change-grip-$at.png"
+            $grip = @($c.Run.controls) | Where-Object { $_.op -eq 'grip' -and $_.at -eq $at } | Select-Object -First 1
+            if (-not (Test-Path $png) -or -not $grip -or -not $grip.gripFound) { $problems += "no grip capture $when"; continue }
+            $parts = @(Get-GripSquares $png $grip)
+            Note Gray ("      grip $when`: " + (($parts | ForEach-Object { "$($_.w)x$($_.h)" }) -join ' '))
+            $squares = @($parts | Where-Object { $_.w -eq $_.h -and $_.n -eq $_.w * $_.h })
+            $sizes = @($squares | ForEach-Object { $_.w } | Sort-Object -Unique)
+            if ($parts.Count -ne 6 -or $squares.Count -ne 6 -or $sizes.Count -ne 1) {
+                $problems += "the grip glyph $when is not six equal squares: $(($parts | ForEach-Object { "$($_.w)x$($_.h)" }) -join ' ')"
+            }
+        }
+        Complete-Case 'size-grip-after-dpi-change' $problems
     }
 }
 finally {

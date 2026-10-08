@@ -522,6 +522,47 @@ function Invoke-ControlStep {
         }
     } elseif ($Step.op -eq 'cmd') {
         $record.delivered = [bool] [MpcTest.User32]::PostMessageW($root, 0x0111, [IntPtr] $Step.value, [IntPtr]::Zero)
+    } elseif ($Step.op -eq 'grip') {
+        # The dialog's size grip: ResizableLib creates it as a ScrollBar with SBS_SIZEGRIP (0x10) and id 0, so
+        # it is found by class and style under the dialog that holds <ctrl>. Its screen rect, and the screen
+        # around it (twice its size, from the dialog's bottom-right corner) saved as <out>-grip-<sec>.png beside
+        # -Out (Invoke-PlayerCase copies it back), with the counts of light (all channels > 200) and dark (all < 80) pixels in the grip itself.
+        $grips = [System.Collections.Generic.List[IntPtr]]::new()
+        $cb = [MpcTest.User32+EnumWindowsProc] {
+            param($hWnd, $lParam)
+            $cls = [Text.StringBuilder]::new(64)
+            [void] [MpcTest.User32]::GetClassNameW($hWnd, $cls, $cls.Capacity)
+            if ($cls.ToString() -eq 'ScrollBar' -and ([long] [MpcTest.User32]::GetWindowLongPtrW($hWnd, -16) -band 0x10) -and [MpcTest.User32]::IsWindowVisible($hWnd)) { $grips.Add($hWnd); return $false }
+            return $true
+        }
+        [void] [MpcTest.User32]::EnumChildWindows($root, $cb, [IntPtr]::Zero)
+        $record.gripFound = ($grips.Count -gt 0)
+        if ($grips.Count) {
+            $g = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($grips[0], $g); $record.rect = $g
+            $d = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($root, $d); $record.dialogRect = $d
+            Add-Type -AssemblyName System.Drawing
+            $gw = $g[2] - $g[0]; $gh = $g[3] - $g[1]
+            if ($gw -gt 0 -and $gh -gt 0) {
+                $bmp = [System.Drawing.Bitmap]::new($gw, $gh)
+                $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+                $gfx.CopyFromScreen($g[0], $g[1], 0, 0, $bmp.Size)
+                $light = 0; $dark = 0
+                for ($y = 0; $y -lt $gh; $y++) { for ($x = 0; $x -lt $gw; $x++) {
+                    $px = $bmp.GetPixel($x, $y)
+                    if ($px.R -gt 200 -and $px.G -gt 200 -and $px.B -gt 200) { $light++ } elseif ($px.R -lt 80 -and $px.G -lt 80 -and $px.B -lt 80) { $dark++ }
+                } }
+                $record.pixels = $gw * $gh; $record.light = $light; $record.dark = $dark
+                $gfx.Dispose(); $bmp.Dispose()
+                $cw = [math]::Min(2 * $gw, $d[2] - $d[0]); $ch = [math]::Min(2 * $gh, $d[3] - $d[1])
+                $crop = [System.Drawing.Bitmap]::new($cw, $ch)
+                $gfx = [System.Drawing.Graphics]::FromImage($crop)
+                $gfx.CopyFromScreen($d[2] - $cw, $d[3] - $ch, 0, 0, $crop.Size)
+                $file = Join-Path (Split-Path $Out) ('{0}-grip-{1}.png' -f [IO.Path]::GetFileNameWithoutExtension($Out), $Step.at)
+                $crop.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+                $record.file = Split-Path $file -Leaf
+                $gfx.Dispose(); $crop.Dispose()
+            }
+        }
     } elseif ($Step.op -eq 'size') {
         # Grow the top-level dialog by <value> px each way, as a user dragging its corner: the player
         # gets WM_SIZE from its own thread's SetWindowPos handling. Asynchronous, because a synchronous
