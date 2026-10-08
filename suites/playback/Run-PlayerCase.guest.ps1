@@ -52,9 +52,18 @@ param(
                                          # top-level window of the player's process with this title (a modal
                                          # it raised) and post it IDCANCEL, so the player can still be
                                          # closed afterwards. Titles may not contain commas or colons.
-    [string] $AcceptDialogAt = ''        # same shape as CloseDialogAt, but posts IDOK instead (accepts the
+    [string] $AcceptDialogAt = '',       # same shape as CloseDialogAt, but posts IDOK instead (accepts the
                                          # dialog -- the RAR entry selector's Select button, which no other
                                          # mechanism here can press). Recorded under "dialogAccepts".
+    [string] $ControlAt = ''             # comma-separated steps on a dialog control found by its id, in any
+                                         # visible dialog (#32770) of the player's process, so a translated
+                                         # title does not matter: <sec>:probe:<ctrl> records whether it
+                                         # exists and is visible, and its STM_GETICON; <sec>:combo:<ctrl>:<data>
+                                         # selects the combo item whose item data is <data> and tells the
+                                         # parent CBN_SELCHANGE; <sec>:cmd:<ctrl>:<id> posts WM_COMMAND <id>
+                                         # to the top-level dialog holding the control (1 IDOK, 2 IDCANCEL);
+                                         # <sec>:size:<ctrl>:<px> grows that dialog by px each way.
+                                         # Decimal. Recorded under "controls".
 )
 
 $ErrorActionPreference = 'Continue'
@@ -88,6 +97,14 @@ public static extern bool IsWindowVisible(System.IntPtr hWnd);
 public static extern System.IntPtr GetParent(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
 public static extern System.IntPtr GetWindowLongPtrW(System.IntPtr hWnd, int index);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetDlgCtrlID(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetAncestor(System.IntPtr hWnd, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool GetWindowRect(System.IntPtr hWnd, [System.Runtime.InteropServices.Out] int[] rect);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr after, int x, int y, int cx, int cy, uint flags);
 '@
 }
 
@@ -377,6 +394,75 @@ function Accept-PlayerDialog {
     return ((Find-ProcessWindow -ProcessId $ProcessId -Title $Title) -eq [IntPtr]::Zero)
 }
 
+# A visible control with this id in any visible dialog (#32770) of the process, searched through every
+# level of children (a property sheet's page is a dialog inside the sheet). Dialog ids are not unique
+# across dialogs, which is why only dialogs are searched and not the player's frame.
+function Find-DialogControl {
+    param([int] $ProcessId, [int] $ControlId)
+    $dialogs = [System.Collections.Generic.List[IntPtr]]::new()
+    $top = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $procId = [uint32] 0
+        [void] [MpcTest.User32]::GetWindowThreadProcessId($hWnd, [ref] $procId)
+        if ($procId -eq $ProcessId -and [MpcTest.User32]::IsWindowVisible($hWnd)) {
+            $cls = [Text.StringBuilder]::new(64)
+            [void] [MpcTest.User32]::GetClassNameW($hWnd, $cls, $cls.Capacity)
+            if ($cls.ToString() -eq '#32770') { $dialogs.Add($hWnd) }
+        }
+        return $true
+    }
+    [void] [MpcTest.User32]::EnumWindows($top, [IntPtr]::Zero)
+    $found = [System.Collections.Generic.List[IntPtr]]::new()
+    $child = [MpcTest.User32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        if ([MpcTest.User32]::GetDlgCtrlID($hWnd) -eq $ControlId -and [MpcTest.User32]::IsWindowVisible($hWnd)) { $found.Add($hWnd); return $false }
+        return $true
+    }
+    foreach ($dlg in $dialogs) {
+        [void] [MpcTest.User32]::EnumChildWindows($dlg, $child, [IntPtr]::Zero)
+        if ($found.Count) { return $found[0] }
+    }
+    [IntPtr]::Zero
+}
+
+function Invoke-ControlStep {
+    param([int] $ProcessId, $Step)
+    $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl
+    $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
+    if ($ctrl -eq [IntPtr]::Zero) { return $record }
+    $root = [MpcTest.User32]::GetAncestor($ctrl, 2)   # GA_ROOT: the top-level dialog
+    $title = [Text.StringBuilder]::new(256)
+    [void] [MpcTest.User32]::GetWindowTextW($root, $title, $title.Capacity)
+    $record.dialog = $title.ToString()
+    if ($Step.op -eq 'probe') {
+        $record.icon = ([MpcTest.User32]::SendMessageW($ctrl, 0x0171, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)   # STM_GETICON
+    } elseif ($Step.op -eq 'combo') {
+        $count = [int] [MpcTest.User32]::SendMessageW($ctrl, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)   # CB_GETCOUNT
+        $index = -1
+        for ($i = 0; $i -lt $count; $i++) {
+            if ([long] [MpcTest.User32]::SendMessageW($ctrl, 0x0150, [IntPtr] $i, [IntPtr]::Zero) -eq $Step.value) { $index = $i; break }   # CB_GETITEMDATA
+        }
+        $record.index = $index
+        if ($index -ge 0) {
+            [void] [MpcTest.User32]::SendMessageW($ctrl, 0x014E, [IntPtr] $index, [IntPtr]::Zero)   # CB_SETCURSEL
+            # WM_COMMAND (CBN_SELCHANGE << 16 | id) to the parent: what a user's pick tells the page.
+            [void] [MpcTest.User32]::PostMessageW([MpcTest.User32]::GetParent($ctrl), 0x0111, [IntPtr] ((1 -shl 16) -bor $Step.ctrl), $ctrl)
+        }
+    } elseif ($Step.op -eq 'cmd') {
+        $record.delivered = [bool] [MpcTest.User32]::PostMessageW($root, 0x0111, [IntPtr] $Step.value, [IntPtr]::Zero)
+    } elseif ($Step.op -eq 'size') {
+        # Grow the top-level dialog by <value> px each way, as a user dragging its corner: the player
+        # gets WM_SIZE from its own thread's SetWindowPos handling. Asynchronous, because a synchronous
+        # SetWindowPos on another process's window waits for it, and a player that crashes in its
+        # WM_SIZE (the case this is for) never answers: the runner hung and wrote no result.
+        $rect = [int[]]::new(4)
+        [void] [MpcTest.User32]::GetWindowRect($root, $rect)
+        $record.delivered = [MpcTest.User32]::SetWindowPos($root, [IntPtr]::Zero, 0, 0,
+            ($rect[2] - $rect[0] + $Step.value), ($rect[3] - $rect[1] + $Step.value), 0x4016)   # SWP_ASYNCWINDOWPOS|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE
+    }
+    $record
+}
+
 function Send-Close {
     param($Process, [string] $Kind)
     if ($Kind -eq 'SC_CLOSE') {
@@ -473,7 +559,7 @@ if ($SecondArgumentLine) {
     }
 }
 
-if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogAt -or $CaptureAtSec -gt 0) {
+if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogAt -or $ControlAt -or $CaptureAtSec -gt 0) {
     # Posts, probes, web requests and dialog closes are one time-ordered sequence; at the same
     # second the post goes first, so a probe can observe what its command did. Delivered (for a
     # post) means a main window existed and PostMessageW accepted the message; MFC still drops a
@@ -519,12 +605,20 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
             $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'accept'; title = $parts[1] }
         }
     }
+    if ($ControlAt) {
+        foreach ($entry in ($ControlAt -split ',')) {
+            $parts = $entry -split ':'
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'control'
+                                          op = $parts[1]; ctrl = [int] $parts[2]; value = $(if ($parts.Count -gt 3) { [long] $parts[3] } else { 0 }) }
+        }
+    }
     if ($CaptureAtSec -gt 0) {
         $events += [pscustomobject]@{ at = $CaptureAtSec; id = 0; kind = 'capture' }
     }
-    # At the same second: post first, then http, then dialog close or accept, then the frame
-    # capture, then probe (the probe sees the rest).
-    $kindOrder = @{ post = 0; http = 1; dialog = 2; accept = 3; capture = 4; probe = 5 }
+    # At the same second: post first, then http, then dialog close or accept, then control steps,
+    # then the frame capture, then probe (the probe sees the rest).
+    $kindOrder = @{ post = 0; http = 1; dialog = 2; accept = 3; control = 4; capture = 5; probe = 6 }
+    $controls = @()
     $posts = @()
     $probes = @()
     $webAnswers = @()
@@ -541,6 +635,8 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
             $dialogCloses += [ordered]@{ at = $step.at; title = $step.title; delivered = (Close-PlayerDialog $p.Id $step.title) }
         } elseif ($step.kind -eq 'accept') {
             $dialogAccepts += [ordered]@{ at = $step.at; title = $step.title; delivered = (Accept-PlayerDialog $p.Id $step.title) }
+        } elseif ($step.kind -eq 'control') {
+            $controls += Invoke-ControlStep $p.Id $step
         } elseif ($step.kind -eq 'capture') {
             $result.aliveAtCapture = -not $p.HasExited
             $result.capture = (& 'C:\vdisplay\vdisplayctl.exe' capture $CaptureConnector $CapturePath | Out-String).Trim()
@@ -564,6 +660,7 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
     if ($HttpAt) { $result.http = $webAnswers }
     if ($CloseDialogAt) { $result.dialogCloses = $dialogCloses }
     if ($AcceptDialogAt) { $result.dialogAccepts = $dialogAccepts }
+    if ($ControlAt) { $result.controls = $controls }
 }
 
 $closeWatch = $null

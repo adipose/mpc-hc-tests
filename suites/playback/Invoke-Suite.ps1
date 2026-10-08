@@ -123,6 +123,15 @@ try {
     New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'LAVFilters64') | Out-Null
     Copy-Item (Join-Path $playerDir 'mpc-hc64.exe') $stage
     foreach ($f in 'mpciconlib.dll') { if (Test-Path (Join-Path $playerDir $f)) { Copy-Item (Join-Path $playerDir $f) $stage } }
+    # Two translations, for the cases that run the player in a language other than English (the
+    # satellite DLL is the resource handle then) and switch between them; the other 42 are not needed.
+    foreach ($lang in 'de', 'fr') {
+        $dll = Join-Path $playerDir "Lang\mpcresources.$lang.dll"
+        if (Test-Path $dll) {
+            New-Item -ItemType Directory -Force (Join-Path $stage 'Lang') | Out-Null
+            Copy-Item $dll (Join-Path $stage 'Lang')
+        }
+    }
     Get-ChildItem (Join-Path $playerDir 'LAVFilters64') -File | Where-Object { $_.Extension -in '.ax', '.dll', '.manifest' } | Copy-Item -Destination (Join-Path $stage 'LAVFilters64')
     # The installer puts MPC Video Renderer in MPCVR\ beside the exe, which is where the player loads it from.
     $mpcvrDir = Join-Path $playerDir 'MPCVR'
@@ -228,8 +237,12 @@ try {
                                                # update-check prompt appears (the case that is about that prompt)
             [hashtable] $Renderer = @{},       # MPC Video Renderer's own settings, which live in the registry
             [hashtable] $IniSections = @{},    # whole ini sections besides [Settings], for the internal filters
-            [string] $AcceptDialogAt = ''     # like CloseDialogAt, but posts IDOK: accepts the dialog (the RAR
+            [string] $AcceptDialogAt = '',     # like CloseDialogAt, but posts IDOK: accepts the dialog (the RAR
                                                # entry selector's Select button, which no other option can press)
+            [string] $ControlAt = ''           # comma-separated <sec>:probe:<ctrl>, <sec>:combo:<ctrl>:<item data>,
+                                               # <sec>:cmd:<ctrl>:<command id>: steps on a dialog control found by
+                                               # its id (so a translated title does not matter); the run's
+                                               # controls array records each
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
         $guestOut = "C:\mpc-test\out\$tag.json"
@@ -259,8 +272,8 @@ try {
         $httpEncoded = (@($HttpAt | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt, $ControlAt {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt, $controlAt)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -307,6 +320,7 @@ try {
             if ($httpAt) { $taskArgs += " -HttpAt $httpAt -HttpPort $httpPort" }
             if ($closeDialogAt) { $taskArgs += (' -CloseDialogAt "{0}"' -f $closeDialogAt) }
             if ($acceptDialogAt) { $taskArgs += (' -AcceptDialogAt "{0}"' -f $acceptDialogAt) }
+            if ($controlAt) { $taskArgs += (' -ControlAt "{0}"' -f $controlAt) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -1893,6 +1907,61 @@ try {
             }
         }
         Complete-Case 'cover-art-next-file-in-same-folder' $problems
+    }
+
+    # 45. The Open dialog's icon with a translation active: #4119, 10c2c03ebd. LoadStaticIcon took
+    #    the icon from AfxGetResourceHandle(), which with a translation is the satellite DLL, and the
+    #    satellites carry no icons; the static stayed empty. The fix loads it from the exe. German
+    #    (1031) from the start; the Open dialog (ID_FILE_OPENMEDIA 800) is probed by its icon static,
+    #    IDR_MAINFRAME 128, then cancelled. Unfixed 2.8.1.
+    if (Test-CaseSelected 'open-dialog-icon-with-translation') {
+        $c = Invoke-PlayerCase -Name 'open-dialog-icon-with-translation' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ InterfaceLanguage = 1031 } -PostCommands '2:800' -ControlAt '4:probe:128,5:cmd:128:2' -CloseAtSec 7
+        $problems = @(Get-ProcessProblem $c.Run)
+        $iconProbe = @($c.Run.controls) | Where-Object { $_.op -eq 'probe' } | Select-Object -First 1
+        if (-not $iconProbe -or -not $iconProbe.found) {
+            $problems += 'the Open dialog (its icon static, id 128) was not found'
+        } else {
+            if ($iconProbe.dialog -eq 'Open') { $problems += 'the Open dialog is titled "Open": the German translation was not active, so the case proves nothing' }
+            if (-not $iconProbe.icon) { $problems += "the Open dialog ('$($iconProbe.dialog)') shows no icon: it was looked up in the translation DLL (#4119)" }
+        }
+        Complete-Case 'open-dialog-icon-with-translation' $problems
+    }
+
+    # 46. Reopening a dialog after a language change: f261d1b782 (#3902). CDpiAwareResizableDialog
+    #    cached the dialog template pointer from the first open; a language change frees the satellite
+    #    DLL that pointer lives in, so the next open of the same dialog object read unmapped memory
+    #    and the player crashed. Organize Favorites (ID_FAVORITES_ORGANIZE 937) is a long-lived member
+    #    of the frame whose window is only hidden on Cancel, so its object and its cache survive the
+    #    change. German first (the template comes from mpcresources.de.dll); open it (found by its
+    #    tab control, IDC_TAB1 11200) and cancel it; Options (815) opens on the Theme page
+    #    (LastUsedPage = IDD_PPAGETHEME 10038), its language combo (IDC_COMBO2 11001, item data the
+    #    LANGID) goes to French (1036) and OK frees the German DLL; then Organize Favorites again,
+    #    and grow it by 80 px: a visible resize reads the template (OnSize -> GetDialogFontInfo),
+    #    and the unfixed build reads it through the dangling pointer. The command is disabled while
+    #    there are no favorites, so the profile carries one. The reshown window keeps its German
+    #    title (it is not recreated), so that the change happened is read from the ini the player
+    #    saves on exit. Unfixed 2.7.1: the resize kills the player, exit code 0xC000041D (an exception
+    #    inside a window procedure).
+    if (Test-CaseSelected 'reopen-dialog-after-language-change') {
+        $c = Invoke-PlayerCase -Name 'reopen-dialog-after-language-change' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ InterfaceLanguage = 1031; LastUsedPage = 10038 } `
+            -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937,5:815,11:937' `
+            -ControlAt '3:probe:11200,4:cmd:11200:2,7:combo:11001:1036,8:cmd:11001:1,12.5:size:11200:80,14:probe:11200,15:cmd:11200:2' -CloseAtSec 17
+        $problems = @(Get-ProcessProblem $c.Run)
+        $steps = @($c.Run.controls)
+        $first = $steps | Where-Object { $_.op -eq 'probe' -and $_.at -lt 5 } | Select-Object -First 1
+        $combo = $steps | Where-Object { $_.op -eq 'combo' } | Select-Object -First 1
+        $resize = $steps | Where-Object { $_.op -eq 'size' } | Select-Object -First 1
+        $again = $steps | Where-Object { $_.op -eq 'probe' -and $_.at -gt 13 } | Select-Object -First 1
+        if (-not $first -or -not $first.found) { $problems += 'Organize Favorites did not open the first time' }
+        if (-not $combo -or -not $combo.found -or $combo.index -lt 0) { $problems += 'the Theme page language combo with French was not found, so the language did not change' }
+        if (-not $resize -or -not $resize.found) { $problems += 'Organize Favorites did not open again after the language change' }
+        if (-not $again -or -not $again.found) { $problems += 'Organize Favorites was gone after the resize (the player read the freed German template)' }
+        if (-not $c.Run.exitCode -and (Get-IniValue $c.Ini 'Settings' 'InterfaceLanguage') -ne '1036') {
+            $problems += "the saved InterfaceLanguage is '$(Get-IniValue $c.Ini 'Settings' 'InterfaceLanguage')', not 1036: the language did not change, so the case proves nothing"
+        }
+        Complete-Case 'reopen-dialog-after-language-change' $problems
     }
 }
 finally {
