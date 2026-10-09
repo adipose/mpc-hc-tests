@@ -390,10 +390,10 @@ try {
             }
         }
 
-        # Files the control steps saved beside the result (the grip crops), named after it on the guest.
+        # Files the control steps saved beside the result (the grip and status bar crops), named after it on the guest.
         foreach ($step in @($(if ($run.PSObject.Properties['controls']) { $run.controls }))) {
             if ($step.PSObject.Properties['file'] -and $step.file) {
-                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-grip-', "$Name-grip-")) -Force
+                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-(grip|sbar)-', "$Name-`$1-")) -Force
             }
         }
 
@@ -2089,6 +2089,166 @@ try {
             }
         }
         Complete-Case 'size-grip-after-dpi-change' $problems
+    }
+
+    # 50-52. The status bar's audio channel icon, #4301. With Audio Info off in the status bar
+    #    (ShowAudioFormatInStatusbar=0) the bar keeps a strip right of the time label for an icon of the
+    #    audio channels. The runner's sbar step copies the whole bar from the screen; the strip is the part
+    #    right of the time label (IDC_PLAYERTIME 12027), inside the bar's 1 px border. The bar colour is
+    #    the commonest colour of the bar; glyph pixels differ from it by more than 64 in some channel.
+    function Get-AudioIconStrip {
+        param([string] $Png, $Step)
+        $bmp = [System.Drawing.Bitmap]::FromFile($Png)
+        try {
+            $x0 = $Step.rect[2] - $Step.barRect[0]; $x1 = $bmp.Width - 1
+            $y0 = 2; $y1 = $bmp.Height - 2
+            $counts = @{}
+            for ($y = $y0; $y -lt $y1; $y++) { for ($x = 1; $x -lt $x1; $x++) { $k = $bmp.GetPixel($x, $y).ToArgb(); $counts[$k] = 1 + [int] $counts[$k] } }
+            $bg = [System.Drawing.Color]::FromArgb(($counts.GetEnumerator() | Sort-Object Value | Select-Object -Last 1).Key)
+            $near = 0; $ink = 0; $total = 0; $gx0 = [int]::MaxValue; $gy0 = [int]::MaxValue; $gx1 = -1; $gy1 = -1
+            for ($y = $y0; $y -lt $y1; $y++) { for ($x = [math]::Max(1, $x0); $x -lt $x1; $x++) {
+                $px = $bmp.GetPixel($x, $y); $total++
+                $d = [math]::Max([math]::Abs($px.R - $bg.R), [math]::Max([math]::Abs($px.G - $bg.G), [math]::Abs($px.B - $bg.B)))
+                if ($d -le 24) { $near++ }
+                if ($d -gt 64) { $ink++; $gx0 = [math]::Min($gx0, $x); $gx1 = [math]::Max($gx1, $x); $gy0 = [math]::Min($gy0, $y); $gy1 = [math]::Max($gy1, $y) }
+            } }
+            [pscustomobject]@{
+                Bg = '{0},{1},{2}' -f $bg.R, $bg.G, $bg.B; Width = $x1 - $x0; Height = $y1 - $y0
+                Near = $(if ($total) { $near / $total } else { 0 }); Ink = $ink
+                GlyphW = $(if ($ink) { $gx1 - $gx0 + 1 } else { 0 }); GlyphH = $(if ($ink) { $gy1 - $gy0 + 1 } else { 0 })
+                Top = $(if ($ink) { $gy0 - $y0 } else { -1 }); Bottom = $(if ($ink) { $y1 - 1 - $gy1 } else { -1 })
+            }
+        } finally { $bmp.Dispose() }
+    }
+    function Get-AudioIconCapture {
+        # The sbar step at <At> and its crop, measured; or a problem string.
+        param($Run, [string] $Name, [double] $At, [string] $When)
+        $step = @($Run.controls) | Where-Object { $_.op -eq 'sbar' -and $_.at -eq $At } | Select-Object -First 1
+        $png = Join-Path $OutDir "$Name-sbar-$At.png"
+        if (-not $step -or -not $step.found -or -not (Test-Path $png)) { return "no status bar capture $When" }
+        $s = Get-AudioIconStrip $png $step
+        $s | Add-Member Dpi ([int] $step.dpi)
+        $s | Add-Member Png $png
+        $s | Add-Member Step $step
+        Note Gray ("      strip $When (dpi {9}): {0}x{1} on {2}, {3:P0} bar colour, {4} glyph px, glyph {5}x{6} ({7} px clear above, {8} below)" -f $s.Width, $s.Height, $s.Bg, $s.Near, $s.Ink, $s.GlyphW, $s.GlyphH, $s.Top, $s.Bottom, $s.Dpi)
+        $s
+    }
+    function Test-AudioIconStrip {
+        # The strip is the bar's colour with a glyph on it: room for the icon (16 px at least), mostly bar
+        # colour (unfixed: the classic bitmap's black background fills two thirds of it on a light bar), and
+        # glyph pixels in it (unfixed after the Options toggle: the time label still covers where it goes).
+        param($S, [string] $When)
+        $p = @()
+        if ($S.Width -lt 16) { $p += "the strip $When is $($S.Width) px wide: no room was made for the icon" }
+        if ($S.Near -lt 0.6) { $p += ("only {0:P0} of the strip $When is the bar colour ({1}): a box, not a glyph" -f $S.Near, $S.Bg) }
+        if ($S.Ink -lt 15) { $p += "the strip $When holds $($S.Ink) glyph pixels: no icon" }
+        $p
+    }
+
+    # 50. Windows 11 style, light mode: the bar takes the player bars' light colour, and the icon must
+    #    be drawn on it, not the classic bitmap's black box. Unfixed 2.8.2 blits the 33x21 BMP, black
+    #    background and all.
+    $lightTheme = @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0 }
+    if (Test-CaseSelected 'status-audio-icon-light-theme') {
+        $c = Invoke-PlayerCase -Name 'status-audio-icon-light-theme' -Clip 'long.mkv' -Switches '/play' `
+            -Settings $lightTheme -ControlAt '4:sbar:12027' -CloseAtSec 6
+        $problems = @(Get-ProcessProblem $c.Run)
+        $s = Get-AudioIconCapture $c.Run 'status-audio-icon-light-theme' 4 'at 100%'
+        if ($s -is [string]) { $problems += $s } else { $problems += Test-AudioIconStrip $s 'at 100%' }
+        Complete-Case 'status-audio-icon-light-theme' $problems
+    }
+
+    # 51. Audio Info turned off in Options while a file is open: the strip must be laid out and drawn
+    #    then, not at the next relayout. The file is opened paused (/open) so the timer text does not
+    #    change and relayout the bar every second. Windows 10 style dark, whose bar is black like the
+    #    classic bitmap's background, so only the layout is under test. Options opens on its User
+    #    Interface page (LastUsedPage = IDD_PPAGETHEME 10038), Audio Info (IDC_CHECK12 11091) is cleared
+    #    and the sheet OKed. The bar is captured, then invalidated whole (the runner's redraw step, which
+    #    repaints without a relayout) and captured again: the strip must already have looked like that.
+    #    Unfixed 2.8.2 relayouts before storing the setting, and the next relayout (the status text
+    #    losing its audio format) invalidates only the deflated rect, so the strip keeps the time text
+    #    the label left behind when it moved: "00:20' 00:20", about 200 pixels off from the repaint.
+    if (Test-CaseSelected 'status-audio-icon-after-options-toggle') {
+        $c = Invoke-PlayerCase -Name 'status-audio-icon-after-options-toggle' -Clip 'long.mkv' -Switches '/open' `
+            -Settings @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 1; ShowAudioFormatInStatusbar = 1; LastUsedPage = 10038 } `
+            -PostCommands '2:815' -ControlAt '4:check:11091:0,5:cmd:11091:1,7:sbar:12027,7.5:redraw:12027,8.5:sbar:12027' -CloseAtSec 10
+        $problems = @(Get-ProcessProblem $c.Run)
+        $check = @($c.Run.controls) | Where-Object { $_.op -eq 'check' } | Select-Object -First 1
+        if (-not $check -or -not $check.found -or $check.checked -ne 0) { $problems += 'the Audio Info check box was not found on the Options page, or did not clear' }
+        else {
+            $s = Get-AudioIconCapture $c.Run 'status-audio-icon-after-options-toggle' 7 'after the toggle'
+            $r = Get-AudioIconCapture $c.Run 'status-audio-icon-after-options-toggle' 8.5 'repainted'
+            foreach ($x in $s, $r) { if ($x -is [string]) { $problems += $x } }
+            if ($s -isnot [string] -and $r -isnot [string]) {
+                $problems += Test-AudioIconStrip $s 'after the toggle'
+                # Pixel by pixel, the strip as shown against the strip repainted; the same layout both times.
+                $a = [System.Drawing.Bitmap]::FromFile($s.Png); $b = [System.Drawing.Bitmap]::FromFile($r.Png)
+                try {
+                    $x0 = $s.Step.rect[2] - $s.Step.barRect[0]; $off = 0
+                    if ($a.Width -ne $b.Width -or $a.Height -ne $b.Height -or $s.Step.rect[2] -ne $r.Step.rect[2]) { $problems += 'the bar moved between the two captures' }
+                    else {
+                        for ($y = 2; $y -lt $a.Height - 2; $y++) { for ($x = $x0; $x -lt $a.Width - 1; $x++) {
+                            $p = $a.GetPixel($x, $y); $q = $b.GetPixel($x, $y)
+                            if ([math]::Max([math]::Abs($p.R - $q.R), [math]::Max([math]::Abs($p.G - $q.G), [math]::Abs($p.B - $q.B))) -gt 64) { $off++ }
+                        } }
+                        Note Gray "      $off strip pixels differ from the repainted bar"
+                        if ($off -gt 5) { $problems += "$off pixels of the strip differ from the bar repainted: it was not drawn when Audio Info was turned off" }
+                    }
+                } finally { $a.Dispose(); $b.Dispose() }
+            }
+        }
+        Complete-Case 'status-audio-icon-after-options-toggle' $problems
+    }
+
+    # 52. The icon follows a live display scale change: light theme as in 50, captured at 100% and again
+    #    after the primary monitor goes to 125% (the guests' 1024x768 display offers no more: asked for
+    #    150%, Windows gives 125%). The icon's width is the strip's less the 8 px Relayout adds; it must
+    #    grow with the DPI the bar reports (at least 0.9 of the ratio, measured 20 -> 25 px), and the
+    #    glyph in it must grow too. Unfixed 2.8.2's bitmap is a fixed 33x21 and stays the same size.
+    if (Test-CaseSelected 'status-audio-icon-follows-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'status-audio-icon-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' `
+            -Settings $lightTheme -ControlAt '3:sbar:12027,4:dpi:0:125,8:sbar:12027,10:dpi:0:100' -CloseAtSec 12
+        $problems = @(Get-ProcessProblem $c.Run)
+        $s0 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 3 'at 100%'
+        $s1 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 8 'at 125%'
+        foreach ($s in $s0, $s1) { if ($s -is [string]) { $problems += $s } }
+        if ($s0 -isnot [string] -and $s1 -isnot [string]) {
+            $problems += Test-AudioIconStrip $s1 'at 125%'
+            $dpiRatio = $s1.Dpi / [math]::Max(1, $s0.Dpi)
+            if ($dpiRatio -lt 1.2) { $problems += "the bar's DPI went from $($s0.Dpi) to $($s1.Dpi): the display scale did not change" }
+            else {
+                $w0 = $s0.Width - 7; $w1 = $s1.Width - 7
+                if ($w1 / $w0 -lt 0.9 * $dpiRatio) { $problems += ("the icon went from {0} to {1} px wide for a DPI change of x{2:N2}: it was not rebuilt at the new DPI" -f $w0, $w1, $dpiRatio) }
+                if ($s1.GlyphH -le $s0.GlyphH) { $problems += "the glyph stayed $($s0.GlyphH) px high -> $($s1.GlyphH) px" }
+            }
+        }
+        Complete-Case 'status-audio-icon-follows-dpi-change' $problems
+    }
+
+    # 53. The icon follows a live theme change: Windows 11 style in dark mode, whose bar is black, then
+    #    Options (on its Theme page) sets the theme mode combo (IDC_COMBO1 11000, items Dark, Light,
+    #    Windows, no item data) to Light and OK. The bar turns light and the icon must be rebuilt in the
+    #    light colours (OnMPCThemeChanged): a glyph on the new bar colour, not the dark icon's black.
+    #    The capture before the change is the control: both builds draw a glyph on black there. Unfixed
+    #    2.8.2 keeps the classic bitmap, whose black box shows once the bar is light.
+    if (Test-CaseSelected 'status-audio-icon-follows-theme-change') {
+        $c = Invoke-PlayerCase -Name 'status-audio-icon-follows-theme-change' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0; LastUsedPage = 10038 } -PostCommands '4:815' `
+            -ControlAt '3:sbar:12027,6:cbindex:11000:1,7:cmd:11000:1,9:sbar:12027' -CloseAtSec 11
+        $problems = @(Get-ProcessProblem $c.Run)
+        $combo = @($c.Run.controls) | Where-Object { $_.op -eq 'cbindex' } | Select-Object -First 1
+        if (-not $combo -or -not $combo.found -or $combo.index -ne 1) { $problems += 'the theme mode combo was not found on the Options page' }
+        else {
+            $s0 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-theme-change' 3 'in dark mode'
+            $s1 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-theme-change' 9 'after the change to light'
+            foreach ($s in $s0, $s1) { if ($s -is [string]) { $problems += $s } }
+            if ($s0 -isnot [string] -and $s1 -isnot [string]) {
+                if ($s0.Bg -eq $s1.Bg) { $problems += "the bar stayed $($s0.Bg): the theme did not change, so the case proves nothing" }
+                $problems += Test-AudioIconStrip $s0 'in dark mode'
+                $problems += Test-AudioIconStrip $s1 'after the change to light'
+            }
+        }
+        Complete-Case 'status-audio-icon-follows-theme-change' $problems
     }
 }
 finally {

@@ -68,6 +68,12 @@ param(
                                          # the control's and its dialog's screen rects. <sec>:fprobe:<ctrl>
                                          # probes a control of the player's frame instead (status bar,
                                          # toolbars): its screen rect and window text.
+                                         # <sec>:sbar:<ctrl> captures the frame bar holding that control
+                                         # (the status bar, for 12027) from the screen as a png;
+                                         # <sec>:redraw:<ctrl> invalidates that bar, children too.
+                                         # <sec>:cbindex:<ctrl>:<index> is combo by position.
+                                         # <sec>:check:<ctrl>:<0|1> sets a dialog check box and sends
+                                         # its page BN_CLICKED.
                                          # Decimal. Recorded under "controls".
 )
 
@@ -111,6 +117,10 @@ public static extern System.IntPtr GetAncestor(System.IntPtr hWnd, uint flags);
 public static extern bool GetWindowRect(System.IntPtr hWnd, [System.Runtime.InteropServices.Out] int[] rect);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr after, int x, int y, int cx, int cy, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern uint GetDpiForWindow(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool RedrawWindow(System.IntPtr hWnd, System.IntPtr rect, System.IntPtr region, uint flags);
 '@
 }
 
@@ -505,8 +515,9 @@ function Invoke-ControlStep {
         $script:dpiChanged = $true
         return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = (Set-PrimaryScale ([int] $Step.value)) }
     }
-    # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog.
-    $topClass = if ($Step.op -eq 'fprobe') { 'MediaPlayerClassicW' } else { '#32770' }
+    # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
+    # sbar captures the bar such a control sits in, redraw repaints it.
+    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw') { 'MediaPlayerClassicW' } else { '#32770' }
     $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl -TopClass $topClass
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
@@ -524,11 +535,15 @@ function Invoke-ControlStep {
         # Screen rects (left, top, right, bottom) of the control and of its top-level dialog.
         $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
         $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($root, $rect); $record.dialogRect = $rect
-    } elseif ($Step.op -eq 'combo') {
+    } elseif ($Step.op -in 'combo', 'cbindex') {
+        # cbindex picks the item by position, for a combo whose items carry no data of their own.
         $count = [int] [MpcTest.User32]::SendMessageW($ctrl, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)   # CB_GETCOUNT
         $index = -1
-        for ($i = 0; $i -lt $count; $i++) {
-            if ([long] [MpcTest.User32]::SendMessageW($ctrl, 0x0150, [IntPtr] $i, [IntPtr]::Zero) -eq $Step.value) { $index = $i; break }   # CB_GETITEMDATA
+        if ($Step.op -eq 'cbindex') { if ($Step.value -lt $count) { $index = [int] $Step.value } }
+        else {
+            for ($i = 0; $i -lt $count; $i++) {
+                if ([long] [MpcTest.User32]::SendMessageW($ctrl, 0x0150, [IntPtr] $i, [IntPtr]::Zero) -eq $Step.value) { $index = $i; break }   # CB_GETITEMDATA
+            }
         }
         $record.index = $index
         if ($index -ge 0) {
@@ -538,6 +553,34 @@ function Invoke-ControlStep {
         }
     } elseif ($Step.op -eq 'cmd') {
         $record.delivered = [bool] [MpcTest.User32]::PostMessageW($root, 0x0111, [IntPtr] $Step.value, [IntPtr]::Zero)
+    } elseif ($Step.op -eq 'check') {
+        # <sec>:check:<ctrl>:<0|1>: set a check box and tell its page, as a user's click does. BM_SETCHECK, then
+        # WM_COMMAND (BN_CLICKED << 16 | id) to the parent; the page reads the state back with DDX on apply.
+        [void] [MpcTest.User32]::SendMessageW($ctrl, 0x00F1, [IntPtr] $Step.value, [IntPtr]::Zero)   # BM_SETCHECK
+        $record.checked = [int] [MpcTest.User32]::SendMessageW($ctrl, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero)   # BM_GETCHECK
+        $record.delivered = [bool] [MpcTest.User32]::PostMessageW([MpcTest.User32]::GetParent($ctrl), 0x0111, [IntPtr] $Step.ctrl, $ctrl)
+    } elseif ($Step.op -eq 'redraw') {
+        # <sec>:redraw:<ctrl>: invalidate the whole bar holding this frame control, children included, so it
+        # repaints everything without being laid out again: what a full repaint would show, to compare with.
+        $record.delivered = [MpcTest.User32]::RedrawWindow([MpcTest.User32]::GetParent($ctrl), [IntPtr]::Zero, [IntPtr]::Zero, 0x85)   # RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN
+    } elseif ($Step.op -eq 'sbar') {
+        # <sec>:sbar:<ctrl>: the bar that holds this frame control (its parent: the status bar for the time label
+        # IDC_PLAYERTIME), copied from the screen as the user sees it and saved as <out>-sbar-<sec>.png beside -Out
+        # (Invoke-PlayerCase copies it back). Records the control's and the bar's screen rects, and the bar's DPI.
+        $bar = [MpcTest.User32]::GetParent($ctrl)
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+        $b = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($bar, $b); $record.barRect = $b
+        $record.dpi = [MpcTest.User32]::GetDpiForWindow($bar)
+        Add-Type -AssemblyName System.Drawing
+        if ($b[2] -gt $b[0] -and $b[3] -gt $b[1]) {
+            $bmp = [System.Drawing.Bitmap]::new($b[2] - $b[0], $b[3] - $b[1])
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($b[0], $b[1], 0, 0, $bmp.Size)
+            $file = Join-Path (Split-Path $Out) ('{0}-sbar-{1}.png' -f [IO.Path]::GetFileNameWithoutExtension($Out), $Step.at)
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $record.file = Split-Path $file -Leaf
+            $gfx.Dispose(); $bmp.Dispose()
+        }
     } elseif ($Step.op -eq 'grip') {
         # The dialog's size grip: ResizableLib creates it as a ScrollBar with SBS_SIZEGRIP (0x10) and id 0, so
         # it is found by class and style under the dialog that holds <ctrl>. Its screen rect, and the screen
