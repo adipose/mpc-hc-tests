@@ -158,6 +158,15 @@ centre the box there. The band cases only ask which colour is present.
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
 `-Case 'remember-position-*'`. A skipped case is not counted at all.
 
+Two groups skip themselves, with a note naming the folder, when the player
+under test lacks what they need. The `mpcvr-*` cases need `MPCVR\` beside the
+exe, which only the installer and the release zips make. The two translation
+cases need `Lang\mpcresources.de.dll` and `.fr.dll` built for the exe's own
+version: the player loads a translation only when its file version is the
+exe's major.minor.patch.0, and otherwise runs in English without a word. A
+slot has them only if it built the translations, and a later project-only build
+leaves the old ones behind. `build.bat Build x64 Translations` rebuilds them.
+
 Each was checked the other way round when written: the default-track capture
 is rejected against the other track's tone, the stereo capture against
 swapped channels, so a pass means something. The two PQ 0.65 cases are each

@@ -1923,12 +1923,39 @@ try {
         Complete-Case 'cover-art-next-file-in-same-folder' $problems
     }
 
+    # The two translation cases need Lang\mpcresources.de.dll and .fr.dll beside the player, built for
+    # its version: Translations::SetLanguage loads a satellite only when its fixed file version is the
+    # exe's major.minor.patch.0, and otherwise falls back to English without a word. A slot has them
+    # only if it built the translations, and a later project-only build leaves the old ones behind (seen
+    # on a slot with a 2.8.3 exe and 2.8.2 DLLs: the cases then ran in English and failed as if the
+    # player were broken). So they are checked here, and the cases skipped with the reason.
+    $languageCases = @('open-dialog-icon-with-translation', 'reopen-dialog-after-language-change')
+    $exeVer = (Get-Item (Join-Path $playerDir 'mpc-hc64.exe')).VersionInfo
+    $wantLang = '{0}.{1}.{2}.0' -f $exeVer.FileMajorPart, $exeVer.FileMinorPart, $exeVer.FileBuildPart
+    $langProblems = foreach ($lang in 'de', 'fr') {
+        $dll = Join-Path $playerDir "Lang\mpcresources.$lang.dll"
+        if (-not (Test-Path $dll)) { "Lang\mpcresources.$lang.dll is missing" }
+        else {
+            $v = (Get-Item $dll).VersionInfo
+            $got = '{0}.{1}.{2}.{3}' -f $v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart
+            if ($got -ne $wantLang) { "Lang\mpcresources.$lang.dll is $got, the player needs $wantLang" }
+        }
+    }
+    if ($langProblems) {
+        $wanted = @($languageCases | Where-Object { Test-CaseSelected $_ })
+        if ($wanted.Count) {
+            $skipped += $wanted.Count
+            Note Yellow "skipped $($wanted -join ', '): $($langProblems -join '; ') ($playerDir). Build the translations for this exe: build.bat Build x64 Translations (or a full build.bat Build x64 Release)."
+        }
+        $languageCases = @()
+    }
+
     # 45. The Open dialog's icon with a translation active: #4119, 10c2c03ebd. LoadStaticIcon took
     #    the icon from AfxGetResourceHandle(), which with a translation is the satellite DLL, and the
     #    satellites carry no icons; the static stayed empty. The fix loads it from the exe. German
     #    (1031) from the start; the Open dialog (ID_FILE_OPENMEDIA 800) is probed by its icon static,
     #    IDR_MAINFRAME 128, then cancelled. Unfixed 2.8.1.
-    if (Test-CaseSelected 'open-dialog-icon-with-translation') {
+    if ($languageCases -contains 'open-dialog-icon-with-translation' -and (Test-CaseSelected 'open-dialog-icon-with-translation')) {
         $c = Invoke-PlayerCase -Name 'open-dialog-icon-with-translation' -Clip 'long.mkv' -Switches '/play' `
             -Settings @{ InterfaceLanguage = 1031 } -PostCommands '2:800' -ControlAt '4:probe:128,5:cmd:128:2' -CloseAtSec 7
         $problems = @(Get-ProcessProblem $c.Run)
@@ -1957,7 +1984,7 @@ try {
     #    title (it is not recreated), so that the change happened is read from the ini the player
     #    saves on exit. Unfixed 2.7.1: the resize kills the player, exit code 0xC000041D (an exception
     #    inside a window procedure).
-    if (Test-CaseSelected 'reopen-dialog-after-language-change') {
+    if ($languageCases -contains 'reopen-dialog-after-language-change' -and (Test-CaseSelected 'reopen-dialog-after-language-change')) {
         $c = Invoke-PlayerCase -Name 'reopen-dialog-after-language-change' -Clip 'long.mkv' -Switches '/play' `
             -Settings @{ InterfaceLanguage = 1031; LastUsedPage = 10038 } `
             -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937,5:815,11:937' `
