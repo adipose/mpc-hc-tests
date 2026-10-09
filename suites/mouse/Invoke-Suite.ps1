@@ -39,13 +39,14 @@ param(
     [switch] $Probe,
     [string] $VMName = '',
     [string] $OutDir = (Join-Path $PSScriptRoot 'results'),
-    [string] $PlayerBinary
+    [string] $PlayerBinary,
+    [string[]] $Case          # wildcards against case names; empty runs everything
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -67,6 +68,14 @@ function Complete-Case {
     $Problems = @($Problems | Where-Object { $_ })
     if ($Problems.Count -eq 0) { $script:passed++; Note Green "PASS $Name" }
     else { $script:failed++; Note Red "FAIL ${Name}: $($Problems -join ' | ')" }
+}
+# Whether -Case asks for any of the names a job produces. A job nobody asked for is counted as skipped.
+function Wanted {
+    param([string[]] $Names)
+    if (-not $Case) { return $true }
+    foreach ($n in $Names) { foreach ($c in $Case) { if ($n -like $c) { return $true } } }
+    $script:skipped += $Names.Count
+    $false
 }
 
 # --- what is driven -----------------------------------------------------------
@@ -98,6 +107,7 @@ $idD3D9Combo    = Get-ResourceId 'IDC_D3D9DEVICE_COMBO' 22045
 $idVidRndCombo  = Get-ResourceId 'IDC_VIDRND_COMBO' 22060     # renderer selection on the Output page
 $idButton1      = Get-ResourceId 'IDC_BUTTON1' 11120          # Output page gear
 $idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the renderer settings popup
+$idOpenDir      = Get-ResourceId 'ID_FILE_OPENDIRECTORY' 33208   # the folder picker, which carries an injected check box
 
 # The hover lands this long after the click that opens the list. The defect shows up to about 100 ms; the
 # last value is the settled reference the others are compared with.
@@ -164,7 +174,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
@@ -366,6 +376,46 @@ try {
         [pscustomobject]@{ Run = $run; Dir = $local }
     }
 
+    # The file dialog job: Run-FileDialogThemeCase launches the player once per variant, each from its
+    # own ini (written on the guest), and opens the folder picker. Same scheduled-task shape as the others.
+    function Invoke-FileDialogThemeJob {
+        param([string] $Name, [object[]] $Variants)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $job = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; OutDir = $guestOut
+            OpenDirectoryCommand = $idOpenDir; CheckBoxLabel = 'Include subdirectories'; Variants = $Variants
+        } | ConvertTo-Json -Depth 4
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $consoleUser {
+            param($job, $out, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase, notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-FileDialogThemeCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(300)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64, combocase, notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
     Add-Type -AssemblyName System.Drawing
 
     # How many pixels of a combo's face differ between two captures. The face is the part that shows the
@@ -527,10 +577,53 @@ try {
         $problems
     }
 
+    # The injected check box, judged from its capture. The margin around the control is the dialog's own
+    # background and the reference; the label area is everything right of the (square) box. Themed, the
+    # label area's dominant colour is the reference and the text is light. The three ways the unfixed
+    # build failed each show differently: a native control on Windows 11 has blue text; the Windows 11
+    # palette put the control on its own darker rectangle; a light native control (the reporter's Windows
+    # 10 captures) puts it on a light one.
+    function Test-FileDialogInjectedThemed {
+        param([pscustomobject] $Job, [string] $Variant)
+        $problems = @()
+        $v = $Job.Run.variants.$Variant
+        if (-not $v) { return @("the guest run has no variant '$Variant'") }
+        if ($v.error) { return @("guest error: $($v.error)") }
+        if (-not $v.checkBoxFound) { return @('the injected check box was not found in the folder picker') }
+        if ($Variant -in 'background', 'minimized' -and $v.playerForegroundBefore) { $problems += 'the player still had the foreground, so this did not exercise the inactive case' }
+        if ($Variant -eq 'minimized' -and -not $v.playerMinimized) { $problems += 'the player was not minimized' }
+        $bmp = [System.Drawing.Bitmap]::FromFile((Join-Path $Job.Dir $v.png))
+        try {
+            $m = [int]$v.margin; $w = [int]$v.checkBox.W; $h = [int]$v.checkBox.H
+            $outside = @{}; $inside = @{}; $blue = 0; $light = 0
+            for ($y = 0; $y -lt $bmp.Height; $y++) {
+                for ($x = 0; $x -lt $bmp.Width; $x++) {
+                    $p = $bmp.GetPixel($x, $y)
+                    $k = "$($p.R),$($p.G),$($p.B)"
+                    $inControl = ($x -ge $m -and $x -lt $m + $w -and $y -ge $m -and $y -lt $m + $h)
+                    if (-not $inControl) { $outside[$k] = 1 + [int]$outside[$k]; continue }
+                    if ($x -lt $m + $h + 2) { continue }      # the box and the gap after it: judged by the text, not the glyph
+                    $inside[$k] = 1 + [int]$inside[$k]
+                    # native label text measured at (99..119, 173, 225..255); the ClearType fringe of light text
+                    # on the dark dialog reaches (56, 94, 162), so the blue channel alone does not separate them
+                    if ($p.B -ge 200 -and $p.R -lt 140) { $blue++ }
+                    if ($p.R -gt 190 -and $p.G -gt 190 -and $p.B -gt 190) { $light++ }
+                }
+            }
+            $reference = ($outside.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+            $labelBg = ($inside.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+            if ($labelBg -ne $reference) { $problems += "the label is painted on ($labelBg) while the dialog around it is ($reference): the control has a background rectangle of its own" }
+            if ($blue -gt 15) { $problems += "$blue blue pixels in the label: Windows painted the control natively (blue label text)" }
+            if ($light -lt 15) { $problems += "only $light light pixels in the label: no themed (light) label text found" }
+        } finally { $bmp.Dispose() }
+        $problems
+    }
+
     # --- cases ------------------------------------------------------------------
 
     # 1. The controls. 101 is a plain comctl32 combo; 105 is the same combo, invalidated on mouse-leave.
-    if ($combocase) {
+    if (-not (Wanted 'control-plain-windows-combo', 'control-harness-detects-echo')) {
+    } elseif ($combocase) {
         $c = Invoke-ComboJob -Name 'control' -Exe 'C:\mpc-test\mouse\combocase.exe' -TopClass 'ComboCase' -ComboIds 101, 105 -DelaysMs ($quickDelays + $referenceDelay)
         Complete-Case 'control-plain-windows-combo' (Test-ComboHover $c 101)
         $control = @(Test-ComboHover $c 105 -ExpectEcho)
@@ -544,6 +637,7 @@ try {
     # 2. The player, in both themes: the defect of #4276 was in neither's painting but in an invalidate both
     #    share, so one theme passing says nothing about the other.
     foreach ($theme in @{ Name = 'modern'; Value = 1 }, @{ Name = 'classic'; Value = 0 }) {
+        if (-not (Wanted "combo-hover-keeps-selected-item-$($theme.Name)", "combo-click-selects-item-$($theme.Name)")) { continue }
         $ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=$($theme.Value)`r`nModernThemeMode=0`r`nLastUsedPage=$idThemePage`r`nOSDFont=Calibri`r`n"
         $c = Invoke-ComboJob -Name "player-$($theme.Name)" -Exe 'C:\mpc-test\mouse\player\mpc-hc64.exe' -TopClass 'MediaPlayerClassicW' `
                  -PostCommand $idOptions -DialogTitle 'Options' -ComboIds $idFontCombo, $idSeekbarCombo `
@@ -556,7 +650,8 @@ try {
     #    (54b5aaa66b, c215310313; #3844) and a click on the time column that must not open an in-place
     #    editor holding the time (419dadc920; #3885 item 1). LoopMode=0 and AfterPlayback=0 so nothing
     #    advances by itself. The guest script's header has the reasoning for each assertion.
-    if ($havePlaylistMedia -and $haveLav) {
+    if (-not (Wanted 'playlist-type-to-find', 'playlist-click-time-column-no-edit')) {
+    } elseif ($havePlaylistMedia -and $haveLav) {
         $plIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nAllowMultipleInstances=0`r`nLoop=0`r`nLoopMode=0`r`nAfterPlayback=0`r`nShowOSD=0`r`n`r`n[ToolBars\Playlist]`r`nVisible=1`r`n"
         $argLine = (@('alpha', 'bravo', 'charlie', 'delta', 'doge', 'echo') | ForEach-Object { '"C:\mpc-test\mouse\media\pl\{0}.mkv"' -f $_ }) -join ' '
         $c = Invoke-PlaylistJob -Name 'playlist-input' -ArgumentLine "$argLine /play" -IniText $plIni
@@ -573,9 +668,11 @@ try {
     # 5. The Keys page of Options: a double-click on a key entry's hotkey cell must open the in-place
     #    hotkey editor (#3853, f17f348494). It plays nothing, so it runs even when the playlist cases are
     #    skipped, in its own player instance.
-    $keysIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idKeysPage`r`n"
-    $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
-    Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c)
+    if (Wanted 'keys-double-click-edits') {
+        $keysIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idKeysPage`r`n"
+        $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
+        Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c)
+    }
 
     # The Options/theme case (theme 14b), one guest script driven through Invoke-OptionsThemeJob;
     #    Run-OptionsThemeCase.guest.ps1's header says what the unfixed build does. The theme
@@ -588,13 +685,38 @@ try {
 
     # 6. With one display adapter the D3D9 render device selection is hidden, and stays hidden
     #    when the page enables/disables controls (#4033, 0654c07e01). Modern Dark.
-    $d3d9Ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=1`r`nModernThemeMode=0`r`nLastUsedPage=$idOutputPage`r`n"
-    $c = Invoke-OptionsThemeJob -Name 'options-d3d9' -Case 'd3d9' -ArgumentLine '' -IniText $d3d9Ini -Ids $themeIds
-    if ($c.Run.d3d9Adapters -gt 1) {
-        $skipped++
-        Note Yellow "options-d3d9-device-hidden-on-one-adapter not testable here: the guest has $($c.Run.d3d9Adapters) D3D9 adapters, the controls are only hidden with one"
-    } else {
-        Complete-Case 'options-d3d9-device-hidden-on-one-adapter' (Test-OptionsD3D9Hidden $c)
+    if (Wanted 'options-d3d9-device-hidden-on-one-adapter') {
+        $d3d9Ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=1`r`nModernThemeMode=0`r`nLastUsedPage=$idOutputPage`r`n"
+        $c = Invoke-OptionsThemeJob -Name 'options-d3d9' -Case 'd3d9' -ArgumentLine '' -IniText $d3d9Ini -Ids $themeIds
+        if ($c.Run.d3d9Adapters -gt 1) {
+            $skipped++
+            Note Yellow "options-d3d9-device-hidden-on-one-adapter not testable here: the guest has $($c.Run.d3d9Adapters) D3D9 adapters, the controls are only hidden with one"
+        } else {
+            Complete-Case 'options-d3d9-device-hidden-on-one-adapter' (Test-OptionsD3D9Hidden $c)
+        }
+    }
+
+    # 7. The controls the player injects into the Windows file dialogs, under Windows dark mode (#4281,
+    #    bb78c2c0fe). One job, five launches of the player, each from its own ini; the guest script's header
+    #    says what the unfixed build did in each. ModernThemeMode=2 follows Windows (dark, here);
+    #    ModernThemeStyle 1 = Windows 10, 2 = Windows 11. The guest turns dark mode on for the duration.
+    $fdNames = @('foreground', 'background', 'minimized', 'win11style', 'themeoff')
+    if (Wanted ($fdNames | ForEach-Object { "filedialog-injected-themed-$_" })) {
+        function FdIni { param([int] $Theme, [int] $Style) "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=$Theme`r`nModernThemeMode=2`r`nModernThemeStyle=$Style`r`n" }
+        $fdVariants = @(
+            @{ Name = 'foreground'; Mode = 'foreground'; IniText = (FdIni 1 1) }
+            @{ Name = 'background'; Mode = 'background'; IniText = (FdIni 1 1) }
+            @{ Name = 'minimized';  Mode = 'minimized';  IniText = (FdIni 1 1) }
+            @{ Name = 'win11style'; Mode = 'foreground'; IniText = (FdIni 1 2) }
+            @{ Name = 'themeoff';   Mode = 'foreground'; IniText = (FdIni 0 1) }
+        )
+        $c = Invoke-FileDialogThemeJob -Name 'filedialog-theme' -Variants $fdVariants
+        if ($c.Run.osBuild -lt 22000) {
+            Note Yellow "target is Windows build $($c.Run.osBuild): on Windows 10 the old hook still fired with the player inactive, so background and minimized passed the unfixed build there; only Windows 11 reproduced #4281 part 1"
+        }
+        foreach ($name in $fdNames) {
+            Complete-Case "filedialog-injected-themed-$name" (Test-FileDialogInjectedThemed $c $name)
+        }
     }
 }
 finally {
