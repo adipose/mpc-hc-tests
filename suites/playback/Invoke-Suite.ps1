@@ -2157,7 +2157,8 @@ try {
         $s | Add-Member Dpi ([int] $step.dpi)
         $s | Add-Member Png $png
         $s | Add-Member Step $step
-        Note Gray ("      strip $When (dpi {9}): {0}x{1} on {2}, {3:P0} bar colour, {4} glyph px, glyph {5}x{6} ({7} px clear above, {8} below)" -f $s.Width, $s.Height, $s.Bg, $s.Near, $s.Ink, $s.GlyphW, $s.GlyphH, $s.Top, $s.Bottom, $s.Dpi)
+        $s | Add-Member Above ([string] $step.aboveBg)
+        Note Gray ("      strip $When (dpi {9}): {0}x{1} on {2}, {3:P0} bar colour, {4} glyph px, glyph {5}x{6} ({7} px clear above, {8} below); toolbar above {10}" -f $s.Width, $s.Height, $s.Bg, $s.Near, $s.Ink, $s.GlyphW, $s.GlyphH, $s.Top, $s.Bottom, $s.Dpi, $s.Above)
         $s
     }
     function Test-AudioIconStrip {
@@ -2171,17 +2172,34 @@ try {
         if ($S.Ink -lt 15) { $p += "the strip $When holds $($S.Ink) glyph pixels: no icon" }
         $p
     }
+    function Test-BlackBarUnder {
+        # The status bar is black, as in every other theme and as the audio bitmaps were drawn for, under a
+        # toolbar of the expected brightness (light: every channel over 200; dark: every channel under 80),
+        # which shows the theme mode under test is the one in force.
+        param($S, [string] $When, [bool] $Light)
+        $p = @()
+        if ($S.Bg -ne '0,0,0') { $p += "the status bar $When is $($S.Bg), not black" }
+        $a = @($S.Above -split ',' | ForEach-Object { [int] $_ })
+        $isLight = $a.Count -eq 3 -and @($a | Where-Object { $_ -le 200 }).Count -eq 0
+        $isDark = $a.Count -eq 3 -and @($a | Where-Object { $_ -ge 80 }).Count -eq 0
+        if ($Light -and -not $isLight) { $p += "the toolbar above the bar $When is '$($S.Above)', not light: the light theme is not in force" }
+        if (-not $Light -and -not $isDark) { $p += "the toolbar above the bar $When is '$($S.Above)', not dark: the dark theme is not in force" }
+        $p
+    }
 
-    # 50. Windows 11 style, light mode: the bar takes the player bars' light colour, and the icon must
-    #    be drawn on it, not the classic bitmap's black box. Unfixed 2.8.2 blits the 33x21 BMP, black
-    #    background and all.
-    $lightTheme = @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0 }
+    # 50. Windows 11 style, light mode: the status bar stays black like every other theme's, so the
+    #    audio bitmap, drawn for a black bar, sits on it with no box around it. Unfixed 2.8.3.18 makes
+    #    the bar light (249,249,249) and blits the 33x21 BMP onto it, black background and all.
     if (Test-CaseSelected 'status-audio-icon-light-theme') {
         $c = Invoke-PlayerCase -Name 'status-audio-icon-light-theme' -Clip 'long.mkv' -Switches '/play' `
-            -Settings $lightTheme -ControlAt '4:sbar:12027' -CloseAtSec 6
+            -Settings @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0 } `
+            -ControlAt '4:sbar:12027' -CloseAtSec 6
         $problems = @(Get-ProcessProblem $c.Run)
         $s = Get-AudioIconCapture $c.Run 'status-audio-icon-light-theme' 4 'at 100%'
-        if ($s -is [string]) { $problems += $s } else { $problems += Test-AudioIconStrip $s 'at 100%' }
+        if ($s -is [string]) { $problems += $s } else {
+            $problems += Test-BlackBarUnder $s 'at 100%' $true
+            $problems += Test-AudioIconStrip $s 'at 100%'
+        }
         Complete-Case 'status-audio-icon-light-theme' $problems
     }
 
@@ -2227,37 +2245,11 @@ try {
         Complete-Case 'status-audio-icon-after-options-toggle' $problems
     }
 
-    # 52. The icon follows a live display scale change: light theme as in 50, captured at 100% and again
-    #    after the primary monitor goes to 125% (the guests' 1024x768 display offers no more: asked for
-    #    150%, Windows gives 125%). The icon's width is the strip's less the 8 px Relayout adds; it must
-    #    grow with the DPI the bar reports (at least 0.9 of the ratio, measured 20 -> 25 px), and the
-    #    glyph in it must grow too. Unfixed 2.8.2's bitmap is a fixed 33x21 and stays the same size.
-    if (Test-CaseSelected 'status-audio-icon-follows-dpi-change') {
-        $c = Invoke-PlayerCase -Name 'status-audio-icon-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' `
-            -Settings $lightTheme -ControlAt '3:sbar:12027,4:dpi:0:125,8:sbar:12027,10:dpi:0:100' -CloseAtSec 12
-        $problems = @(Get-ProcessProblem $c.Run)
-        $s0 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 3 'at 100%'
-        $s1 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 8 'at 125%'
-        foreach ($s in $s0, $s1) { if ($s -is [string]) { $problems += $s } }
-        if ($s0 -isnot [string] -and $s1 -isnot [string]) {
-            $problems += Test-AudioIconStrip $s1 'at 125%'
-            $dpiRatio = $s1.Dpi / [math]::Max(1, $s0.Dpi)
-            if ($dpiRatio -lt 1.2) { $problems += "the bar's DPI went from $($s0.Dpi) to $($s1.Dpi): the display scale did not change" }
-            else {
-                $w0 = $s0.Width - 7; $w1 = $s1.Width - 7
-                if ($w1 / $w0 -lt 0.9 * $dpiRatio) { $problems += ("the icon went from {0} to {1} px wide for a DPI change of x{2:N2}: it was not rebuilt at the new DPI" -f $w0, $w1, $dpiRatio) }
-                if ($s1.GlyphH -le $s0.GlyphH) { $problems += "the glyph stayed $($s0.GlyphH) px high -> $($s1.GlyphH) px" }
-            }
-        }
-        Complete-Case 'status-audio-icon-follows-dpi-change' $problems
-    }
-
-    # 53. The icon follows a live theme change: Windows 11 style in dark mode, whose bar is black, then
-    #    Options (on its Theme page) sets the theme mode combo (IDC_COMBO1 11000, items Dark, Light,
-    #    Windows, no item data) to Light and OK. The bar turns light and the icon must be rebuilt in the
-    #    light colours (OnMPCThemeChanged): a glyph on the new bar colour, not the dark icon's black.
-    #    The capture before the change is the control: both builds draw a glyph on black there. Unfixed
-    #    2.8.2 keeps the classic bitmap, whose black box shows once the bar is light.
+    # 52. A live theme change: Windows 11 style in dark mode, then Options (on its Theme page) sets the
+    #    theme mode combo (IDC_COMBO1 11000, items Dark, Light, Windows, no item data) to Light and OK.
+    #    The toolbar above turns light, which shows the change took; the status bar must stay black, the
+    #    icon on it with no box. The capture before the change is the control: both builds draw a glyph
+    #    on black there. Unfixed 2.8.3.18 turns the bar light, and the bitmap's black box shows on it.
     if (Test-CaseSelected 'status-audio-icon-follows-theme-change') {
         $c = Invoke-PlayerCase -Name 'status-audio-icon-follows-theme-change' -Clip 'long.mkv' -Switches '/play' `
             -Settings @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0; LastUsedPage = 10038 } -PostCommands '4:815' `
@@ -2270,7 +2262,8 @@ try {
             $s1 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-theme-change' 9 'after the change to light'
             foreach ($s in $s0, $s1) { if ($s -is [string]) { $problems += $s } }
             if ($s0 -isnot [string] -and $s1 -isnot [string]) {
-                if ($s0.Bg -eq $s1.Bg) { $problems += "the bar stayed $($s0.Bg): the theme did not change, so the case proves nothing" }
+                $problems += Test-BlackBarUnder $s0 'in dark mode' $false
+                $problems += Test-BlackBarUnder $s1 'after the change to light' $true
                 $problems += Test-AudioIconStrip $s0 'in dark mode'
                 $problems += Test-AudioIconStrip $s1 'after the change to light'
             }

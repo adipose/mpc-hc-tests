@@ -580,6 +580,16 @@ function Invoke-ControlStep {
             $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
             $record.file = Split-Path $file -Leaf
             $gfx.Dispose(); $bmp.Dispose()
+            # The commonest colour of the screen row 3 px above the bar, as r,g,b: the player bar docked over it
+            # (the toolbar), which shows which theme mode is in force when the status bar itself does not.
+            $row = [System.Drawing.Bitmap]::new($b[2] - $b[0], 1)
+            $gfx = [System.Drawing.Graphics]::FromImage($row)
+            $gfx.CopyFromScreen($b[0], $b[1] - 3, 0, 0, $row.Size)
+            $counts = @{}
+            for ($x = 0; $x -lt $row.Width; $x++) { $k = $row.GetPixel($x, 0).ToArgb(); $counts[$k] = 1 + [int] $counts[$k] }
+            $c = [System.Drawing.Color]::FromArgb(($counts.GetEnumerator() | Sort-Object Value | Select-Object -Last 1).Key)
+            $record.aboveBg = '{0},{1},{2}' -f $c.R, $c.G, $c.B
+            $gfx.Dispose(); $row.Dispose()
         }
     } elseif ($Step.op -eq 'grip') {
         # The dialog's size grip: ResizableLib creates it as a ScrollBar with SBS_SIZEGRIP (0x10) and id 0, so
