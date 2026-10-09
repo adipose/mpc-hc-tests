@@ -49,7 +49,7 @@ renderer. Capture cannot use MPCVR and must substitute EVR-CP; the
 connect, and the player must keep answering and close. Unfixed 2.8.2 set the
 capture flag after the renderers were chosen and connects MPCVR to the Smart
 Tee (clsid2/mpc-hc#4280, be66b4b8b1). It records nothing, so it does not
-depend on the #4285 mux fix, which develop lacks as of 51937d1eee. Skipped
+depend on the #4285 mux fix (#4300, a761b87396). Skipped
 without `MPCVR\` beside the player (a release zip has it, a source build does
 not).
 

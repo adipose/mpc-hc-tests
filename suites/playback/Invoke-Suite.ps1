@@ -1301,7 +1301,7 @@ try {
     #    play/pause/stop after the left separator, so the movable part starts at index 4, but
     #    IsValidButtonLayout and PlaceButtons started at 3: 2.6.1 and 2.6.4 show Stop twice from it, and
     #    after #3839 (a0968dc305) the saved Stop counts as a duplicate, the layout is discarded and the
-    #    defaults load instead (skipback, decrate, incrate, skipforward, framestep). Fixed on patch759.
+    #    defaults load instead (skipback, decrate, incrate, skipforward, framestep). Fixed by e650c468a6 (#4296).
     if (Test-CaseSelected 'toolbar-old-layout-has-no-duplicates') {
         $layout = Get-ButtonSequenceIni @(957, 887, 888, 890, 922, 891, 921, 945, 909)
         $c = Invoke-PlayerCase -Name 'toolbar-old-layout-has-no-duplicates' -Clip 'stereo.mkv' `
