@@ -9,6 +9,8 @@ framework can reach.
 .\tests\Invoke-MpcTests.ps1 -Suite mouse
 # or on a guest you already hold:
 .\tests\suites\mouse\Invoke-Suite.ps1 -VMName <guest> -PlayerBinary <mpc-hc64.exe>
+# some cases only (wildcards against the names below; the rest count as skipped):
+pwsh -Command "& .\Invoke-Suite.ps1 -VMName <guest> -Case 'filedialog-*','keys-*'"
 ```
 
 It needs a target with someone logged on at the console, and, for the two
@@ -51,10 +53,27 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `playlist-click-time-column-no-edit` | a click on an entry's time column | the editor that may open holds the entry's name, never the time cell's text (#3885 item 1) |
 | `keys-double-click-edits` | a real double-click on a key entry's hotkey cell in Options > Player > Keys | the in-place hotkey editor opens within 1 s (#3853) |
 | `options-d3d9-device-hidden-on-one-adapter` | Options > Output, renderer switched to EVR Custom, the D3D9 device controls found on the page (old layout) or in the renderer settings popup | with one adapter the checkbox and combo are hidden, and stay hidden over an enable/disable cycle (#4033) |
+| `filedialog-injected-themed-foreground` | File > Open Directory with Windows in dark mode, the player active | the "Include subdirectories" box the player injects into the folder picker paints dark: light text straight on the dialog's background |
+| `filedialog-injected-themed-background` | the same, with notepad holding the foreground | as above (#4281 part 1; see the Windows 11 note below) |
+| `filedialog-injected-themed-minimized` | the same, with the player minimized | as above (#4281 part 1) |
+| `filedialog-injected-themed-win11style` | the same, modern theme in its Windows 11 style | the label is not on a rectangle of its own: the dialog is Windows's and its background does not follow the player's palette (#4281 part 2) |
+| `filedialog-injected-themed-themeoff` | the same, modern theme off | still painted dark: the dark dialog workaround runs without the theme (#4281, found while fixing) |
 
 The Options/theme case runs in `Run-OptionsThemeCase.guest.ps1`, one case per
 job. The theme comes from the ini (`MPCTheme`, `ModernThemeMode` 0 = Dark / 1 =
 Light).
+
+The file dialog cases run in `Run-FileDialogThemeCase.guest.ps1`, one job and
+one player launch per variant. The guest script turns Windows dark mode on for
+the console user (`AppsUseLightTheme=0`, which the player reads at startup)
+and puts the old value back when it is done. The capture is the injected check
+box with a margin of dialog around it, and the margin is the reference the
+label background is compared with. Before bb78c2c0fe the player found the
+dialog by watching its own main frame for `WM_ACTIVATE`, which only arrives
+when the frame was active; with the player inactive that message still came on
+Windows 10 but not on Windows 11. So the background and minimized cases prove
+the fix on a Windows 11 target only; on Windows 10 they pass the unfixed build
+as well, and the suite says so when the target is older than build 22000.
 
 The playlist cases run in one player instance, driven by
 `Run-PlaylistInputCase.guest.ps1`, which types with keyboard `SendInput` as
