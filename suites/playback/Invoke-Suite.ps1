@@ -2056,6 +2056,37 @@ try {
         Complete-Case 'status-pane-reaches-time-pane' $problems
     }
 
+    # The first paint after a stop, on EVR-CP: #4257. Pause and Play from stopped place the video rect
+    # (MoveVideoWindow(false, true)) while the presenter is still stopped, and that paint rendered whatever
+    # its video surface held: the last frame before the stop. bluered.mkv is blue for its first second and
+    # red after, so stopped in the red part, the first frame that may follow a pause or a play is frame 0,
+    # blue, and every red read in between is the stale picture. Each vwatch posts the command and reads the
+    # pane's centre as fast as PrintWindow allows. The stop is at 9 s, not earlier: on a guest the renderer
+    # takes seconds to start, and a stop still inside the blue second makes the stale frame blue too, so
+    # the reads at 8.5 s and 14.5 s must see red or the case proves nothing. Frame 0 is made expensive (see
+    # New-PlaybackClips.ps1) so the stale paint outlasts a read on the guest's software renderer. Unfixed
+    # develop 8f79ced007 on win10-parity-2: RRBBB... after both the pause and the play. The fix draws only
+    # the cleared back buffer until a new frame is presented: kkBBB... The final read must be blue, which
+    # proves the reads see the picture at all.
+    if (Test-CaseSelected 'no-stale-frame-after-stop') {
+        $c = Invoke-PlayerCase -Name 'no-stale-frame-after-stop' -Clip 'bluered.mkv' -Switches '/play' `
+            -Settings @{ DSVidRen = 11 } -IniSections $rendererLav `
+            -PostCommands '9:890,11:887,15:890' -ControlAt '8.5:vwatch:59648:0,10:vwatch:59648:888,14.5:vwatch:59648:0,16:vwatch:59648:887' -CloseAtSec 18
+        $problems = @(Get-ProcessProblem $c.Run)
+        foreach ($at in 8.5, 14.5) {
+            $playing = @($c.Run.controls) | Where-Object { $_.op -eq 'vwatch' -and [double]$_.at -eq $at } | Select-Object -First 1
+            if (-not $playing -or $playing.sequence -notmatch 'R') { $problems += "the clip was not showing its red part before the stop at $([int]$at + 1) s (read: $($playing.sequence)), so a stale frame could not be told from frame 0" }
+        }
+        foreach ($w in @(@{ at = 10; what = 'pause' }, @{ at = 16; what = 'play' })) {
+            $r = @($c.Run.controls) | Where-Object { $_.op -eq 'vwatch' -and [double]$_.at -eq $w.at } | Select-Object -First 1
+            if (-not $r -or -not $r.found) { $problems += "the video pane was not found for the $($w.what) after stop"; continue }
+            Note Gray "      $($w.what) after stop: $($r.sequence)"
+            if ($r.sequence -match 'R') { $problems += "the pre-stop frame (red) was shown after $($w.what) from stopped: $($r.sequence)" }
+            if ($r.sequence -notmatch 'B$') { $problems += "frame 0 (blue) was not showing at the end of the $($w.what) watch: $($r.sequence)" }
+        }
+        Complete-Case 'no-stale-frame-after-stop' $problems
+    }
+
     # 49. The size grip after a live DPI change, modern dark theme: #4085, 410e511aa6 (of #4037, #4140).
     #    Organize Favorites at 100%, then the primary monitor to 150%; the grip's corner is captured
     #    before and after (the runner's grip step). The grip glyph is six equal squares in the theme's
