@@ -57,6 +57,7 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `filedialog-injected-themed-background` | the same, with notepad holding the foreground | as above (#4281 part 1; see the Windows 11 note below) |
 | `filedialog-injected-themed-minimized` | the same, with the player minimized | as above (#4281 part 1) |
 | `filedialog-injected-themed-win11style` | the same, modern theme in its Windows 11 style | the label is not on a rectangle of its own: the dialog is Windows's and its background does not follow the player's palette (#4281 part 2) |
+| `status-audio-tooltip-<n>ch` | a 1, 2 and 6 channel clip playing in the modern theme with Audio Info off; the pointer moved onto the status bar's audio channel icon | a tooltip comes up over the icon carrying the channels as Audio Info writes them: mono, 2.0, 5.1 (#4257; develop has no tooltip there) |
 | `filedialog-injected-themed-themeoff` | the same, modern theme off | still painted dark: the dark dialog workaround runs without the theme (#4281, found while fixing) |
 
 The Options/theme case runs in `Run-OptionsThemeCase.guest.ps1`, one case per
