@@ -2144,6 +2144,7 @@ try {
                 Near = $(if ($total) { $near / $total } else { 0 }); Ink = $ink
                 GlyphW = $(if ($ink) { $gx1 - $gx0 + 1 } else { 0 }); GlyphH = $(if ($ink) { $gy1 - $gy0 + 1 } else { 0 })
                 Top = $(if ($ink) { $gy0 - $y0 } else { -1 }); Bottom = $(if ($ink) { $y1 - 1 - $gy1 } else { -1 })
+                Left = $(if ($ink) { $gx0 - $x0 } else { -1 }); Right = $(if ($ink) { $x1 - 1 - $gx1 } else { -1 })
             }
         } finally { $bmp.Dispose() }
     }
@@ -2269,6 +2270,44 @@ try {
             }
         }
         Complete-Case 'status-audio-icon-follows-theme-change' $problems
+    }
+
+    # 53. A live display scale change: Windows 11 style in dark mode (a black bar on every build, so the case
+    #    does not turn on the #4301 bar colour), captured at 100%, after the primary monitor goes to 125%
+    #    (the guests' 1024x768 offers no more) and after it comes back. The ink in the strip is the speaker
+    #    and, in the modern theme, its "2ch" after it: its width and height must grow with the DPI the bar
+    #    reports (at least 0.9 of the ratio; measured 31x16 -> 38x20 px for the speaker and "2ch"), keep
+    #    clear of the strip's edges at both scales (nothing clipped), and return to the 100% size.
+    #    Unfixed 2.8.3.18 blits the fixed 33x21 bitmap, which stays the same size.
+    if (Test-CaseSelected 'status-audio-icon-follows-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'status-audio-icon-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 2; ShowAudioFormatInStatusbar = 0 } `
+            -ControlAt '3:sbar:12027,4:dpi:0:125,8:sbar:12027,10:dpi:0:100,13:sbar:12027' -CloseAtSec 15
+        $problems = @(Get-ProcessProblem $c.Run)
+        $s0 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 3 'at 100%'
+        $s1 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 8 'at 125%'
+        $s2 = Get-AudioIconCapture $c.Run 'status-audio-icon-follows-dpi-change' 13 'back at 100%'
+        foreach ($s in $s0, $s1, $s2) { if ($s -is [string]) { $problems += $s } }
+        if (-not @($s0, $s1, $s2 | Where-Object { $_ -is [string] }).Count) {
+            $dpiRatio = $s1.Dpi / [math]::Max(1, $s0.Dpi)
+            if ($dpiRatio -lt 1.2 -or $s2.Dpi -ne $s0.Dpi) { $problems += "the bar's DPI went $($s0.Dpi) -> $($s1.Dpi) -> $($s2.Dpi): the display scale did not change and come back" }
+            else {
+                foreach ($x in @(@($s0, 'at 100%'), @($s1, 'at 125%'), @($s2, 'back at 100%'))) {
+                    $s = $x[0]; $when = $x[1]
+                    $problems += Test-AudioIconStrip $s $when
+                    Note Gray ("      ink $when`: {0}x{1}, clear {2} left, {3} right, {4} above, {5} below" -f $s.GlyphW, $s.GlyphH, $s.Left, $s.Right, $s.Top, $s.Bottom)
+                    if ($s.Top -lt 1 -or $s.Bottom -lt 1 -or $s.Left -lt 4 -or $s.Right -lt 1) {
+                        $problems += "the icon $when touches the edge of its strip ($($s.Left) left, $($s.Right) right, $($s.Top) above, $($s.Bottom) below): clipped"
+                    }
+                }
+                if ($s1.GlyphW / [math]::Max(1, $s0.GlyphW) -lt 0.9 * $dpiRatio) { $problems += ("the icon went from {0} to {1} px wide for a DPI change of x{2:N2}: it was not rebuilt at the new DPI" -f $s0.GlyphW, $s1.GlyphW, $dpiRatio) }
+                if ($s1.GlyphH / [math]::Max(1, $s0.GlyphH) -lt 0.9 * $dpiRatio) { $problems += ("the icon went from {0} to {1} px high for a DPI change of x{2:N2}" -f $s0.GlyphH, $s1.GlyphH, $dpiRatio) }
+                if ([math]::Abs($s2.GlyphW - $s0.GlyphW) -gt 1 -or [math]::Abs($s2.GlyphH - $s0.GlyphH) -gt 1) {
+                    $problems += "back at 100% the icon is $($s2.GlyphW)x$($s2.GlyphH), not $($s0.GlyphW)x$($s0.GlyphH) as before the change"
+                }
+            }
+        }
+        Complete-Case 'status-audio-icon-follows-dpi-change' $problems
     }
 }
 finally {
