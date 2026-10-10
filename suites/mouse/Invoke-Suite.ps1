@@ -798,17 +798,22 @@ try {
     # 8. The status bar's audio channel icon in the modern theme, Audio Info off: the speaker with the
     #    channel count after it, and a tooltip over it with what Audio Info would have shown (#4257). One
     #    launch per clip. The channels are as ChannelsToStr writes them: mono, 2.0, 5.1.
+    #    The classic theme keeps its bitmaps and gets the same tooltip, checked with the stereo clip.
     $tipCases = @{ 1 = 'mono'; 2 = '2.0'; 6 = '5.1' }
-    if (Wanted (1, 2, 6 | ForEach-Object { "status-audio-tooltip-$($_)ch" })) {
+    if (Wanted ((1, 2, 6 | ForEach-Object { "status-audio-tooltip-$($_)ch" }) + 'status-audio-tooltip-classic')) {
         if (-not $haveAudioClips) {
             Note Yellow 'status-audio-tooltip-* not run: the audio clips could not be made (ffmpeg missing?)'
         } else {
-            $tipIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nShowOSD=0`r`nLoop=1`r`nMPCTheme=1`r`nModernThemeMode=0`r`nModernThemeStyle=2`r`nShowAudioFormatInStatusbar=0`r`n"
+            function TipIni { param([int] $Theme) "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nShowOSD=0`r`nLoop=1`r`nMPCTheme=$Theme`r`nModernThemeMode=0`r`nModernThemeStyle=2`r`nShowAudioFormatInStatusbar=0`r`n" }
             foreach ($n in 1, 2, 6) {
                 $name = "status-audio-tooltip-$($n)ch"
                 if (-not (Wanted $name)) { continue }
-                $c = Invoke-StatusTipJob -Name $name -Clip $audioClips[$n] -IniText $tipIni
+                $c = Invoke-StatusTipJob -Name $name -Clip $audioClips[$n] -IniText (TipIni 1)
                 Complete-Case $name (Test-StatusTip $c $tipCases[$n])
+            }
+            if (Wanted 'status-audio-tooltip-classic') {
+                $c = Invoke-StatusTipJob -Name 'status-audio-tooltip-classic' -Clip $audioClips[2] -IniText (TipIni 0)
+                Complete-Case 'status-audio-tooltip-classic' (Test-StatusTip $c '2.0')
             }
         }
     }
