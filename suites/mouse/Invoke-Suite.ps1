@@ -108,6 +108,7 @@ $idVidRndCombo  = Get-ResourceId 'IDC_VIDRND_COMBO' 22060     # renderer selecti
 $idButton1      = Get-ResourceId 'IDC_BUTTON1' 11120          # Output page gear
 $idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the renderer settings popup
 $idOpenDir      = Get-ResourceId 'ID_FILE_OPENDIRECTORY' 33208   # the folder picker, which carries an injected check box
+$idPlayerTime   = Get-ResourceId 'IDC_PLAYERTIME' 12027       # the status bar's time label, whose parent is the bar
 
 # The hover lands this long after the click that opens the list. The defect shows up to about 100 ms; the
 # last value is the settled reference the others are compared with.
@@ -136,6 +137,24 @@ if (-not (Test-Path $plClip)) {
     }
 }
 $havePlaylistMedia = Test-Path $plClip
+
+# Three clips for the status bar audio icon cases, one per channel layout the icon is shown for: a mono
+# and a stereo AAC track and a 5.1 AC3 one, each under a short video so the player shows a window.
+# (Plain hashtables: an [ordered] one reads an int key as a position.)
+$audioClips = @{ 1 = 'audio-1ch.mkv'; 2 = 'audio-2ch.mkv'; 6 = 'audio-6ch.mkv' }
+foreach ($n in 1, 2, 6) {
+    $clip = Join-Path $PSScriptRoot "media\$($audioClips[$n])"
+    if (Test-Path $clip) { continue }
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if (-not $ffmpeg) { break }
+    New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot 'media') | Out-Null
+    $acodec = if ($n -eq 6) { 'ac3' } else { 'aac' }
+    & $ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=blue:s=640x360:r=30:d=8' -f lavfi -i 'sine=f=440:d=8' `
+        -filter_complex "[1:a]pan=$(@{1 = 'mono|c0=c0'; 2 = 'stereo|c0=c0|c1=c0'; 6 = '5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0'}[$n])[a]" `
+        -map 0:v -map '[a]' -c:v libx264 -pix_fmt yuv420p -preset veryfast -c:a $acodec $clip
+    if ($LASTEXITCODE -ne 0) { Remove-Item $clip -Force -ErrorAction SilentlyContinue }
+}
+$haveAudioClips = -not ($audioClips.Values | Where-Object { -not (Test-Path (Join-Path $PSScriptRoot "media\$_")) })
 
 # --- target -------------------------------------------------------------------
 
@@ -174,7 +193,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
@@ -191,6 +210,10 @@ try {
             New-Item -ItemType Directory $pl | Out-Null
             foreach ($n in 'alpha', 'bravo', 'charlie', 'delta', 'doge', 'echo') { Copy-Item 'C:\mpc-test\mouse\pl-clip.mkv' "$pl\$n.mkv" }
         }
+    }
+    if ($haveAudioClips) {
+        Invoke-Command -Session $session { if (-not (Test-Path 'C:\mpc-test\mouse\media')) { New-Item -ItemType Directory 'C:\mpc-test\mouse\media' | Out-Null } }
+        foreach ($f in $audioClips.Values) { Copy-Item -ToSession $session (Join-Path $PSScriptRoot "media\$f") "C:\mpc-test\mouse\media\$f" -Force }
     }
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\mouse\player\mpc-hc64.exe').VersionInfo.ProductVersion }
     Note Gray "player under test: $version from $playerDir"
@@ -558,6 +581,59 @@ try {
         $problems
     }
 
+    # The status bar job: one launch of the player per clip, Run-StatusTipCase hovering the audio channel
+    # icon with real input. Same scheduled-task shape as the Keys job.
+    function Invoke-StatusTipJob {
+        param([string] $Name, [string] $Clip, [string] $IniText)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $job = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = "`"C:\mpc-test\mouse\media\$Clip`" /play"; OutDir = $guestOut
+            TimeId = $idPlayerTime; HoverFromRight = 20
+        } | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-StatusTipCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(120)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # Hovering the icon brings up a tooltip with the audio format, its channels as the status text's Audio
+    # Info would have written them. Develop has no tooltip on the icon at all.
+    function Test-StatusTip {
+        param($Job, [string] $Channels)
+        $tip = $Job.Run.tip
+        Note Gray ("      tooltip: " + $(if ($tip.seen) { "'$($tip.text)'" } else { 'none' }))
+        if (-not $tip.seen) { return @('no tooltip appeared over the audio channel icon') }
+        if ($tip.text -notmatch [regex]::Escape($Channels)) { return @("the tooltip reads '$($tip.text)', expected the channels '$Channels' in it") }
+        @()
+    }
+
     # With one adapter the D3D9 device checkbox and combo must be hidden, at open and after an
     # enable/disable cycle. The unfixed build only disables them: on the old page layout they are
     # visible on the Output page itself, on the current one visible (disabled) in the renderer
@@ -716,6 +792,24 @@ try {
         }
         foreach ($name in $fdNames) {
             Complete-Case "filedialog-injected-themed-$name" (Test-FileDialogInjectedThemed $c $name)
+        }
+    }
+
+    # 8. The status bar's audio channel icon in the modern theme, Audio Info off: the speaker with the
+    #    channel count after it, and a tooltip over it with what Audio Info would have shown (#4257). One
+    #    launch per clip. The channels are as ChannelsToStr writes them: mono, 2.0, 5.1.
+    $tipCases = @{ 1 = 'mono'; 2 = '2.0'; 6 = '5.1' }
+    if (Wanted (1, 2, 6 | ForEach-Object { "status-audio-tooltip-$($_)ch" })) {
+        if (-not $haveAudioClips) {
+            Note Yellow 'status-audio-tooltip-* not run: the audio clips could not be made (ffmpeg missing?)'
+        } else {
+            $tipIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nShowOSD=0`r`nLoop=1`r`nMPCTheme=1`r`nModernThemeMode=0`r`nModernThemeStyle=2`r`nShowAudioFormatInStatusbar=0`r`n"
+            foreach ($n in 1, 2, 6) {
+                $name = "status-audio-tooltip-$($n)ch"
+                if (-not (Wanted $name)) { continue }
+                $c = Invoke-StatusTipJob -Name $name -Clip $audioClips[$n] -IniText $tipIni
+                Complete-Case $name (Test-StatusTip $c $tipCases[$n])
+            }
         }
     }
 }
