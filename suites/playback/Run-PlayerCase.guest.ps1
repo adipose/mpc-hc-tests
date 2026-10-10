@@ -74,6 +74,10 @@ param(
                                          # <sec>:cbindex:<ctrl>:<index> is combo by position.
                                          # <sec>:check:<ctrl>:<0|1> sets a dialog check box and sends
                                          # its page BN_CLICKED.
+                                         # <sec>:vwatch:59648:<command id> posts that command to the
+                                         # frame and reads the video pane's centre colour as fast as
+                                         # PrintWindow allows for 700 ms ("sequence", a letter per read);
+                                         # command 0 only reads.
                                          # Decimal. Recorded under "controls".
 )
 
@@ -121,6 +125,8 @@ public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr after, 
 public static extern uint GetDpiForWindow(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool RedrawWindow(System.IntPtr hWnd, System.IntPtr rect, System.IntPtr region, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool PrintWindow(System.IntPtr hWnd, System.IntPtr hdc, uint flags);
 '@
 }
 
@@ -517,7 +523,7 @@ function Invoke-ControlStep {
     }
     # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
     # sbar captures the bar such a control sits in, redraw repaints it.
-    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw') { 'MediaPlayerClassicW' } else { '#32770' }
+    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch') { 'MediaPlayerClassicW' } else { '#32770' }
     $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl -TopClass $topClass
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
@@ -632,6 +638,47 @@ function Invoke-ControlStep {
                 $gfx.Dispose(); $crop.Dispose()
             }
         }
+    } elseif ($Step.op -eq 'vwatch') {
+        # <sec>:vwatch:59648:<command id>: post that WM_COMMAND to the frame, then read the centre pixel of the
+        # video pane (AFX_IDW_PANE_FIRST, 59648) from the screen as often as possible for 700 ms. A screen read
+        # does not involve the player: PrintWindow is answered by the player's UI thread, which is busy inside
+        # the command until the graph has prerolled, so its first answer comes after the first new frame and a
+        # flash in between is never seen (measured on win10-parity-2). PrintWindow is used only where the
+        # screen cannot be read. Recorded as one letter per read: R red, G green, B blue, W white, k black,
+        # ? anything else -- a flash that lasts one paint shows up as one letter. Command 0 posts nothing: a
+        # plain read of what the pane shows.
+        Add-Type -AssemblyName System.Drawing
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+        $w = $rect[2] - $rect[0]; $h = $rect[3] - $rect[1]
+        $cx = $rect[0] + [int]($w / 2); $cy = $rect[1] + [int]($h / 2)
+        $px = [System.Drawing.Bitmap]::new(1, 1)
+        $pxg = [System.Drawing.Graphics]::FromImage($px)
+        $useScreen = $true
+        try { $pxg.CopyFromScreen($cx, $cy, 0, 0, $px.Size) } catch { $useScreen = $false }
+        $record.method = if ($useScreen) { 'screen' } else { 'PrintWindow' }
+        if ($Step.value) { $record.delivered = [bool] [MpcTest.User32]::PostMessageW($root, 0x0111, [IntPtr] $Step.value, [IntPtr]::Zero) }
+        $seq = [Text.StringBuilder]::new()
+        if ($w -gt 0 -and $h -gt 0) {
+            $bmp = [System.Drawing.Bitmap]::new($w, $h)
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.ElapsedMilliseconds -lt 700) {
+                if ($useScreen) {
+                    $pxg.CopyFromScreen($cx, $cy, 0, 0, $px.Size)
+                    $c = $px.GetPixel(0, 0)
+                } else {
+                    $dc = $gfx.GetHdc(); [void] [MpcTest.User32]::PrintWindow($ctrl, $dc, 2); $gfx.ReleaseHdc($dc)
+                    $c = $bmp.GetPixel([int]($w / 2), [int]($h / 2))
+                }
+                $letter = if ($c.R -gt 150 -and $c.G -lt 90 -and $c.B -lt 90) { 'R' } elseif ($c.G -gt 150 -and $c.R -lt 90 -and $c.B -lt 90) { 'G' } `
+                          elseif ($c.B -gt 150 -and $c.R -lt 90 -and $c.G -lt 90) { 'B' } elseif ($c.R -gt 200 -and $c.G -gt 200 -and $c.B -gt 200) { 'W' } `
+                          elseif ($c.R -lt 30 -and $c.G -lt 30 -and $c.B -lt 30) { 'k' } else { '?' }
+                [void] $seq.Append($letter)
+            }
+            $gfx.Dispose(); $bmp.Dispose()
+        }
+        $pxg.Dispose(); $px.Dispose()
+        $record.sequence = $seq.ToString()
     } elseif ($Step.op -eq 'size') {
         # Grow the top-level dialog by <value> px each way, as a user dragging its corner: the player
         # gets WM_SIZE from its own thread's SetWindowPos handling. Asynchronous, because a synchronous

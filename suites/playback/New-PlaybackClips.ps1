@@ -207,6 +207,22 @@ Invoke-FFmpeg $still @(
     '-frames:v', '1', '-update', '1'
 )
 
+# --- bluered.mkv: 1 s of blue, then 19 s of flat red, 1920x1080 at 5 fps, lossless ---
+# For the stopped-paint case: stopped in the red part, the next frame the player may show
+# is frame 0, blue, so any red seen after stop then pause or play is the stale pre-stop frame.
+# The blue second carries a band of noise along the top (the centre stays flat blue), which
+# makes frame 0 about 1.1 MB: decoding and mixing it takes long enough on a guest's software
+# renderer for the stale paint to stay on screen across several reads. A flat frame 0 arrives
+# within one read there, and the unfixed build passed. The red part is flat and cheap.
+$bluered = Join-Path $OutDir 'bluered.mkv'
+Invoke-FFmpeg $bluered @(
+    '-f', 'lavfi', '-i', 'color=c=blue:s=1920x1080:r=5:d=1',
+    '-f', 'lavfi', '-i', 'nullsrc=s=1920x400:r=5:d=1,geq=random(1)*255:128:128',
+    '-f', 'lavfi', '-i', 'color=c=red:s=1920x1080:r=5:d=19',
+    '-filter_complex', '[0:v][1:v]overlay=0:0,format=yuv420p[blue];[blue][2:v]concat=n=2:v=1:a=0[v]', '-map', '[v]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-g', '5', '-x264-params', 'qp=0'
+)
+
 # --- steps.mkv: 20 s of one sine stepping 300, 400, ... 1200 Hz every 2 s ---
 # Segment k (2k..2k+2 s) is 300+100k Hz, so the audio says where playback is.
 # Get-ToneTimeline.ps1 reads it back from a capture.
@@ -428,6 +444,7 @@ $clips = [ordered]@{
         'still.png' = [ordered]@{
             note = 'a single flat red 640x360 frame; played through the still-image source it has no duration and no audio'
         }
+        'bluered.mkv' = [ordered]@{ seconds = 20; note = 'flat blue for the first second, flat red after; no audio' }
         'steps.mkv' = [ordered]@{ seconds = 20; note = 'sine 300+100k Hz in segment k = 2k..2k+2 s' }
     }
 }
