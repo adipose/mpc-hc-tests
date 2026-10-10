@@ -36,6 +36,20 @@ previewing. Each one tears the graph down and rebuilds it
 must keep answering, and WM_CLOSE must still end the process. The rebuild
 path from clsid2/mpc-hc#4280. Skipped when the device offers one dimension.
 
+`preview-after-reselect`: reselect the current dimension three times, 5 s
+apart (the clsid2/mpc-hc#4302 reporter's recipe), then read the camera's
+frame number out of the preview twice, a second apart, with `PrintWindow` on
+the frame's view pane (control id 59648) and the strip geometry from the
+dimension combo's text. The number must decode both times and advance.
+Before the fix `CFGManager::m_pUnks` kept the previous EVR-CP presenter alive
+after its EVR had left the graph: it went on being painted into the same
+window with a dangling pointer to its EVR (the 2.8.3.2 access violation in
+#4302), and the next `FindInterface` could hand it, rather than the live
+presenter, back to the frame. Unfixed `f61fd09188` on `win10-parity-2`:
+frame 98 before, then 151 and 151 after the reselections, so the preview is
+frozen. Skipped when the view cannot be captured or the camera draws no strip
+(VCam on the host).
+
 `record-camera-audio`: `record-with-previews` with no audio device
 configured, so `CMainFrame::OpenCapture` takes audio from the video device's
 own audio pin (`m_pAudCap = m_pVidCap`), the path a capture card such as the

@@ -322,6 +322,12 @@ public static class W {
   public static string Cls(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
   public static string Txt(IntPtr h) { var s = new StringBuilder(1024); GetWindowText(h, s, 1024); return s.ToString(); }
   public static bool Answers(IntPtr h, uint ms) { IntPtr r; return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 2, ms, out r) != IntPtr.Zero; }
+  // GetWindowText reads another process's controls from a cache, often empty; WM_GETTEXT is marshalled.
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, StringBuilder l);
+  public static string Text(IntPtr h) { var s = new StringBuilder(1024); SendMessage(h, 0x000D, (IntPtr)1024, s); return s.ToString(); }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 }
 '@
@@ -414,7 +420,7 @@ function Read-AviStreams {
     $streams
 }
 
-$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr')
+$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect')
 if ($Case) { $cases = $cases | Where-Object { $n = $_; $Case | Where-Object { $n -like $_ } } }
 
 # --- record-with-previews, record-camera-audio --------------------------------------------
@@ -483,6 +489,100 @@ if ($cases -contains 'resolution-changes') {
         if (-not (Stop-CapturePlayer $player)) { $problems += 'player did not close on WM_CLOSE within 20 s' }
     }
     if ($count -ge 2) { Report $name $problems }
+}
+
+# --- preview-after-reselect ---------------------------------------------------------------
+#
+# Reselect the current dimension three times, 5 s apart (the #4302 reporter's recipe), then read the camera's
+# frame number out of the preview twice, a second apart. Every reselection rebuilds the graph. Before the fix
+# CFGManager::m_pUnks kept the previous EVR-CP presenter alive after its EVR had left the graph: it went on
+# being painted into the same window (a black rectangle, two statistics overlays) with a dangling pointer to
+# its EVR (the 2.8.3.2 crash), and the next FindInterface could hand it, not the live presenter, to the frame.
+# A live preview shows the strip advancing; a dead one shows black, or a number that does not move. Needs a
+# camera that draws the strip (avs-vcamera): skipped when the picture does not decode before any reselection.
+
+function Get-PreviewFrameNumber {
+    # The number in the strip along the top of the picture, read from the screen: the camera's picture is
+    # fitted into the view window and centred, the strip is 1/12 of it high, 32 blocks, MSB left, white is 1.
+    # Returns -1 when a block is neither black nor white (nothing drawn, or not this camera's picture), -2 when
+    # the window could not be captured at all. PrintWindow with PW_RENDERFULLCONTENT sees what EVR-CP drew,
+    # and unlike a screen copy it works from a session that has no desktop of its own.
+    param($Player, [int] $Width, [int] $Height, [string] $Png)
+    # The view is the frame's MFC pane, control id AFX_IDW_PANE_FIRST (59648); the bars are AfxControlBar windows.
+    $view = $null; $hwnd = [IntPtr]::Zero
+    $windows = [System.Collections.Generic.List[string]]::new()
+    foreach ($c in $W::Children($Player.Main)) {
+        $r = New-Object MpcCapture.W+RECT; [void] $W::GetWindowRect($c, [ref] $r)
+        $windows.Add(('{0} {1} id={2} {3},{4}-{5},{6} children={7}' -f $c, $W::Cls($c), $W::GetDlgCtrlID($c), $r.L, $r.T, $r.R, $r.B, $W::Children($c).Count))
+        if ($W::GetDlgCtrlID($c) -eq 59648 -and -not $view) { $view = $r; $hwnd = $c }
+    }
+    if ($Png) { $windows | Set-Content ($Png -replace '\.png$', '.windows.txt') }   # every child, for when the view is not where expected
+    if (-not $view) { return -2 }
+    $vw = $view.R - $view.L; $vh = $view.B - $view.T
+    $scale = [Math]::Min($vw / $Width, $vh / $Height)
+    $pw = [int] ($Width * $scale); $ph = [int] ($Height * $scale)
+    $px = $view.L + [int] (($vw - $pw) / 2); $py = $view.T + [int] (($vh - $ph) / 2)
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap $vw, $vh
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $dc = $gfx.GetHdc()
+        $ok = $W::PrintWindow($hwnd, $dc, 2)
+        $gfx.ReleaseHdc($dc)
+        if (-not $ok) { $gfx.Dispose(); $bmp.Dispose(); return -2 }
+    } catch { $gfx.Dispose(); $bmp.Dispose(); return -2 }
+    if ($Png) { $bmp.Save($Png, [System.Drawing.Imaging.ImageFormat]::Png) }
+    $value = 0; $clean = $true
+    $y = ($py - $view.T) + [int] ($ph / 24)
+    for ($bit = 0; $bit -lt 32; $bit++) {
+        $x = ($px - $view.L) + [int] (($bit + 0.5) * $pw / 32)
+        $p = $bmp.GetPixel($x, $y)
+        $luma = (0.299 * $p.R + 0.587 * $p.G + 0.114 * $p.B)
+        if ($luma -gt 192) { $value = $value * 2 + 1 } elseif ($luma -lt 64) { $value = $value * 2 } else { $clean = $false; break }
+    }
+    $gfx.Dispose(); $bmp.Dispose()
+    if ($clean) { $value } else { -1 }
+}
+
+if ($cases -contains 'preview-after-reselect') {
+    $name = 'preview-after-reselect'
+    $problems = @()
+    New-Item -ItemType Directory -Force (Join-Path $OutDir $name) | Out-Null
+    $player = Start-CapturePlayer $name (Join-Path $OutDir "$name\unused.avi")
+    $skip = ''
+    try {
+        $dim = Control $player.Dialog $IDC_COMBO5
+        $sel = [int]$W::SendMessage($dim, $CB_GETCURSEL, [IntPtr]::Zero, [IntPtr]::Zero)
+        $size = $W::Text($dim)   # "640x480 25.00"
+        if ($size -notmatch '^(\d+)x(\d+)') { throw "cannot read the dimension from '$size'" }
+        $width = [int] $Matches[1]; $height = [int] $Matches[2]
+        $before = Get-PreviewFrameNumber $player $width $height (Join-Path $OutDir "$name\before.png")
+        Note Gray "$name`: ${width}x${height}, frame $before before any reselection"
+        if ($before -eq -2) { $skip = 'the view window could not be captured' }
+        elseif ($before -le 0) { $skip = "the preview shows no frame strip (frame $before); needs avs-vcamera" }
+        else {
+            for ($n = 1; $n -le 3; $n++) {
+                $W::SendMessage($dim, $CB_SETCURSEL, [IntPtr]$sel, [IntPtr]::Zero) | Out-Null
+                $r = [IntPtr]::Zero
+                $ok = $W::SendMessageTimeout($player.Dialog, $WM_COMMAND, [IntPtr]($IDC_COMBO5 -bor ($CBN_SELCHANGE -shl 16)), $dim, 2, 20000, [ref]$r) -ne [IntPtr]::Zero
+                if (-not $ok) { $problems += "reselection $n did not return within 20 s"; break }
+                Start-Sleep -Seconds 5
+                if ($player.Process.HasExited) { $problems += "player exited after reselection $n, code $($player.Process.ExitCode)"; break }
+                if (-not $W::Answers($player.Main, 3000)) { $problems += "main window not answering after reselection $n"; break }
+            }
+            if (-not $problems) {
+                $first = Get-PreviewFrameNumber $player $width $height (Join-Path $OutDir "$name\after-1.png")
+                Start-Sleep -Seconds 1
+                $second = Get-PreviewFrameNumber $player $width $height (Join-Path $OutDir "$name\after-2.png")
+                Note Gray "$name`: frames $first and $second a second apart after three reselections"
+                if ($first -le 0 -or $second -le 0) { $problems += "preview not showing the camera's picture after the reselections (frames $first, $second)" }
+                elseif ($second -le $first) { $problems += "preview frozen at frame $first after the reselections" }
+            }
+        }
+    } finally {
+        if (-not (Stop-CapturePlayer $player)) { $problems += 'player did not close on WM_CLOSE within 20 s' }
+    }
+    if ($skip) { $skipped++; Note Yellow "SKIP $name`: $skip" } else { Report $name $problems }
 }
 
 # --- record-camera-audio ----------------------------------------------------------------
