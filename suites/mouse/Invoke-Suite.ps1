@@ -23,6 +23,12 @@
     One more case (Run-OptionsThemeCase.guest.ps1) sits in the Options dialog: the D3D9 render
     device selection must be hidden on a one-adapter guest (#4033).
 
+    Eight cases (Run-PlayerWindowCase.guest.ps1) drive the main window, its docked panels and the
+    playlist's inline edit (#4279): the edit must survive auto-hide, a drag out of it and the mouse wheel;
+    the window must not drift when sized below its minimum with a fixed aspect ratio; the playing row must
+    be drawn while another row is renamed and when the web interface moves playback; and a docked zone
+    must not hide part of itself while the playlist is being edited.
+
     Two control cases run first, against combocase.exe, a small program with no player code in it:
 
       control-plain-windows-combo    a plain comctl32 combo never shows the hovered item, which is what
@@ -46,7 +52,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -110,6 +116,13 @@ $idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the ren
 $idOpenDir      = Get-ResourceId 'ID_FILE_OPENDIRECTORY' 33208   # the folder picker, which carries an injected check box
 $idPlayerTime   = Get-ResourceId 'IDC_PLAYERTIME' 12027       # the status bar's time label, whose parent is the bar
 
+# The player window cases (#4279): the playlist's list control, and the commands that show the playlist,
+# the Edit List editor and fullscreen. A docked bar's window id is its command's id.
+$idPlaylistList = Get-ResourceId 'IDC_PLAYLIST' 12002
+$idViewPlaylist = Get-ResourceId 'ID_VIEW_PLAYLIST' 824
+$idViewEdl      = Get-ResourceId 'ID_VIEW_EDITLISTEDITOR' 846
+$idFullscreen   = Get-ResourceId 'ID_VIEW_FULLSCREEN' 830
+
 # The hover lands this long after the click that opens the list. The defect shows up to about 100 ms; the
 # last value is the settled reference the others are compared with.
 $quickDelays = 0, 30, 60, 100
@@ -156,6 +169,20 @@ foreach ($n in 1, 2, 6) {
 }
 $haveAudioClips = -not ($audioClips.Values | Where-Object { -not (Test-Path (Join-Path $PSScriptRoot "media\$_")) })
 
+# Two clips for the player window cases: a 15 s one that ends while the playlist is being renamed, and a
+# 60 s one that outlasts every case. Video-only, small and flat, so a guest's WARP renderer has little to do.
+$pwClips = @{ 'pw-short.mkv' = 15; 'pw-long.mkv' = 60 }
+foreach ($f in $pwClips.Keys) {
+    $clip = Join-Path $PSScriptRoot "media\$f"
+    if (Test-Path $clip) { continue }
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if (-not $ffmpeg) { break }
+    New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot 'media') | Out-Null
+    & $ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=darkgreen:s=320x180:r=25:d=$($pwClips[$f])" -c:v libx264 -pix_fmt yuv420p -preset veryfast $clip
+    if ($LASTEXITCODE -ne 0) { Remove-Item $clip -Force -ErrorAction SilentlyContinue }
+}
+$havePwMedia = -not ($pwClips.Keys | Where-Object { -not (Test-Path (Join-Path $PSScriptRoot "media\$_")) })
+
 # --- target -------------------------------------------------------------------
 
 . $transport
@@ -193,7 +220,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
@@ -214,6 +241,19 @@ try {
     if ($haveAudioClips) {
         Invoke-Command -Session $session { if (-not (Test-Path 'C:\mpc-test\mouse\media')) { New-Item -ItemType Directory 'C:\mpc-test\mouse\media' | Out-Null } }
         foreach ($f in $audioClips.Values) { Copy-Item -ToSession $session (Join-Path $PSScriptRoot "media\$f") "C:\mpc-test\mouse\media\$f" -Force }
+    }
+    if ($havePwMedia) {
+        # alpha is the short clip, bravo and charlie the long one: the names are what the cases wait for
+        # in the title.
+        foreach ($f in $pwClips.Keys) { Copy-Item -ToSession $session (Join-Path $PSScriptRoot "media\$f") "C:\mpc-test\mouse\$f" -Force }
+        Invoke-Command -Session $session {
+            $pw = 'C:\mpc-test\mouse\media\pw'
+            if (Test-Path $pw) { Remove-Item $pw -Recurse -Force }
+            New-Item -ItemType Directory -Force $pw | Out-Null
+            Copy-Item 'C:\mpc-test\mouse\pw-short.mkv' "$pw\alpha.mkv"
+            Copy-Item 'C:\mpc-test\mouse\pw-long.mkv' "$pw\bravo.mkv"
+            Copy-Item 'C:\mpc-test\mouse\pw-long.mkv' "$pw\charlie.mkv"
+        }
     }
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\mouse\player\mpc-hc64.exe').VersionInfo.ProductVersion }
     Note Gray "player under test: $version from $playerDir"
@@ -695,6 +735,265 @@ try {
         $problems
     }
 
+    # The player window job (#4279): one launch of the player per case, Run-PlayerWindowCase driving the case
+    # the job names. Same scheduled-task shape as the others; $Job carries the case's own fields.
+    function Invoke-PlayerWindowJob {
+        param([string] $Name, [hashtable] $Job, [string] $IniText)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $j = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; OutDir = $guestOut; Delay = 2000; AutoHide = $false; Fullscreen = $false
+            ShowPlaylist = $true; PostCommands = @(); Panels = @(); Window = @{ X = 20; Y = 20; W = 980; H = 620 }
+            Ids = @{ PlaylistList = $idPlaylistList; ViewPlaylist = $idViewPlaylist; Fullscreen = $idFullscreen }
+        }
+        foreach ($k in $Job.Keys) { $j[$k] = $Job[$k] }
+        $jobJson = $j | ConvertTo-Json -Depth 6
+        $json = Invoke-Command -Session $session -ArgumentList $jobJson, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-PlayerWindowCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(240)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Start-Sleep -Seconds 1
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # The ini every player window case starts from: auto-hide of windowed controls off, fullscreen controls
+    # and docked panels auto-hiding after 2 s, the window placed by the guest script. $Extra overrides.
+    function PwIni {
+        param([hashtable] $Extra = @{})
+        $s = [ordered]@{
+            UpdaterAutoCheck = 0; KeepHistory = 0; Volume = 50; MPCTheme = 1; ModernThemeMode = 0; AutoZoom = 0
+            RememberWindowPos = 0; RememberWindowSize = 0; HideFullscreenControls = 1; HideFullscreenControlsPolicy = 1
+            HideFullscreenDockedPanels = 1; HideWindowedControls = 0; HideFullscreenControlsDelay = 2000
+        }
+        foreach ($k in $Extra.Keys) { $s[$k] = $Extra[$k] }
+        "[Settings]`r`n" + (($s.Keys | ForEach-Object { "$_=$($s[$_])" }) -join "`r`n") + "`r`n"
+    }
+
+    function Get-PwState { param($Job, [string] $Tag) @($Job.Run.states | Where-Object { $_.tag -eq $Tag })[0] }
+
+    # Whether the pointer was on the playlist or its edit when a state was taken.
+    function Test-OverPanel { param($State) $State.under -in 'Edit', 'SysListView32' }
+
+    # Pixels in a screen rectangle of one capture that differ from the rectangle's commonest colour by more
+    # than 48 in a channel: text on a flat row background. 0 on an empty or uniformly filled area.
+    function Get-InkPixels {
+        param([string] $Dir, $State, [int] $L, [int] $T, [int] $R, [int] $B)
+        $bmp = [System.Drawing.Bitmap]::FromFile((Join-Path $Dir $State.png))
+        try {
+            $px = New-Object 'System.Collections.Generic.List[System.Drawing.Color]'
+            $hist = @{}
+            for ($y = $T; $y -lt $B; $y++) {
+                for ($x = $L; $x -lt $R; $x++) {
+                    $c = $bmp.GetPixel($x - $State.shot.L, $y - $State.shot.T)
+                    $px.Add($c); $k = $c.ToArgb(); $hist[$k] = 1 + [int]$hist[$k]
+                }
+            }
+            $bg = [System.Drawing.Color]::FromArgb(($hist.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key)
+            @($px | Where-Object { [math]::Max([math]::Max([math]::Abs($_.R - $bg.R), [math]::Abs($_.G - $bg.G)), [math]::Abs($_.B - $bg.B)) -gt 48 }).Count
+        } finally { $bmp.Dispose() }
+    }
+
+    # Pixels of one screen rectangle that differ by more than 48 in a channel between two captures.
+    function Get-RowDifference {
+        param([string] $Dir, $A, $B, $Rect)
+        $ia = [System.Drawing.Bitmap]::FromFile((Join-Path $Dir $A.png)); $ib = [System.Drawing.Bitmap]::FromFile((Join-Path $Dir $B.png))
+        try {
+            $count = 0
+            for ($y = $Rect.T; $y -lt $Rect.B; $y++) {
+                for ($x = $Rect.L; $x -lt $Rect.R; $x++) {
+                    $p = $ia.GetPixel($x - $A.shot.L, $y - $A.shot.T); $q = $ib.GetPixel($x - $B.shot.L, $y - $B.shot.T)
+                    if ([math]::Max([math]::Max([math]::Abs($p.R - $q.R), [math]::Abs($p.G - $q.G)), [math]::Abs($p.B - $q.B)) -gt 48) { $count++ }
+                }
+            }
+            $count
+        } finally { $ia.Dispose(); $ib.Dispose() }
+    }
+
+    # The inline edit is still open in a state, and the list it belongs to is on screen.
+    function Test-EditOpen { param($State) $State -and $State.edit -ne 0 -and $State.editVisible -and $State.listVisible }
+
+    # #4279 item 3: the pointer leaves the panel while its inline edit is open, and stays away past the
+    # auto-hide delay. Unfixed, auto-hide hid the panel and ended the edit. The control: once the edit is
+    # cancelled the panel must hide after all, or auto-hide was never in force and nothing was tested.
+    function Test-PwEditLeave {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $open = Get-PwState $Job 'editOpen'; $left = Get-PwState $Job 'leftPanel'
+        if (-not (Test-EditOpen $open)) { return @('the inline edit never opened') }
+        if (Test-OverPanel $left) { return @("the pointer did not leave the panel (it was over '$($left.under)')") }
+        $problems = @()
+        $after = Get-PwState $Job 'afterDelay'
+        if (-not (Test-EditOpen $after)) { $problems += "with the pointer off the panel for $($after.t - $left.t) ms the inline edit was gone (edit open $($after.edit -ne 0), list shown $($after.listVisible)): auto-hide ended it (#4279 item 3)" }
+        $esc = Get-PwState $Job 'afterEscDelay'
+        if ($esc.listVisible) { $problems += 'the playlist never hid once the edit was cancelled: auto-hide was not in force, so the case tested nothing' }
+        $problems
+    }
+
+    # #4279 item 4: a text selection in the open edit, dragged out of the panel with the button held, held
+    # past the auto-hide delay and released there. The edit must survive the hold and the release.
+    function Test-PwEditDrag {
+        param($Job, [switch] $Fullscreen)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $open = Get-PwState $Job 'editOpen'; $sel = Get-PwState $Job 'selecting'; $out = Get-PwState $Job 'heldOutside'
+        if (-not (Test-EditOpen $open)) { return @('the inline edit never opened') }
+        if ($sel.captureClass -ne 'Edit') { return @("the button press in the edit did not start a selection (capture '$($sel.captureClass)')") }
+        if (Test-OverPanel $out) { return @("the drag did not leave the panel (pointer over '$($out.under)')") }
+        $problems = @()
+        if ($Fullscreen) {
+            $scr = $Job.Run.screen
+            if ($open.main.L -ne 0 -or $open.main.T -ne 0 -or $open.main.R -ne $scr.W -or $open.main.B -ne $scr.H) { return @("the player was not fullscreen (main window $($open.main.L),$($open.main.T),$($open.main.R),$($open.main.B))") }
+        }
+        foreach ($tag in 'heldOutsideDelay', 'afterReleaseDelay') {
+            $s = Get-PwState $Job $tag
+            if (-not (Test-EditOpen $s)) { $problems += "the inline edit was gone at $tag (edit open $($s.edit -ne 0), list shown $($s.listVisible)): auto-hide ended it (#4279 item 4)" }
+        }
+        # The control: the panel hid at some point after the edit opened, so auto-hide was in force.
+        $hid = @($Job.Run.states | Where-Object { $_.n -gt $open.n -and -not $_.listVisible })
+        if (-not $hid) { $problems += 'the playlist never hid in the whole run: auto-hide was not in force, so the case tested nothing' }
+        $problems
+    }
+
+    # #4279 item 5: wheel notches over the open edit and then over the list must neither end the edit nor
+    # change the volume. The control: the same notches over the video do change it.
+    function Test-PwEditWheel {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $open = Get-PwState $Job 'editOpen'; $over = Get-PwState $Job 'overEdit'
+        if (-not (Test-EditOpen $open)) { return @('the inline edit never opened') }
+        if ($over.under -ne 'Edit') { return @("the pointer was not over the edit for the wheel (it was over '$($over.under)')") }
+        $problems = @()
+        $v0 = Get-PwState $Job 'beforeWheelVideo'; $v1 = Get-PwState $Job 'afterWheelVideo'
+        if (-not $v0 -or -not $v1 -or $v1.volume -ge $v0.volume) { $problems += "the wheel over the video did not lower the volume ($($v0.volume) to $($v1.volume)): the wheel reached nothing, so the case tested nothing" }
+        foreach ($where in 'Edit', 'List') {
+            $states = @(0..2 | ForEach-Object { Get-PwState $Job "wheel$where$_" } | Where-Object { $_ })
+            if (-not $states) { if (-not $problems) { $problems += "no wheel was sent over the $($where.ToLower())" }; continue }
+            if ($where -eq 'List') {
+                $ol = Get-PwState $Job 'overList'
+                if ($ol.under -ne 'SysListView32') { $problems += "the pointer was not over the list for the wheel (it was over '$($ol.under)')"; continue }
+            }
+            $first = @($states | Where-Object { -not (Test-EditOpen $_) })[0]
+            if ($first) { $problems += "a wheel notch over the $($where.ToLower()) ended the inline edit ($($first.tag)) (#4279 item 5)" }
+            $moved = @($states | Where-Object { $_.volume -ne $open.volume })[0]
+            if ($moved) { $problems += "a wheel notch over the $($where.ToLower()) changed the volume from $($open.volume) to $($moved.volume) ($($moved.tag)) (#4279 item 5)" }
+        }
+        $problems
+    }
+
+    # #4279 item 6: the top-left corner dragged inwards past the minimum size with a fixed aspect ratio. The
+    # dragged corner may stop where it likes; the opposite edges, right and bottom, must not move at all.
+    function Test-PwResize {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $start = Get-PwState $Job 'start'; $held = Get-PwState $Job 'endHeld'
+        $rects = @($Job.Run.rects)
+        if ($rects.Count -lt 20) { return @("only $($rects.Count) sizing samples were recorded") }
+        if ($held.captureClass -ne 'MediaPlayerClassicW') { return @("the button press on the corner did not start a sizing loop (capture '$($held.captureClass)')") }
+        $last = $rects[-1]
+        if ($last.R - $last.L -gt $start.main.R - $start.main.L - 100) { return @('the window hardly shrank: the drag did not size it') }
+        $worst = $rects | Sort-Object { [math]::Max([math]::Abs($_.R - $start.main.R), [math]::Abs($_.B - $start.main.B)) } -Descending | Select-Object -First 1
+        $drift = [math]::Max([math]::Abs($worst.R - $start.main.R), [math]::Abs($worst.B - $start.main.B))
+        if ($drift -gt 1) { return @("the anchored edges moved: right $($start.main.R) to $($worst.R), bottom $($start.main.B) to $($worst.B) at sample $($worst.i) of $($rects.Count), pointer at $($worst.px),$($worst.py) (#4279 item 6)") }
+        # No drift only means something if the window was held at its minimum with the pointer well past it.
+        # (A drifting window follows the pointer, so this is checked after the drift, not before.)
+        if ($last.px -le $last.L + 20) { return @('the pointer never got past the window''s minimum size, so the case tested nothing') }
+        @()
+    }
+
+    # A playlist row's name, as a screen rectangle: right of the owner-drawn row number, inside the label.
+    function Get-NameArea {
+        param($State, [int] $Row)
+        $it = @($State.items | Where-Object { $_.i -eq $Row })[0]
+        if (-not $it -or $it.label.R -le $it.label.L) { return $null }
+        @{ L = $it.label.L + 20; T = $it.bounds.T + 3; R = [math]::Min($it.label.R, $it.label.L + 120); B = $it.bounds.B - 3 }
+    }
+
+    # #4279 item 9: row 0 being renamed while the clip on it ends and row 1 starts playing. Row 1 must be
+    # drawn with its name. The control: the same measure finds row 1's name before the switch.
+    function Test-PwPlayingRename {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $open = Get-PwState $Job 'editOpen'; $sw = Get-PwState $Job 'switchedWithEdit'
+        if (-not (Test-EditOpen $open)) { return @('the inline edit never opened') }
+        if ($open.title -notlike '*alpha*') { return @("row 0 was not playing when the edit opened (title '$($open.title)')") }
+        if ($sw.title -notlike '*bravo*') { return @("row 1 never started playing (title '$($sw.title)')") }
+        if (-not (Test-EditOpen $sw)) { return @('the edit was gone before row 1 started playing, so nothing was tested') }
+        $a0 = Get-NameArea $open 1; $a1 = Get-NameArea $sw 1
+        if (-not $a0 -or -not $a1) { return @('no label rectangle for row 1') }
+        $ink0 = Get-InkPixels $Job.Dir $open $a0.L $a0.T $a0.R $a0.B
+        $ink1 = Get-InkPixels $Job.Dir $sw $a1.L $a1.T $a1.R $a1.B
+        Note Gray "      row 1 name: $ink0 text pixels before the switch, $ink1 after"
+        if ($ink0 -lt 30) { return @("only $ink0 text pixels in row 1's name before the switch: the measure cannot see a name here") }
+        if ($ink1 -lt 30) { return @("row 1 started playing with row 0 being renamed and was drawn without its name ($ink1 text pixels) (#4279 item 9)") }
+        @()
+    }
+
+    # #4279 item 1: the web interface moves playback from row 0 to row 1. Both rows must be drawn as a
+    # forced redraw of the list draws them. The control: row 0 does look different afterwards.
+    function Test-PwWebIndex {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $before = Get-PwState $Job 'before'; $web = Get-PwState $Job 'afterWeb'; $ref = Get-PwState $Job 'afterRedraw'
+        if ($Job.Run.webStatus -ne 200) { return @("the web interface did not answer the command (status '$($Job.Run.webStatus)')") }
+        if ($before.title -notlike '*bravo*' -or $web.title -notlike '*charlie*') { return @("playback did not move from row 0 to row 1 (title '$($before.title)', then '$($web.title)')") }
+        $problems = @()
+        $rows = @{}
+        foreach ($i in 0, 1) { $rows[$i] = @($ref.items | Where-Object { $_.i -eq $i })[0].bounds }
+        $moved = Get-RowDifference $Job.Dir $before $ref $rows[0]
+        if ($moved -lt 100) { return @("row 0 looks the same before and after the switch ($moved px): the playing mark cannot be seen, so nothing was tested") }
+        foreach ($i in 0, 1) {
+            $d = Get-RowDifference $Job.Dir $web $ref $rows[$i]
+            Note Gray "      row ${i}: $d px differ from a forced redraw"
+            if ($d -gt 20) { $problems += "row $i was not repainted after the web interface set the index: $d px differ from a forced redraw (#4279 item 1)" }
+        }
+        $problems
+    }
+
+    # #4279 item 10: the playlist and the Edit List editor docked in one zone, the playlist's inline edit
+    # open, the pointer away past the auto-hide delay. Hiding the editor would move the playlist and end
+    # the edit, so the whole zone must stay where it was. The control: both hide once the edit is cancelled.
+    function Test-PwZone {
+        param($Job)
+        Set-StrictMode -Off   # a run that went wrong lacks states and fields; that is a failure to report, not an error
+        $open = Get-PwState $Job 'editOpen'; $left = Get-PwState $Job 'leftPanel'; $after = Get-PwState $Job 'afterDelay'; $esc = Get-PwState $Job 'afterEscDelay'
+        if (-not (Test-EditOpen $open)) { return @('the inline edit never opened') }
+        if (-not $open.panels.edl.visible) { return @('the Edit List editor was not shown') }
+        if (Test-OverPanel $left) { return @("the pointer did not leave the panel (it was over '$($left.under)')") }
+        $problems = @()
+        if (-not (Test-EditOpen $after)) { $problems += "with the pointer off the zone the inline edit was gone (edit open $($after.edit -ne 0), list shown $($after.listVisible)) (#4279 items 3, 10)" }
+        foreach ($p in 'edl', 'playlist') {
+            $a = $open.panels.$p; $b = $after.panels.$p
+            if (-not $b.visible) { $problems += "the $p panel was hidden with the playlist's edit open (#4279 item 10)" }
+            elseif ($a.rect.L -ne $b.rect.L -or $a.rect.R -ne $b.rect.R) { $problems += "the $p panel moved from $($a.rect.L)..$($a.rect.R) to $($b.rect.L)..$($b.rect.R) with the playlist's edit open (#4279 item 10)" }
+        }
+        if ($esc.panels.edl.visible -or $esc.panels.playlist.visible) { $problems += 'the zone never hid once the edit was cancelled: auto-hide was not in force, so the case tested nothing' }
+        $problems
+    }
+
     # --- cases ------------------------------------------------------------------
 
     # 1. The controls. 101 is a plain comctl32 combo; 105 is the same combo, invalidated on mouse-leave.
@@ -816,6 +1115,49 @@ try {
                 Complete-Case 'status-audio-tooltip-classic' (Test-StatusTip $c '2.0')
             }
         }
+    }
+
+    # 9. The player window, its docked panels and the playlist's inline edit under real input (#4279). One
+    #    launch per case; Run-PlayerWindowCase.guest.ps1's header says what the unfixed build did in each.
+    #    HideWindowedControls=1 is auto-hide in a window, where the panels hide like fullscreen's do.
+    $media = 'C:\mpc-test\mouse\media\pw'
+    $pwCases = [ordered]@{
+        'playlist-edit-survives-autohide' = @{ Job = @{ Case = 'edit-leave'; AutoHide = $true; Files = @("$media\charlie.mkv") }; Ini = @{ HideWindowedControls = 1 } }
+        'playlist-edit-drag-survives-autohide' = @{ Job = @{ Case = 'edit-drag'; AutoHide = $true; Files = @("$media\charlie.mkv") }; Ini = @{ HideWindowedControls = 1 } }
+        'playlist-edit-drag-survives-autohide-fullscreen' = @{ Job = @{ Case = 'edit-drag'; Fullscreen = $true; AutoHide = $true; Files = @("$media\charlie.mkv") }; Ini = @{} }
+        'playlist-edit-wheel-keeps-edit-and-volume' = @{ Job = @{ Case = 'edit-wheel'; Files = @("$media\charlie.mkv") }; Ini = @{} }
+        'window-resize-below-minimum-no-drift' = @{ Job = @{ Case = 'resize'; Files = @("$media\charlie.mkv"); Window = @{ X = 40; Y = 40; W = 900; H = 600 }; Step = 4; Steps = 140 }; Ini = @{ LimitWindowProportions = 1 } }
+        'playlist-playing-item-drawn-while-renaming' = @{ Job = @{ Case = 'playing-rename'; Files = @("$media\alpha.mkv", "$media\bravo.mkv") }; Ini = @{} }
+        'playlist-web-index-repaints' = @{ Job = @{ Case = 'web-index'; Files = @("$media\bravo.mkv", "$media\charlie.mkv"); WebPort = 13579 }; Ini = @{ EnableWebServer = 1; WebServerPort = 13579; WebServerLocalhostOnly = 1 } }
+        'panel-zone-holds-while-editing' = @{
+            Job = @{ Case = 'edit-leave'; AutoHide = $true; Files = @("$media\charlie.mkv"); PostCommands = @($idViewEdl)
+                     Panels = @(@{ Name = 'playlist'; Id = $idViewPlaylist }, @{ Name = 'edl'; Id = $idViewEdl }) }
+            # EnableEDLEditor: without it the command asks "Do you want to activate the EDL editor?" first.
+            Ini = @{ HideWindowedControls = 1; EnableEDLEditor = 1 }
+        }
+    }
+    if (-not (Wanted @($pwCases.Keys))) {
+    } elseif ($havePwMedia -and $haveLav) {
+        foreach ($name in $pwCases.Keys) {
+            if (-not $Case -or ($Case | Where-Object { $name -like $_ })) {
+                $c = Invoke-PlayerWindowJob -Name $name -Job $pwCases[$name].Job -IniText (PwIni $pwCases[$name].Ini)
+                $problems = switch ($pwCases[$name].Job.Case) {
+                    'edit-leave'     { if ($name -like 'panel-zone-*') { Test-PwZone $c } else { Test-PwEditLeave $c } }
+                    'edit-drag'      { Test-PwEditDrag $c -Fullscreen:([bool]$pwCases[$name].Job['Fullscreen']) }
+                    'edit-wheel'     { Test-PwEditWheel $c }
+                    'resize'         { Test-PwResize $c }
+                    'playing-rename' { Test-PwPlayingRename $c }
+                    'web-index'      { Test-PwWebIndex $c }
+                }
+                Complete-Case $name $problems
+            } else { $skipped++ }
+        }
+    } else {
+        $skipped += $pwCases.Count
+        $why = @()
+        if (-not $havePwMedia) { $why += 'no media\pw-*.mkv and no ffmpeg on PATH to make them' }
+        if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
+        Note Yellow "player window cases not run: $($why -join '; ')"
     }
 }
 finally {
