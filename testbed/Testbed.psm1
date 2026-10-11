@@ -127,6 +127,56 @@ function Save-VMScreen {
     $bmp.Dispose()
 }
 
+# Wait until the guest is idle: its total CPU under -BelowPercent for -ForSeconds in a row, sampled every
+# 3 s through one PowerShell Direct session, giving up (with a warning, not an error) after -TimeoutMinutes.
+# A guest just restored and booted is busy for minutes (indexing, Defender, store and cloud content), and on
+# Windows 11 that delayed the player's start by 2 s or more in cases that time its audio; a fixed sleep was
+# either too short or wasted. Returns how long it waited and the last sample.
+function Wait-GuestIdle {
+    param(
+        [Parameter(Mandatory)] [string] $VMName,
+        [Parameter(Mandatory)] [pscredential] $Credential,
+        [int] $BelowPercent = 10,
+        [int] $ForSeconds = 30,
+        [int] $TimeoutMinutes = 10
+    )
+    $started = Get-Date
+    $s = New-PSSession -VMName $VMName -Credential $Credential -ErrorAction Stop
+    try {
+        $calmSince = $null; $last = $null
+        while (((Get-Date) - $started).TotalMinutes -lt $TimeoutMinutes) {
+            $last = Invoke-Command -Session $s { [int] (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime }
+            if ($last -lt $BelowPercent) {
+                if (-not $calmSince) { $calmSince = Get-Date }
+                if (((Get-Date) - $calmSince).TotalSeconds -ge $ForSeconds) {
+                    return [pscustomobject]@{ Idle = $true; WaitedSec = [int] ((Get-Date) - $started).TotalSeconds; LastCpu = $last }
+                }
+            } else { $calmSince = $null }
+            Start-Sleep -Seconds 3
+        }
+        Write-Warning "$VMName did not stay under $BelowPercent% CPU for $ForSeconds s within $TimeoutMinutes min (last $last%); going on."
+        [pscustomobject]@{ Idle = $false; WaitedSec = [int] ((Get-Date) - $started).TotalSeconds; LastCpu = $last }
+    } finally { Remove-PSSession $s -ErrorAction SilentlyContinue }
+}
+
+# Restore a guest to a checkpoint, start it, and return once its console account has a desktop and the guest
+# has gone idle: the state a run should start from.
+function Start-TestGuest {
+    param(
+        [Parameter(Mandatory)] [string] $VMName,
+        [Parameter(Mandatory)] [pscredential] $Credential,
+        [string] $Checkpoint,
+        [double] $FloorGB = 4
+    )
+    if ((Get-VM $VMName).State -ne 'Off') { Stop-VM -Name $VMName -Force }
+    if ($Checkpoint) { Restore-VMSnapshot -VMName $VMName -Name $Checkpoint -Confirm:$false }
+    Assert-HostMemory -VMName $VMName -FloorGB ($FloorGB + (Get-VM $VMName).MemoryStartup / 1GB)
+    Start-VM -Name $VMName
+    $s = Wait-GuestSession -VMName $VMName -Credential $Credential -TimeoutMinutes 10 -FloorGB $FloorGB -Activity 'booting'
+    Remove-PSSession $s
+    Wait-GuestIdle -VMName $VMName -Credential $Credential
+}
+
 # A password made only of letters and digits: it goes into an XML answer file and a registry value,
 # and nothing in either has to be escaped.
 function New-GuestPassword {
@@ -136,4 +186,4 @@ function New-GuestPassword {
     -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
 }
 
-Export-ModuleMember -Function Get-TestbedProfile, New-IsoFromFolder, Send-VMKey, Get-HostFreeGB, Assert-HostMemory, Wait-GuestSession, New-GuestPassword, Save-VMScreen
+Export-ModuleMember -Function Get-TestbedProfile, New-IsoFromFolder, Send-VMKey, Get-HostFreeGB, Assert-HostMemory, Wait-GuestSession, New-GuestPassword, Save-VMScreen, Wait-GuestIdle, Start-TestGuest

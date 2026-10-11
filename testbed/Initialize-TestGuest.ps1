@@ -121,6 +121,13 @@ try {
         # Windows 11 the "allow public and private networks?" dialog then sat over the dialog a case was
         # measuring. The suites only talk to 127.0.0.1, which the firewall never blocks.
         & netsh.exe advfirewall set allprofiles settings inboundusernotification disable | Out-Null
+        # Less background work after boot: no Search indexing, no cloud content (Spotlight images, suggested
+        # apps). A freshly restored Windows 11 guest was busy enough to start the player 2 s late in cases
+        # that time its audio.
+        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+        Set-Service -Name WSearch -StartupType Disabled -ErrorAction SilentlyContinue
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableWindowsConsumerFeatures 1
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableCloudOptimizedContent 1
         $defender = 'skipped'
         try { Add-MpPreference -ExclusionPath 'C:\mpc-test', 'C:\vaudio', 'C:\vdisplay', 'C:\vcamera', 'C:\vtuner'; $defender = 'excluded' } catch { $defender = "not set: $($_.Exception.Message)" }
 
@@ -138,6 +145,10 @@ try {
                 ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name '(default)' -Value '' }
         }
         Set-Reg "$hk\Software\Microsoft\Windows\CurrentVersion\PushNotifications" ToastEnabled 0
+        # Spotlight, a per-user policy: on the desktop (Windows 11's rotating background with its "Learn about
+        # this picture" icon) and on the lock screen.
+        Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableWindowsSpotlightFeatures 1
+        Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableSpotlightCollectionOnDesktop 1
         Set-Reg "$hk\Control Panel\Desktop" ScreenSaveActive '0' String
         Set-Reg "$hk\Software\MPC-HC\MPC-HC\Settings" UpdaterAutoCheck 0
         Set-Reg "$hk\Software\MPC-HC\MPC-HC\Settings" DefaultCapture 1
@@ -168,6 +179,9 @@ try {
     Write-Host "  test signing on, Secure Boot off, rig-id $($state.RigId)" -ForegroundColor Green
 
     # --- 4. devices, verification, checkpoint ------------------------------------------------
+    # A rerun on the same day would take a second checkpoint of the same name, and a restore by name would
+    # then be ambiguous. The guest has already moved on from it, so it goes.
+    Get-VMSnapshot -VMName $VMName -Name $CheckpointName -ErrorAction SilentlyContinue | Remove-VMSnapshot
     if ($SkipDevices) {
         Stop-VM -Name $VMName -Force
         Checkpoint-VM -Name $VMName -SnapshotName $CheckpointName

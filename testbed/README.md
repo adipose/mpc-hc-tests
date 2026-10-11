@@ -14,11 +14,18 @@ Then run any suite against it:
 
 ```
 $env:VTUNER_TESTBED_CONFIG = 'C:\dev\mpc-testbed-vms\mpc-testbed-w11\testbed.config.psd1'
-Restore-VMCheckpoint -VMName mpc-testbed-w11 -Name testbed-ready-<date> -Confirm:$false
-Start-VM mpc-testbed-w11
+Import-Module .\Testbed.psm1
+$cred = Import-Clixml C:\dev\mpc-testbed-vms\mpc-testbed-w11\guest.cred.xml
+Start-TestGuest -VMName mpc-testbed-w11 -Credential $cred -Checkpoint testbed-ready-<date>
 ..\suites\playback\Invoke-Suite.ps1 -VMName mpc-testbed-w11 -PlayerBinary <exe>
 Stop-VM mpc-testbed-w11
 ```
+
+`Start-TestGuest` restores the checkpoint, boots, waits for the console
+account's desktop and then for the guest to go idle (total CPU under 10% for
+30 s, giving up after 10 minutes with a warning). A guest just booted is busy
+for minutes, and on Windows 11 that started the player late enough to fail
+cases that time its audio; a fixed sleep was either too short or wasted.
 
 ## What each script does
 
@@ -33,7 +40,8 @@ the account's password in clear text.
 `Initialize-TestGuest.ps1` turns Secure Boot off, then over PowerShell Direct:
 test signing on, `C:\vtuner\rig-id.txt`, permanent autologon, no sleep, lock
 screen, automatic updates or update reboots, Defender exclusions for the test
-folders; and in the console account's own hive (never the connecting session's
+folders, no firewall prompts, no Search indexing or cloud content; and in the
+console account's own hive (Spotlight off too) (never the connecting session's
 `HKCU:`) no system sounds, notifications or screen saver, and MPC-HC's
 `UpdaterAutoCheck=0` and `DefaultCapture=1`. After a restart it checks test
 signing took, then installs and verifies the virtual audio endpoint, display
