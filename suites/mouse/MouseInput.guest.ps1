@@ -57,6 +57,17 @@ public class MouseRig {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr r, IntPtr rgn, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr p, IntPtr a, IntPtr size, uint type, uint protect);
+  [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr p, IntPtr a, IntPtr size, uint type);
+  [DllImport("kernel32.dll")] static extern bool WriteProcessMemory(IntPtr p, IntPtr a, int[] b, IntPtr n, out IntPtr w);
+  [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr p, IntPtr a, int[] b, IntPtr n, out IntPtr r);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr p);
@@ -98,6 +109,46 @@ public class MouseRig {
     }, IntPtr.Zero);
     return found;
   }
+  // A descendant of the given window class, visible or not.
+  public static IntPtr FindChildByClass(IntPtr root, string cls) {
+    IntPtr found = IntPtr.Zero;
+    EnumChildWindows(root, delegate(IntPtr h, IntPtr l) {
+      if (ClassOf(h) == cls) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  // The class of the window under a screen point. Not where input goes (see the README), but what a
+  // record needs to show the pointer was where the case meant it to be.
+  public static string ClassAt(int x, int y) {
+    POINT p = new POINT(); p.X = x; p.Y = y;
+    IntPtr h = WindowFromPoint(p);
+    return h == IntPtr.Zero ? "" : ClassOf(h);
+  }
+  // A list view row of another process, in screen coordinates: LVM_GETITEMRECT takes a pointer, so the
+  // RECT is allocated in the list's process for the call. code is LVIR_BOUNDS (0), LVIR_ICON (1) or
+  // LVIR_LABEL (2). An empty rect when the row does not exist.
+  public static RECT ListItemRect(IntPtr list, int item, int code) {
+    RECT r = new RECT();
+    uint pid; GetWindowThreadProcessId(list, out pid);
+    IntPtr hp = OpenProcess(0x0008 | 0x0010 | 0x0020 | 0x0400, false, pid);   // VM_OPERATION|VM_READ|VM_WRITE|QUERY_INFORMATION
+    if (hp == IntPtr.Zero) return r;
+    IntPtr mem = VirtualAllocEx(hp, IntPtr.Zero, (IntPtr)16, 0x3000, 4);      // MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE
+    int[] buf = new int[] { code, 0, 0, 0 }; IntPtr n;
+    IntPtr ok = IntPtr.Zero;
+    if (mem != IntPtr.Zero) {
+      WriteProcessMemory(hp, mem, buf, (IntPtr)16, out n);
+      ok = SendMessage(list, 0x100E, (IntPtr)item, mem);                           // LVM_GETITEMRECT
+      ReadProcessMemory(hp, mem, buf, (IntPtr)16, out n);
+      VirtualFreeEx(hp, mem, IntPtr.Zero, 0x8000);
+    }
+    CloseHandle(hp);
+    if (ok == IntPtr.Zero) return r;
+    POINT a = new POINT(); a.X = buf[0]; a.Y = buf[1]; POINT b = new POINT(); b.X = buf[2]; b.Y = buf[3];
+    ClientToScreen(list, ref a); ClientToScreen(list, ref b);
+    r.L = a.X; r.T = a.Y; r.R = b.X; r.B = b.Y;
+    return r;
+  }
   // Which window holds the mouse capture on the thread that owns h.
   public static IntPtr CaptureOf(IntPtr h) {
     uint pid; uint tid = GetWindowThreadProcessId(h, out pid);
@@ -111,7 +162,7 @@ public class MouseRig {
     return GetGUIThreadInfo(tid, ref g) ? g.hwndFocus : IntPtr.Zero;
   }
 
-  const uint MOVE = 0x0001, LDOWN = 0x0002, LUP = 0x0004, RDOWN = 0x0008, RUP = 0x0010, ABSOLUTE = 0x8000;
+  const uint MOVE = 0x0001, LDOWN = 0x0002, LUP = 0x0004, RDOWN = 0x0008, RUP = 0x0010, WHEEL = 0x0800, ABSOLUTE = 0x8000;
   static INPUT Ev(uint flags, int x, int y) {
     INPUT i = new INPUT(); i.type = 0;
     i.mi.dwFlags = flags;
@@ -126,6 +177,15 @@ public class MouseRig {
   public static uint MoveTo(int x, int y) { List<INPUT> l = new List<INPUT>(); l.Add(Ev(MOVE | ABSOLUTE, x, y)); return Send(l); }
   public static uint Click() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(LDOWN, 0, 0)); l.Add(Ev(LUP, 0, 0)); return Send(l); }
   public static uint ClickRight() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(RDOWN, 0, 0)); l.Add(Ev(RUP, 0, 0)); return Send(l); }
+  // The left button's two halves on their own, for a drag or a press held while the pointer moves.
+  public static uint ButtonDown() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(LDOWN, 0, 0)); return Send(l); }
+  public static uint ButtonUp() { List<INPUT> l = new List<INPUT>(); l.Add(Ev(LUP, 0, 0)); return Send(l); }
+  // One wheel event at the pointer; 120 is one notch, negative is towards the user. It arrives through the
+  // input queue, so a WH_MOUSE hook in the target sees it, which a posted WM_MOUSEWHEEL never passes.
+  public static uint Wheel(int delta) {
+    INPUT i = new INPUT(); i.type = 0; i.mi.dwFlags = WHEEL; i.mi.mouseData = unchecked((uint)delta);
+    List<INPUT> l = new List<INPUT>(); l.Add(i); return Send(l);
+  }
   // One real key press (down, up) with the scan code the layout would produce, as a hand would type it.
   public static uint KeyPress(ushort vk) {
     KEYINPUT d = new KEYINPUT(); d.type = 1; d.ki.wVk = vk; d.ki.wScan = (ushort)MapVirtualKey(vk, 0);
@@ -168,6 +228,20 @@ function Save-ScreenRegion {
     $g.Dispose()
     $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
+}
+
+# A window's part of the screen, clipped to the screen; the whole screen when too little of the window is on
+# it (a panel auto-hidden off the edge, or a window dragged off). Returns the region captured, which is what
+# maps a screen point to a pixel of the capture.
+function Save-WindowShot {
+    param([string] $Path, [IntPtr] $Hwnd)
+    $sw = [MouseRig]::GetSystemMetrics(0); $sh = [MouseRig]::GetSystemMetrics(1)
+    $r = New-Object MouseRig+RECT
+    [void][MouseRig]::GetWindowRect($Hwnd, [ref]$r)
+    $L = [Math]::Max(0, $r.L); $T = [Math]::Max(0, $r.T); $R = [Math]::Min($sw, $r.R); $B = [Math]::Min($sh, $r.B)
+    if ($R - $L -lt 50 -or $B - $T -lt 50) { $L = 0; $T = 0; $R = $sw; $B = $sh }
+    Save-ScreenRegion $Path $L $T $R $B
+    @{ L = $L; T = $T; R = $R; B = $B }
 }
 
 function Get-WindowTextOf {
