@@ -115,7 +115,7 @@ if (-not (Test-Path $clip)) {
 # --- target ---------------------------------------------------------------------
 
 . $transport
-$cfg = Get-TestBedConfig
+$cfg = Get-TestBedConfig -Guest $VMName
 $session = Connect-TestGuest -Guest $VMName
 try {
     $console = Invoke-Command -Session $session { (Get-CimInstance Win32_ComputerSystem).UserName }

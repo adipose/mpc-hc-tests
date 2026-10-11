@@ -199,7 +199,7 @@ if ($VMName) {
     $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
     if (-not (Test-Path $transport)) { throw 'emulator submodule not initialised (git submodule update --init emulator)' }
     . $transport
-    $cfg = Get-TestBedConfig
+    $cfg = Get-TestBedConfig -Guest $VMName
 
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $OutDir = (Resolve-Path $OutDir).Path
@@ -353,6 +353,11 @@ function Start-CapturePlayer {
     Copy-Item $PlayerBinary (Join-Path $dir 'mpc-hc64.exe') -Force
     $mpcvr = Join-Path (Split-Path $PlayerBinary -Parent) 'MPCVR'
     if (Test-Path $mpcvr) { Copy-Item $mpcvr $dir -Recurse -Force }
+    # EVR-CP needs D3DX9_43.dll beside the exe. The Windows 10 pool guests also carry one in System32, which hid
+    # this; a clean Windows 11 guest does not, and the player stopped on a "missing d3dx9_43.dll" box with the
+    # capture graph half built, so every case timed out.
+    $d3dx = Join-Path (Split-Path $PlayerBinary -Parent) 'D3DX9_43.dll'
+    if (Test-Path $d3dx) { Copy-Item $d3dx $dir -Force }
     $extra = ($Settings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)`r`n" }) -join ''
     @"
 [Settings]

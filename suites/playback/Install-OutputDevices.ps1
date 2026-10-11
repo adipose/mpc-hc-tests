@@ -55,19 +55,11 @@ foreach ($need in (Join-Path $vaudio 'build\out\x64\vaudio.sys'), (Join-Path $va
 }
 . (Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1')
 
-function Wait-Heartbeat {
-    $deadline = (Get-Date).AddMinutes(6)
-    do {
-        Start-Sleep -Seconds 5
-        $hb = (Get-VMIntegrationService -VMName $VMName -Name Heartbeat).PrimaryStatusDescription
-    } until ($hb -eq 'OK' -or (Get-Date) -gt $deadline)
-    if ($hb -ne 'OK') { throw "$VMName never reported a heartbeat; judge a wedged guest by heartbeat, not by State." }
-}
-
 Write-Host "=== $VMName ===" -ForegroundColor Cyan
 if ((Get-VM $VMName).State -ne 'Running') { Start-VM $VMName }
-Wait-Heartbeat
-Start-Sleep -Seconds 45     # auto-logon and the shell
+# The one boot wait every guest gets: the console account's desktop, then the guest idle.
+$ready = Wait-TestGuestReady -Guest $VMName
+Write-Host "  ready: desktop after $($ready.BootToDesktopSec) s, idle after a further $($ready.IdleWaitSec) s"
 
 $session = $null
 for ($i = 0; $i -lt 12 -and -not $session; $i++) { try { $session = Connect-TestGuest -Guest $VMName } catch { Start-Sleep -Seconds 10 } }
@@ -77,7 +69,7 @@ try {
     $rigId = Invoke-Command -Session $session { if (Test-Path 'C:\vtuner\rig-id.txt') { (Get-Content 'C:\vtuner\rig-id.txt' -Raw).Trim() } }
     if ($rigId -ne $VMName) { throw "rig-id.txt says '$rigId', expected '$VMName'. Stopping: I do not know which guest this is." }
 
-    if (-not $ConsoleUser) { $ConsoleUser = (Get-TestBedConfig).GuestConsoleUser }
+    if (-not $ConsoleUser) { $ConsoleUser = (Get-TestBedConfig -Guest $VMName).GuestConsoleUser }
     if (-not $ConsoleUser) { $ConsoleUser = ((Invoke-Command -Session $session { (Get-CimInstance Win32_ComputerSystem).UserName }) -split '\\')[-1] }
     if (-not $ConsoleUser) { throw "Nobody is logged on at the console of $VMName; the audio check needs a desktop session." }
 

@@ -101,7 +101,7 @@ if ($text.IndexOf('dvbscansave', [StringComparison]::Ordinal) -lt 0) {
 # --- target -------------------------------------------------------------------
 
 . $transport
-$cfg = Get-TestBedConfig
+$cfg = Get-TestBedConfig -Guest $VMName
 $range = (Import-PowerShellDataFile $ranges)[$Standard]
 $session = Connect-TestGuest -Guest $VMName
 try {

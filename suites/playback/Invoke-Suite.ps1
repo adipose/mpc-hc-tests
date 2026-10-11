@@ -89,7 +89,7 @@ if (-not $playerDir) { throw 'No player build: pass -PlayerBinary or build this 
 # --- target -------------------------------------------------------------------
 
 . $transport
-$cfg = Get-TestBedConfig
+$cfg = Get-TestBedConfig -Guest $VMName
 $session = Connect-TestGuest -Guest $VMName
 try {
     if ($InstallDrivers) {
@@ -794,13 +794,16 @@ try {
 
     # 6. Repeat forever, per file: the 4 s clip is still playing when the window is closed at 10 s, and it is the
     #    same tones on the second time round. (#1691, #1850, #2488, #3324, #3738.)
+    #    The close is 10 s after launch, so the capture is 10 s less however long the player took to start
+    #    sounding: about 0.5 s on the Windows 10 guests, 2.3 s once on a Windows 11 guest, which failed a
+    #    +-1 s tolerance. +-3 s: a repeat that does not happen stops after the clip's 4 s, far outside it.
     $stereo = $clips.clips.'stereo.mkv'     # case 7 asserts on it too, so it is defined outside the filters
     if (Test-CaseSelected 'repeat-file-forever') {
         $c = Invoke-PlayerCase -Name 'repeat-file-forever' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ Loop = 1; LoopMode = 0 } -CloseAtSec 10
         Complete-Case 'repeat-file-forever' @(
             (Get-ProcessProblem $c.Run),
-            (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0),
-            (Test-Audio $c.Wav $stereo.audio[0].tones 10 1.0 -SkipSeconds 6)
+            (Test-Audio $c.Wav $stereo.audio[0].tones 10 3.0),
+            (Test-Audio $c.Wav $stereo.audio[0].tones 10 3.0 -SkipSeconds 6)
         )
     }
 

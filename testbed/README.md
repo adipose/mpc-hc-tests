@@ -27,6 +27,29 @@ account's desktop and then for the guest to go idle (total CPU under 10% for
 for minutes, and on Windows 11 that started the player late enough to fail
 cases that time its audio; a fixed sleep was either too short or wasted.
 
+## Adding a built guest to a shared config or pool
+
+A guest with its own account and checkpoint joins a shared
+`testbed.config.psd1` through a `Guests` entry, which `Get-TestBedConfig` and
+`Connect-TestGuest` (emulator\tools\GuestTransport.ps1) apply whenever that
+guest is the one being driven:
+
+```
+Guests = @{
+    'mpc-testbed-w11' = @{
+        CredentialPath   = 'C:\dev\mpc-testbed-vms\mpc-testbed-w11\guest.cred.xml'
+        GuestConsoleUser = 'mpctest'
+        Checkpoint       = 'testbed-ready-20261011'
+    }
+}
+```
+
+A session that was handed the guest then needs only its name:
+`Restore-TestGuest -Guest mpc-testbed-w11` (its own checkpoint, boot, desktop,
+idle), and every suite with `-VMName mpc-testbed-w11`. The credential file is
+DPAPI-encrypted for the account that built the guest, so the config must be
+used by that same Windows account.
+
 ## What each script does
 
 `New-TestGuest.ps1` creates the VM (Generation 2, fixed memory, a virtual TPM

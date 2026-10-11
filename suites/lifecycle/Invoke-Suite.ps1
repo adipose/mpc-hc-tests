@@ -89,7 +89,7 @@ $playerDir = if ($PlayerBinary) { Split-Path (Resolve-Path $PlayerBinary).Path -
 if (-not $playerDir) { throw 'No player build: pass -PlayerBinary or build this repository (bin\mpc-hc_x64\mpc-hc64.exe).' }
 
 . $transport
-$cfg = Get-TestBedConfig
+$cfg = Get-TestBedConfig -Guest $VMName
 $session = Connect-TestGuest -Guest $VMName
 try {
     $console = Invoke-Command -Session $session { (Get-CimInstance Win32_ComputerSystem).UserName }

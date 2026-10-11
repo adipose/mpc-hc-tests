@@ -124,7 +124,7 @@ try {
 
     # Wrapped: a remote call returning one item yields a bare string, and .Count
     # on that throws under StrictMode rather than reporting 1.
-    $consoleUser = (Get-TestBedConfig).GuestConsoleUser
+    $consoleUser = (Get-TestBedConfig -Guest $VMName).GuestConsoleUser
     $captured = @(Invoke-Command -Session $session -ArgumentList $GuestSnapshotDir, $AdvanceDelayMs, $consoleUser -ScriptBlock {
         param($SnapDir, $DelayMs, $ConsoleUser)
 
