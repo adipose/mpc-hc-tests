@@ -117,6 +117,10 @@ try {
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' NoAutoUpdate 1
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' NoAutoRebootWithLoggedOnUsers 1
         Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\BootAnimation' DisableStartupSound 1
+        # No firewall prompt when a test program opens a listening socket. MPC-HC's web server does, and on
+        # Windows 11 the "allow public and private networks?" dialog then sat over the dialog a case was
+        # measuring. The suites only talk to 127.0.0.1, which the firewall never blocks.
+        & netsh.exe advfirewall set allprofiles settings inboundusernotification disable | Out-Null
         $defender = 'skipped'
         try { Add-MpPreference -ExclusionPath 'C:\mpc-test', 'C:\vaudio', 'C:\vdisplay', 'C:\vcamera', 'C:\vtuner'; $defender = 'excluded' } catch { $defender = "not set: $($_.Exception.Message)" }
 
@@ -125,10 +129,14 @@ try {
         $sid = ([Security.Principal.NTAccount] $user).Translate([Security.Principal.SecurityIdentifier]).Value
         $hk = "Registry::HKEY_USERS\$sid"
         if (-not (Test-Path $hk)) { throw "The hive of $user ($sid) is not loaded: is $user logged on at the console?" }
-        Set-Reg "$hk\AppEvents\Schemes" '(default)' '.None' String
-        Get-ChildItem "$hk\AppEvents\Schemes\Apps" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.PSChildName -eq '.Current' } |
-            ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name '(default)' -Value '' }
+        # No sounds, in the console account and in the hive Windows uses before anyone has logged on (.DEFAULT):
+        # a chime at boot was captured on Windows 11 even with the console account silenced.
+        foreach ($soundHive in $hk, 'Registry::HKEY_USERS\.DEFAULT') {
+            Set-Reg "$soundHive\AppEvents\Schemes" '(default)' '.None' String
+            Get-ChildItem "$soundHive\AppEvents\Schemes\Apps" -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -eq '.Current' } |
+                ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name '(default)' -Value '' }
+        }
         Set-Reg "$hk\Software\Microsoft\Windows\CurrentVersion\PushNotifications" ToastEnabled 0
         Set-Reg "$hk\Control Panel\Desktop" ScreenSaveActive '0' String
         Set-Reg "$hk\Software\MPC-HC\MPC-HC\Settings" UpdaterAutoCheck 0

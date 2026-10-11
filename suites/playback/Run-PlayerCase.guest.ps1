@@ -64,7 +64,10 @@ param(
                                          # to the top-level dialog holding the control (1 IDOK, 2 IDCANCEL);
                                          # <sec>:size:<ctrl>:<px> grows that dialog by px each way;
                                          # <sec>:dpi:0:<percent> sets the primary monitor's display scale
-                                         # (put back to 100% when the steps are done). A probe also records
+                                         # (put back to 100% when the steps are done; the effective DPI is
+                                         # recorded, since Windows 11 keeps it at the monitor's highest
+                                         # offered scale when asked for more). <sec>:shot:0 saves the whole
+                                         # desktop as a png. A probe also records
                                          # the control's and its dialog's screen rects. <sec>:fprobe:<ctrl>
                                          # probes a control of the player's frame instead (status bar,
                                          # toolbars): its screen rect and window text.
@@ -84,6 +87,27 @@ param(
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o') }
 $script:dpiChanged = $false
+
+# Measure in physical pixels. Windows PowerShell is DPI unaware; on Windows 11 a change of the display scale
+# while it runs virtualizes its coordinates (the 1024x768 screen read 819x614 at 125%, and every window rect
+# came back divided by 1.25), so rects, crops and desktop shots taken after a dpi step were in the wrong
+# space. Per-monitor aware on this thread (the one every step runs on) reads the same on 10 and 11.
+Add-Type -Namespace MpcTest -Name DpiAware -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SetThreadDpiAwarenessContext(System.IntPtr context);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr MonitorFromPoint(long point, uint flags);
+[System.Runtime.InteropServices.DllImport("shcore.dll")]
+public static extern int GetDpiForMonitor(System.IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+'@
+[void] [MpcTest.DpiAware]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))   # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+
+# The primary monitor's effective DPI as a per-monitor aware application sees it.
+function Get-PrimaryDpi {
+    $x = [uint32] 0; $y = [uint32] 0
+    [void] [MpcTest.DpiAware]::GetDpiForMonitor([MpcTest.DpiAware]::MonitorFromPoint(0, 1), 0, [ref] $x, [ref] $y)   # MONITOR_DEFAULTTOPRIMARY, MDT_EFFECTIVE_DPI
+    [int] $x
+}
 
 if ($true) {   # always: Send-Close finds the player's frame by class for every close, not only these options
     # The title-bar X posts WM_SYSCOMMAND/SC_CLOSE to the window, not WM_CLOSE; the player has handled it on its
@@ -516,10 +540,29 @@ public static class Dpi {
 
 function Invoke-ControlStep {
     param([int] $ProcessId, $Step)
+    if ($Step.op -eq 'shot') {
+        # <sec>:shot:0: the whole desktop as the console user sees it, saved as <out>-shot-<sec>.png beside -Out
+        # (Invoke-PlayerCase copies it back). For seeing what a case's window actually looked like, when a
+        # crop or a measurement does not add up.
+        Add-Type -AssemblyName System.Drawing, System.Windows.Forms
+        $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $bmp = [System.Drawing.Bitmap]::new($vs.Width, $vs.Height)
+        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+        $gfx.CopyFromScreen($vs.Left, $vs.Top, 0, 0, $bmp.Size)
+        $file = Join-Path (Split-Path $Out) ('{0}-shot-{1}.png' -f [IO.Path]::GetFileNameWithoutExtension($Out), $Step.at)
+        $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+        $gfx.Dispose(); $bmp.Dispose()
+        return [ordered]@{ at = $Step.at; op = 'shot'; ctrl = 0; screen = @($vs.Left, $vs.Top, $vs.Width, $vs.Height); file = (Split-Path $file -Leaf) }
+    }
     if ($Step.op -eq 'dpi') {
         # <sec>:dpi:0:<percent>, no control: the primary monitor's scale. The runner puts it back to 100%.
         $script:dpiChanged = $true
-        return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = (Set-PrimaryScale ([int] $Step.value)) }
+        $set = Set-PrimaryScale ([int] $Step.value)
+        # What Windows actually applied. Windows 11 accepts and reports a scale above the highest one the
+        # monitor offers (150% where a 1024x768 screen offers up to 125%) but keeps the effective DPI at 125%;
+        # Windows 10 applies it. A case compares this with what it asked for before blaming the player.
+        Start-Sleep -Milliseconds 1500
+        return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = $set; effectiveDpi = (Get-PrimaryDpi) }
     }
     # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
     # sbar captures the bar such a control sits in, redraw repaints it.
@@ -617,25 +660,31 @@ function Invoke-ControlStep {
             $d = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($root, $d); $record.dialogRect = $d
             Add-Type -AssemblyName System.Drawing
             $gw = $g[2] - $g[0]; $gh = $g[3] - $g[1]
+            $dw = $d[2] - $d[0]; $dh = $d[3] - $d[1]
             if ($gw -gt 0 -and $gh -gt 0) {
-                $bmp = [System.Drawing.Bitmap]::new($gw, $gh)
-                $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-                $gfx.CopyFromScreen($g[0], $g[1], 0, 0, $bmp.Size)
+                # The dialog draws itself into a bitmap (PrintWindow, PW_RENDERFULLCONTENT), rather than the
+                # screen being copied: after a scale change a screen copy from this script disagreed with its
+                # window rects on Windows 10 (crop of the wrong place) and a window on top (Windows 11's
+                # firewall prompt) covered the grip. The bitmap is the window's own pixels, window-relative.
+                $whole = [System.Drawing.Bitmap]::new($dw, $dh)
+                $gfx = [System.Drawing.Graphics]::FromImage($whole)
+                $hdc = $gfx.GetHdc()
+                $record.printed = [MpcTest.User32]::PrintWindow($root, $hdc, 2)
+                $gfx.ReleaseHdc($hdc); $gfx.Dispose()
+                $gx = $g[0] - $d[0]; $gy = $g[1] - $d[1]
                 $light = 0; $dark = 0
                 for ($y = 0; $y -lt $gh; $y++) { for ($x = 0; $x -lt $gw; $x++) {
-                    $px = $bmp.GetPixel($x, $y)
+                    $px = $whole.GetPixel($gx + $x, $gy + $y)
                     if ($px.R -gt 200 -and $px.G -gt 200 -and $px.B -gt 200) { $light++ } elseif ($px.R -lt 80 -and $px.G -lt 80 -and $px.B -lt 80) { $dark++ }
                 } }
                 $record.pixels = $gw * $gh; $record.light = $light; $record.dark = $dark
-                $gfx.Dispose(); $bmp.Dispose()
-                $cw = [math]::Min(2 * $gw, $d[2] - $d[0]); $ch = [math]::Min(2 * $gh, $d[3] - $d[1])
-                $crop = [System.Drawing.Bitmap]::new($cw, $ch)
-                $gfx = [System.Drawing.Graphics]::FromImage($crop)
-                $gfx.CopyFromScreen($d[2] - $cw, $d[3] - $ch, 0, 0, $crop.Size)
+                # The saved crop keeps its old geometry (twice the grip, from the dialog's bottom-right corner).
+                $cw = [math]::Min(2 * $gw, $dw); $ch = [math]::Min(2 * $gh, $dh)
+                $crop = $whole.Clone([System.Drawing.Rectangle]::new($dw - $cw, $dh - $ch, $cw, $ch), $whole.PixelFormat)
                 $file = Join-Path (Split-Path $Out) ('{0}-grip-{1}.png' -f [IO.Path]::GetFileNameWithoutExtension($Out), $Step.at)
                 $crop.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
                 $record.file = Split-Path $file -Leaf
-                $gfx.Dispose(); $crop.Dispose()
+                $crop.Dispose(); $whole.Dispose()
             }
         }
     } elseif ($Step.op -eq 'vwatch') {

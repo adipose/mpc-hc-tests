@@ -390,10 +390,10 @@ try {
             }
         }
 
-        # Files the control steps saved beside the result (the grip and status bar crops), named after it on the guest.
+        # Files the control steps saved beside the result (the grip and status bar crops, desktop shots), named after it on the guest.
         foreach ($step in @($(if ($run.PSObject.Properties['controls']) { $run.controls }))) {
             if ($step.PSObject.Properties['file'] -and $step.file) {
-                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-(grip|sbar)-', "$Name-`$1-")) -Force
+                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-(grip|sbar|shot)-', "$Name-`$1-")) -Force
             }
         }
 
@@ -1370,22 +1370,28 @@ try {
     #    wm_command=-3&index=<n> (CMD_SETPLAYLISTINDEX), which SetSelIdx + posted
     #    WM_MPC_OPENCURPLAYLIST turn into an open of that entry. chapters.mkv (three chapters)
     #    and twotracks.mkv on the command line are a two-entry playlist; the click on entry 2
-    #    (index 1) at 3 s must open twotracks.mkv: a second capture sounding its default track's
+    #    (index 1) at 6 s must open twotracks.mkv: the last capture sounds its default track's
     #    1200 Hz. On the unfixed player nothing opens (the id means nothing without the fix), so
-    #    only chapters.mkv's 12 s are heard. LoopMode=0 keeps the player from advancing by itself
-    #    once twotracks.mkv ends; the window is closed at 9 s.
+    #    the last capture is chapters.mkv (440/880). LoopMode=0 keeps the player from advancing by
+    #    itself once twotracks.mkv ends; the window is closed at 12 s.
+    #    What is asserted is the clicked entry being heard, not chapters.mkv being heard first: on a
+    #    slow first launch (a Windows 11 guest just restored from its checkpoint) the player had not
+    #    started chapters.mkv's audio by the click, so the only capture was twotracks.mkv's.
     if (Test-CaseSelected 'web-playlist-click-with-chapters') {
         $c = Invoke-PlayerCase -Name 'web-playlist-click-with-chapters' `
             -Clip 'chapters.mkv' -Switches '"C:\mpc-test\media\twotracks.mkv" /play' `
-            -Settings ($web + @{ LoopMode = 0 }) -CloseAtSec 9 `
-            -HttpAt '3|POST|/command.html|wm_command=-3&index=1'
+            -Settings ($web + @{ LoopMode = 0 }) -CloseAtSec 12 `
+            -HttpAt '6|POST|/command.html|wm_command=-3&index=1'
         $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]
         $answers = @($c.Run.http)
         $problems = @((Get-ProcessProblem $c.Run))
         if (-not $c.Run.closeSent) { $problems += 'the close request did not reach a window' }
         if (-not $answers -or $answers[0].status -ne 200) { $problems += "the playlist-click command got status $(if ($answers) { $answers[0].status } else { 'none' }), expected 200" }
-        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (chapters.mkv, then the clicked entry)" }
-        else { $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds 1.0) }
+        if ($c.Wavs.Count -eq 0) { $problems += 'no audio reached the endpoint' }
+        else {
+            $clicked = Test-Audio $c.Wavs[-1] $second.tones $seconds 1.0
+            if ($clicked) { $problems += "the last of $($c.Wavs.Count) capture(s) is not the clicked entry (twotracks.mkv, $($second.tones -join '/') Hz): $clicked" }
+        }
         Complete-Case 'web-playlist-click-with-chapters' $problems
     }
 
@@ -2007,19 +2013,25 @@ try {
 
     # 47. A modeless resizable dialog follows a display scale change: e704c6b7af (#3678, "dpi-aware
     #    dialog to support modeless dialogs ..."). Organize Favorites (937; it needs a favorite to be
-    #    enabled) opens at 100%, the primary monitor goes to 150% under it, and the dialog, its tab
+    #    enabled) opens at 100%, the primary monitor goes to 125% under it, and the dialog, its tab
     #    control (IDC_TAB1 11200) and its OK button (IDOK 1) are measured before and after.
-    #    Windows resizes the dialog window itself on both builds (measured 499x358 -> 570x472, the
-    #    same on unfixed 2.5.5), so that proves nothing; what the fix does is re-lay the controls out
-    #    from the template at the new DPI. Measured on develop: OK 101x26 -> 116x35. On 2.5.5 it
-    #    stays 102x26, a 100% button in a 150% dialog. Asserted: OK at least x1.25 taller and x1.1
-    #    wider, and still inside the dialog.
+    #    Windows resizes the dialog window itself on both builds, so that proves nothing; what the fix
+    #    does is re-lay the controls out from the template at the new DPI. On unfixed 2.5.5 the OK
+    #    button keeps its 100% size in a scaled dialog (x1.00). Asserted, for the scale s Windows
+    #    actually applied: OK at least 1 + (s-1)/2 times taller and 1 + (s-1)/5 wider (at 150%, x1.25
+    #    and x1.1, the values this case first used on Windows 10), and still inside the dialog.
+    #    125%, not 150%: a 1024x768 guest offers up to 125%, and Windows 11 keeps the effective DPI at
+    #    125% when asked for more, where Windows 10 applies it. The runner reads the effective DPI
+    #    after the change, and a change that did not take is reported as such.
     if (Test-CaseSelected 'modeless-dialog-follows-dpi-change') {
         $c = Invoke-PlayerCase -Name 'modeless-dialog-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' `
             -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937' `
-            -ControlAt '3:probe:11200,3.2:probe:1,4:dpi:0:150,8:probe:11200,8.2:probe:1,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
+            -ControlAt '3:probe:11200,3.2:probe:1,4:dpi:0:125,8:probe:11200,8.2:probe:1,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
         $problems = @(Get-ProcessProblem $c.Run)
         $steps = @($c.Run.controls)
+        $dpiStep = $steps | Where-Object { $_.op -eq 'dpi' -and $_.percent -eq 125 } | Select-Object -First 1
+        $scale = if ($dpiStep -and $dpiStep.effectiveDpi) { $dpiStep.effectiveDpi / 96 } else { 0 }
+        if ([math]::Abs($scale - 1.25) -gt 0.01) { $problems += "the display scale did not change to 125% (effective DPI $(if ($dpiStep) { $dpiStep.effectiveDpi } else { 'unread' })), so the case proves nothing" }
         $probeOf = { param([int] $Ctrl, [bool] $After) $steps | Where-Object { $_.op -eq 'probe' -and $_.ctrl -eq $Ctrl -and (($_.at -gt 5) -eq $After) } | Select-Object -First 1 }
         $ok0 = & $probeOf 1 $false; $ok1 = & $probeOf 1 $true
         if (-not $ok0 -or -not $ok0.found -or -not $ok1 -or -not $ok1.found) {
@@ -2028,7 +2040,7 @@ try {
             $w = { param($r) $r[2] - $r[0] }; $h = { param($r) $r[3] - $r[1] }
             Note Gray ("      dialog {0}x{1} -> {2}x{3}, OK {4}x{5} -> {6}x{7}" -f (& $w $ok0.dialogRect), (& $h $ok0.dialogRect), (& $w $ok1.dialogRect), (& $h $ok1.dialogRect), (& $w $ok0.rect), (& $h $ok0.rect), (& $w $ok1.rect), (& $h $ok1.rect))
             $hRatio = (& $h $ok1.rect) / (& $h $ok0.rect); $wRatio = (& $w $ok1.rect) / (& $w $ok0.rect)
-            if ($hRatio -lt 1.25 -or $wRatio -lt 1.1) { $problems += ("the OK button changed x{0:N2} wide, x{1:N2} tall for a 100%->150% change: the controls were not laid out again at the new DPI" -f $wRatio, $hRatio) }
+            if ($scale -gt 1 -and ($hRatio -lt 1 + ($scale - 1) / 2 -or $wRatio -lt 1 + ($scale - 1) / 5)) { $problems += ("the OK button changed x{0:N2} wide, x{1:N2} tall for a 100%->{2:N0}% change: the controls were not laid out again at the new DPI" -f $wRatio, $hRatio, ($scale * 100)) }
             $d = $ok1.dialogRect; $r = $ok1.rect
             if ($r[2] -gt $d[2] -or $r[3] -gt $d[3]) { $problems += "after the change the OK button ($($r -join ',')) reaches outside the dialog ($($d -join ','))" }
         }
@@ -2088,11 +2100,12 @@ try {
     }
 
     # 49. The size grip after a live DPI change, modern dark theme: #4085, 410e511aa6 (of #4037, #4140).
-    #    Organize Favorites at 100%, then the primary monitor to 150%; the grip's corner is captured
+    #    Organize Favorites at 100%, then the primary monitor to 125%; the grip's corner is captured
     #    before and after (the runner's grip step). The grip glyph is six equal squares in the theme's
     #    grip colour (191,191,191 in Dark). Unfixed 2.8.0 redraws it after the change into a grid of
     #    the wrong size, and the squares come out clipped into bars; the fix draws six whole squares.
-    #    The capture before the change is the control: six squares on both builds.
+    #    The capture before the change is the control: six squares on both builds. 125% rather than 150%,
+    #    and the effective DPI checked, for the reasons given at modeless-dialog-follows-dpi-change.
     function Get-GripSquares {
         # The glyph's connected components: pixels within 12 of (191,191,191) and neutral, inside the grip's
         # own rect. The crop also holds the window's shadow edge, whose greys reach that value.
@@ -2131,10 +2144,12 @@ try {
         $c = Invoke-PlayerCase -Name 'size-grip-after-dpi-change' -Clip 'long.mkv' -Switches '/play' `
             -Settings @{ MPCTheme = 1; ModernThemeMode = 0 } `
             -IniSections @{ 'Favorites\Files' = @{ Name0 = 'Long;0;0;C:\mpc-test\media\long.mkv' } } -PostCommands '2:937' `
-            -ControlAt '3:grip:11200,4:dpi:0:150,8:grip:11200,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
+            -ControlAt '3:grip:11200,4:dpi:0:125,8:grip:11200,9:cmd:11200:2,10:dpi:0:100' -CloseAtSec 12
         $problems = @(Get-ProcessProblem $c.Run)
+        $dpiStep = @($c.Run.controls) | Where-Object { $_.op -eq 'dpi' -and $_.percent -eq 125 } | Select-Object -First 1
+        if (-not $dpiStep -or $dpiStep.effectiveDpi -ne 120) { $problems += "the display scale did not change to 125% (effective DPI $(if ($dpiStep) { $dpiStep.effectiveDpi } else { 'unread' })), so the case proves nothing" }
         foreach ($at in 3, 8) {
-            $when = if ($at -eq 3) { 'at 100%' } else { 'after the change to 150%' }
+            $when = if ($at -eq 3) { 'at 100%' } else { 'after the change to 125%' }
             $png = Join-Path $OutDir "size-grip-after-dpi-change-grip-$at.png"
             $grip = @($c.Run.controls) | Where-Object { $_.op -eq 'grip' -and $_.at -eq $at } | Select-Object -First 1
             if (-not (Test-Path $png) -or -not $grip -or -not $grip.gripFound) { $problems += "no grip capture $when"; continue }
