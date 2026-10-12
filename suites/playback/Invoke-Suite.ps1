@@ -714,6 +714,13 @@ try {
 
     $seconds = [double]$clips.seconds
 
+    # One unmeasured run first. The first player after a restore is slow to start sounding: 5 to 6 s on both
+    # Windows 11 guests (cold disk cache, first loads of the player, LAV and the audio stack), against about
+    # 1 s for every run after it. A case timed from launch then measures the guest instead: repeat-file-forever,
+    # closed at 10 s, captured 4.0 s and read as a repeat that stopped after the 4 s clip.
+    $null = Invoke-PlayerCase -Name 'warm-up' -Clip 'stereo.mkv'
+    Get-ChildItem $OutDir -Filter 'warm-up*' | Remove-Item -Force
+
     # --- cases ------------------------------------------------------------------
 
     # 1. The baseline every other case stands on: open, play to the end, close, exit 0; the whole clip's audio

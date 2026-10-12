@@ -50,6 +50,14 @@ idle), and every suite with `-VMName mpc-testbed-w11`. The credential file is
 DPAPI-encrypted for the account that built the guest, so the config must be
 used by that same Windows account.
 
+A guest that was set up some other way (the original pool) can still be noisy:
+system sounds, toasts, Spotlight, Search. A sound shares the endpoint stream
+with the player, and on win11-rig-1 one bridged two cases into a single 30 s
+capture. `Initialize-TestGuest.ps1 -VMName <guest> -QuietOnly -CheckpointName
+<name>` applies just those settings, leaving logon, test signing and the
+devices alone, and takes a new checkpoint beside the old one. Point the
+guest's `Checkpoint` in the config at it.
+
 ## What each script does
 
 `New-TestGuest.ps1` creates the VM (Generation 2, fixed memory, a virtual TPM

@@ -40,9 +40,19 @@
 .PARAMETER SkipDevices
     Settings and test signing only: no virtual devices. The checkpoint is still taken.
 
+.PARAMETER QuietOnly
+    For a guest that is already built and in use (a pooled one): only the settings that keep other
+    activity off the guest during a run -- no system sounds, toasts, Spotlight, firewall prompt,
+    Search indexing or cloud content -- then a restart from inside, a shutdown and the checkpoint.
+    Logon, test signing and the devices are left exactly as they are. Without -ConfigPath the
+    guest's credential and console account come from the shared test-bed config (its Guests entry
+    when it has one). Start it from the checkpoint it should build on; the new checkpoint gets its
+    own name and the old one is kept, so the config's Checkpoint for the guest has to be moved to it.
+
 .EXAMPLE
     .\Initialize-TestGuest.ps1 -VMName mpc-testbed-w11
     .\Initialize-TestGuest.ps1 -VMName mpc-testbed-w11 -VAudio C:\dev\vaudio-endpoint -VDisplay C:\dev\idd-vdisplay -VCamera C:\dev\avs-vcamera
+    .\Initialize-TestGuest.ps1 -VMName win11-rig-1 -QuietOnly -CheckpointName quiet-20261011
 #>
 [CmdletBinding()]
 param(
@@ -54,7 +64,8 @@ param(
     [string] $VCamera,
     [string] $CheckpointName = ('testbed-ready-' + (Get-Date -Format 'yyyyMMdd')),
     [double] $HostFloorGB = 4,
-    [switch] $SkipDevices
+    [switch] $SkipDevices,
+    [switch] $QuietOnly
 )
 
 Set-StrictMode -Version Latest
@@ -62,15 +73,93 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Testbed.psm1') -Force
 $testsRoot = Split-Path $PSScriptRoot -Parent
 
-if (-not $ConfigPath) { $ConfigPath = Join-Path (Join-Path $VmRoot $VMName) 'testbed.config.psd1' }
-if (-not (Test-Path $ConfigPath)) { throw "No test-bed config at $ConfigPath. New-TestGuest writes one; for a VM of your own, write one like it (Guest, CredentialPath, GuestConsoleUser)." }
-$config = Import-PowerShellDataFile $ConfigPath
+if ($QuietOnly -and -not $ConfigPath) {
+    # A pooled guest has no config of its own beside the VM; the shared one names its account.
+    . (Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1')
+    $config = Get-TestBedConfig -Guest $VMName
+} else {
+    if (-not $ConfigPath) { $ConfigPath = Join-Path (Join-Path $VmRoot $VMName) 'testbed.config.psd1' }
+    if (-not (Test-Path $ConfigPath)) { throw "No test-bed config at $ConfigPath. New-TestGuest writes one; for a VM of your own, write one like it (Guest, CredentialPath, GuestConsoleUser)." }
+    $config = Import-PowerShellDataFile $ConfigPath
+    if ($config.Guest -ne $VMName) { throw "$ConfigPath is for $($config.Guest), not $VMName." }
+}
 $cred = Import-Clixml $config.CredentialPath
 $consoleUser = $config.GuestConsoleUser
-if ($config.Guest -ne $VMName) { throw "$ConfigPath is for $($config.Guest), not $VMName." }
 
 $vm = Get-VM -Name $VMName
 if ($vm.Generation -ne 2) { throw "$VMName is Generation $($vm.Generation); this script handles Generation 2 (Windows 10 / 11) guests." }
+
+# What keeps other activity off the guest while a suite runs, applied by both the full preparation and
+# -QuietOnly. Over PowerShell Direct as the administrator, into the console account's own hive.
+$quietSettings = {
+    param($user)
+    $ErrorActionPreference = 'Stop'
+    function Set-Reg([string] $Path, [string] $Name, $Value, [string] $Type = 'DWord') {
+        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
+    }
+    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\BootAnimation' DisableStartupSound 1
+    # No firewall prompt when a test program opens a listening socket. MPC-HC's web server does, and on
+    # Windows 11 the "allow public and private networks?" dialog then sat over the dialog a case was
+    # measuring. The suites only talk to 127.0.0.1, which the firewall never blocks.
+    & netsh.exe advfirewall set allprofiles settings inboundusernotification disable | Out-Null
+    # Less background work after boot: no Search indexing, no cloud content (Spotlight images, suggested
+    # apps). A freshly restored Windows 11 guest was busy enough to start the player 2 s late in cases
+    # that time its audio.
+    Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+    Set-Service -Name WSearch -StartupType Disabled -ErrorAction SilentlyContinue
+    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableWindowsConsumerFeatures 1
+    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableCloudOptimizedContent 1
+
+    # The console account's own hive. It is loaded because the account is logged on (the session
+    # was only handed over once its desktop existed).
+    $sid = ([Security.Principal.NTAccount] $user).Translate([Security.Principal.SecurityIdentifier]).Value
+    $hk = "Registry::HKEY_USERS\$sid"
+    if (-not (Test-Path $hk)) { throw "The hive of $user ($sid) is not loaded: is $user logged on at the console?" }
+    # No sounds, in the console account and in the hive Windows uses before anyone has logged on (.DEFAULT):
+    # a chime at boot was captured on Windows 11 even with the console account silenced. Any sound shares the
+    # endpoint stream with the player, so it can also join two cases' audio into one capture or split one.
+    foreach ($soundHive in $hk, 'Registry::HKEY_USERS\.DEFAULT') {
+        Set-Reg "$soundHive\AppEvents\Schemes" '(default)' '.None' String
+        Get-ChildItem "$soundHive\AppEvents\Schemes\Apps" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -eq '.Current' } |
+            ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name '(default)' -Value '' }
+    }
+    Set-Reg "$hk\Software\Microsoft\Windows\CurrentVersion\PushNotifications" ToastEnabled 0
+    # Spotlight, a per-user policy: on the desktop (Windows 11's rotating background with its "Learn about
+    # this picture" icon) and on the lock screen.
+    Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableWindowsSpotlightFeatures 1
+    Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableSpotlightCollectionOnDesktop 1
+    Set-Reg "$hk\Control Panel\Desktop" ScreenSaveActive '0' String
+    $sid
+}
+
+if ($QuietOnly) {
+    if ((Get-VM $VMName).State -ne 'Running') { Assert-HostMemory -VMName $VMName -FloorGB ($HostFloorGB + (Get-VM $VMName).MemoryStartup / 1GB); Start-VM -Name $VMName }
+    $session = Wait-GuestSession -VMName $VMName -Credential $cred -TimeoutMinutes 15 -FloorGB $HostFloorGB -Activity 'starting'
+    $sid = Invoke-Command -Session $session -ScriptBlock $quietSettings -ArgumentList $consoleUser
+    # Restart from inside (see step 3 below) so the policies and the logon-time state come up as a run will see them.
+    Invoke-Command -Session $session { Restart-Computer -Force }
+    Remove-PSSession $session -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 30
+    $session = Wait-GuestSession -VMName $VMName -Credential $cred -TimeoutMinutes 15 -FloorGB $HostFloorGB -Activity 'restarting'
+    $check = Invoke-Command -Session $session -ArgumentList $sid {
+        param($sid)
+        [pscustomobject]@{
+            Scheme = (Get-ItemProperty "Registry::HKEY_USERS\$sid\AppEvents\Schemes").'(default)'
+            Toasts = (Get-ItemProperty "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\PushNotifications").ToastEnabled
+            Search = (Get-Service WSearch).StartType
+        }
+    }
+    Remove-PSSession $session
+    if ($check.Scheme -ne '.None' -or $check.Toasts -ne 0) { throw "After the restart the console account's sound scheme is '$($check.Scheme)' and ToastEnabled $($check.Toasts)." }
+    Write-Host "  quiet settings applied for $consoleUser ($sid): sounds $($check.Scheme), toasts off, Search $($check.Search)" -ForegroundColor Green
+    Stop-VM -Name $VMName -Force     # a shutdown from inside; -TurnOff would be the hard one
+    Get-VMSnapshot -VMName $VMName -Name $CheckpointName -ErrorAction SilentlyContinue | Remove-VMSnapshot
+    Checkpoint-VM -Name $VMName -SnapshotName $CheckpointName
+    Write-Host "  shut down; checkpoint '$CheckpointName' taken" -ForegroundColor Green
+    return
+}
 
 # Every harness script below finds the guest's credential through this, not the machine's shared config.
 $previousConfig = $env:VTUNER_TESTBED_CONFIG
@@ -116,18 +205,6 @@ try {
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' NoLockScreen 1
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' NoAutoUpdate 1
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' NoAutoRebootWithLoggedOnUsers 1
-        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\BootAnimation' DisableStartupSound 1
-        # No firewall prompt when a test program opens a listening socket. MPC-HC's web server does, and on
-        # Windows 11 the "allow public and private networks?" dialog then sat over the dialog a case was
-        # measuring. The suites only talk to 127.0.0.1, which the firewall never blocks.
-        & netsh.exe advfirewall set allprofiles settings inboundusernotification disable | Out-Null
-        # Less background work after boot: no Search indexing, no cloud content (Spotlight images, suggested
-        # apps). A freshly restored Windows 11 guest was busy enough to start the player 2 s late in cases
-        # that time its audio.
-        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
-        Set-Service -Name WSearch -StartupType Disabled -ErrorAction SilentlyContinue
-        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableWindowsConsumerFeatures 1
-        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' DisableCloudOptimizedContent 1
         $defender = 'skipped'
         try { Add-MpPreference -ExclusionPath 'C:\mpc-test', 'C:\vaudio', 'C:\vdisplay', 'C:\vcamera', 'C:\vtuner'; $defender = 'excluded' } catch { $defender = "not set: $($_.Exception.Message)" }
 
@@ -136,26 +213,13 @@ try {
         $sid = ([Security.Principal.NTAccount] $user).Translate([Security.Principal.SecurityIdentifier]).Value
         $hk = "Registry::HKEY_USERS\$sid"
         if (-not (Test-Path $hk)) { throw "The hive of $user ($sid) is not loaded: is $user logged on at the console?" }
-        # No sounds, in the console account and in the hive Windows uses before anyone has logged on (.DEFAULT):
-        # a chime at boot was captured on Windows 11 even with the console account silenced.
-        foreach ($soundHive in $hk, 'Registry::HKEY_USERS\.DEFAULT') {
-            Set-Reg "$soundHive\AppEvents\Schemes" '(default)' '.None' String
-            Get-ChildItem "$soundHive\AppEvents\Schemes\Apps" -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.PSChildName -eq '.Current' } |
-                ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name '(default)' -Value '' }
-        }
-        Set-Reg "$hk\Software\Microsoft\Windows\CurrentVersion\PushNotifications" ToastEnabled 0
-        # Spotlight, a per-user policy: on the desktop (Windows 11's rotating background with its "Learn about
-        # this picture" icon) and on the lock screen.
-        Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableWindowsSpotlightFeatures 1
-        Set-Reg "$hk\Software\Policies\Microsoft\Windows\CloudContent" DisableSpotlightCollectionOnDesktop 1
-        Set-Reg "$hk\Control Panel\Desktop" ScreenSaveActive '0' String
         Set-Reg "$hk\Software\MPC-HC\MPC-HC\Settings" UpdaterAutoCheck 0
         Set-Reg "$hk\Software\MPC-HC\MPC-HC\Settings" DefaultCapture 1
 
         $os = Get-CimInstance Win32_OperatingSystem
         [pscustomobject]@{ Os = "$($os.Caption) $($os.Version)"; ConsoleSid = $sid; Defender = $defender }
     }
+    Invoke-Command -Session $session -ScriptBlock $quietSettings -ArgumentList $consoleUser | Out-Null
     Remove-PSSession $session
     Write-Host "  settings applied: $($summary.Os); console $consoleUser ($($summary.ConsoleSid)); Defender $($summary.Defender)"
 
