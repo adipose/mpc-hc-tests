@@ -4,14 +4,14 @@ Integration tests for MPC-HC, run against the build of whichever branch this
 repository is mounted in. It is mounted as the `tests\` submodule of an MPC-HC
 checkout; nothing under `src/` depends on it, and a branch that never
 initialises it is unaffected. Five submodules of its own carry the test
-devices and the mock Cast receiver. The few player-side additions the suites drive live under `hooks\`
-until they are upstream.
+devices and the mock Cast receiver. The player-side additions the suites
+drive are in upstream develop; `hooks\` carries them for older branches.
 
 ```powershell
 # in any MPC-HC branch
 git submodule add https://github.com/adipose/mpc-hc-tests.git tests
 git submodule update --init --recursive tests
-.\tests\hooks\Apply-TestHooks.ps1        # the player changes the suites need, as commits
+.\tests\hooks\Apply-TestHooks.ps1 -Check # current develop has them all; on an older branch, drop -Check to apply
 ```
 
 ```
@@ -138,22 +138,20 @@ coverage map, and the smallest steps that complete the `dvb` and
 ## Hooks: what the player has to have
 
 The suites reach the player through its command line and its `/slave`
-API. A handful of verbs are additions for testing, small enough to be
-proposed upstream one at a time (`/dvbscan` from #4138 already is). Until
-each is merged it is a patch under `hooks\`, one commit each, exported from
-the fork's `test-hooks` branch (upstream develop plus the hooks, rebased as
-develop moves):
+API. The verbs added for testing went upstream one at a time (`/dvbscan` in
+#4138, the two below in #4143), so a branch cut from current develop needs
+nothing applied. The patches stay under `hooks\` for branches cut before
+those merges:
 
 | Hook | Adds | Upstream |
 |---|---|---|
-| `0001-add-dvbscansave-…` | `/dvbscansave`: the headless scan stores the channels it found | clsid2/mpc-hc#4143 |
-| `0002-make-a-headless-scan-…` | exit code 1 and no modal box when a headless scan cannot run | clsid2/mpc-hc#4143 |
+| `0001-add-dvbscansave-…` | `/dvbscansave`: the headless scan stores the channels it found | merged, clsid2/mpc-hc#4143 |
+| `0002-make-a-headless-scan-…` | exit code 1 and no modal box when a headless scan cannot run | merged, clsid2/mpc-hc#4143 |
 
 `hooks\Apply-TestHooks.ps1 -Check` says which the checkout already has;
-without `-Check` it applies the missing ones with `git am`. A branch that
-would rather not carry the commits can merge `test-hooks` instead, or run
-without them: every suite probes the built binary for the verb it needs and
-reports itself not ready rather than failing.
+without `-Check` it applies the missing ones with `git am`. A branch without
+them still runs: every suite probes the built binary for the verb it needs
+and reports itself not ready rather than failing.
 
 ## Setup
 
