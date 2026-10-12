@@ -7,8 +7,18 @@ initialises it is unaffected. Five submodules of its own carry the test
 devices and the mock Cast receiver. The player-side additions the suites
 drive are in upstream develop; `hooks\` carries them for older branches.
 
+Where MPC-HC already declares it (clsid2/mpc-hc#4316), the submodule is
+`update = none`, so the player's own `git submodule update --init --recursive`
+skips it. Fetch it on purpose:
+
 ```powershell
-# in any MPC-HC branch
+git submodule update --init --checkout tests
+git -C tests submodule update --init --recursive
+```
+
+On a branch that does not declare it yet:
+
+```powershell
 git submodule add https://github.com/adipose/mpc-hc-tests.git tests
 git submodule update --init --recursive tests
 .\tests\hooks\Apply-TestHooks.ps1 -Check # current develop has them all; on an older branch, drop -Check to apply
@@ -156,7 +166,8 @@ and reports itself not ready rather than failing.
 ## Setup
 
 ```powershell
-git submodule update --init --recursive tests
+git submodule update --init --checkout tests   # mounted above; skip if already fetched
+git -C tests submodule update --init --recursive
 .\tests\emulator\tools\Install-TestBed.ps1    # WDK ISO, TSDuck, ffmpeg, config
 ```
 
