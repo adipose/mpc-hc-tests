@@ -55,7 +55,7 @@ param(
     [string] $AcceptDialogAt = '',       # same shape as CloseDialogAt, but posts IDOK instead (accepts the
                                          # dialog -- the RAR entry selector's Select button, which no other
                                          # mechanism here can press). Recorded under "dialogAccepts".
-    [string] $ControlAt = ''             # comma-separated steps on a dialog control found by its id, in any
+    [string] $ControlAt = '',            # comma-separated steps on a dialog control found by its id, in any
                                          # visible dialog (#32770) of the player's process, so a translated
                                          # title does not matter: <sec>:probe:<ctrl> records whether it
                                          # exists and is visible, and its STM_GETICON; <sec>:combo:<ctrl>:<data>
@@ -82,6 +82,12 @@ param(
                                          # PrintWindow allows for 700 ms ("sequence", a letter per read);
                                          # command 0 only reads.
                                          # Decimal. Recorded under "controls".
+    [int] $PluggedScale = 0              # non-zero: before the player starts, set the display scale of the one
+                                         # monitor that is not the primary (the plugged virtual one) to this
+                                         # percent, and put it back to its recommended scale at the end; its
+                                         # device name and effective DPI go under "plugged". A {plugged} in the
+                                         # player's ini is replaced by that device name either way, for
+                                         # FullScreenMonitor, which the host cannot know before the plug.
 )
 
 $ErrorActionPreference = 'Continue'
@@ -330,6 +336,7 @@ function Get-PlaylistProbe {
             $probe.frameRect = [ordered]@{ left = $fr.left; top = $fr.top; right = $fr.right; bottom = $fr.bottom }
         }
         $probe.maximized = [MpcTest.Geometry]::IsZoomed($main)
+        $probe.dpi = [MpcTest.User32]::GetDpiForWindow($main)
     }
     # The process's visible top-level windows, class and title: what else is on screen when a probe
     # finds something unexpected (a modal, a second frame).
@@ -492,8 +499,9 @@ function Find-DialogControl {
 # monitor's recommended scale, which GET_DPI_SCALE (-3) gives as minus its minimum. Windows sends the
 # player's windows on that monitor WM_DPICHANGED, as a user changing the scale does. Must run in the
 # console user's session, which this script does.
+# -Device names another monitor by GDI device name (\\.\DISPLAY2), and there -Percent 0 is its recommended scale.
 function Set-PrimaryScale {
-    param([int] $Percent)
+    param([int] $Percent, [string] $Device = '')
     if (-not ('MpcTest.Dpi' -as [type])) {
         Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
 using System;
@@ -513,6 +521,10 @@ public static class Dpi {
         return b;
     }
     public static int SetPrimary(int percent) {
+        return Set(System.Windows.Forms.Screen.PrimaryScreen.DeviceName, percent);
+    }
+    // percent 0 is the monitor's recommended scale.
+    public static int Set(string device, int percent) {
         uint np, nm;
         GetDisplayConfigBufferSizes(2, out np, out nm);   // QDC_ONLY_ACTIVE_PATHS
         var paths = new byte[np * 72]; var modes = new byte[nm * 64];
@@ -521,12 +533,12 @@ public static class Dpi {
         for (int i = 0; i < np; i++) {
             var name = Packet(1, 20 + 64, paths, i);   // DISPLAYCONFIG_SOURCE_DEVICE_NAME: viewGdiDeviceName
             DisplayConfigGetDeviceInfo(name);
-            if (System.Text.Encoding.Unicode.GetString(name, 20, 64).TrimEnd('\0') != System.Windows.Forms.Screen.PrimaryScreen.DeviceName) continue;
+            if (System.Text.Encoding.Unicode.GetString(name, 20, 64).TrimEnd('\0') != device) continue;
             var get = Packet(-3, 32, paths, i);
             DisplayConfigGetDeviceInfo(get);
             int recommended = Math.Abs(BitConverter.ToInt32(get, 20));
             var set = Packet(-4, 24, paths, i);
-            BitConverter.GetBytes(Array.IndexOf(Steps, percent) - recommended).CopyTo(set, 20);
+            BitConverter.GetBytes(percent == 0 ? 0 : Array.IndexOf(Steps, percent) - recommended).CopyTo(set, 20);
             return DisplayConfigSetDeviceInfo(set);
         }
         return -1;
@@ -535,7 +547,7 @@ public static class Dpi {
 }
 '@
     }
-    [MpcTest.Dpi]::SetPrimary($Percent)
+    if ($Device) { [MpcTest.Dpi]::Set($Device, $Percent) } else { [MpcTest.Dpi]::SetPrimary($Percent) }
 }
 
 function Invoke-ControlStep {
@@ -776,6 +788,27 @@ if ($RendererFile -and (Test-Path $RendererFile)) {
     $result.renderer = ($wanted.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' '
 }
 
+# The plugged monitor: whichever one is not the primary. Its GDI name is only known once it is plugged and
+# only in this session, so the host writes {plugged} into the ini and it is resolved here.
+Add-Type -AssemblyName System.Windows.Forms
+$pluggedScreen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+$iniPath = Join-Path (Split-Path $Exe) ([IO.Path]::GetFileNameWithoutExtension($Exe) + '.ini')
+if ((Test-Path $iniPath) -and $pluggedScreen) {
+    $iniText = [IO.File]::ReadAllText($iniPath)
+    if ($iniText.Contains('{plugged}')) { [IO.File]::WriteAllText($iniPath, $iniText.Replace('{plugged}', $pluggedScreen.DeviceName), [Text.Encoding]::Unicode) }
+}
+if ($PluggedScale -and $pluggedScreen) {
+    $set = Set-PrimaryScale $PluggedScale $pluggedScreen.DeviceName
+    Start-Sleep -Milliseconds 1500
+    $b = $pluggedScreen.Bounds
+    $x = [uint32] 0; $y = [uint32] 0
+    $mon = [MpcTest.DpiAware]::MonitorFromPoint(([long] ($b.Top + 1) -shl 32) -bor [uint32] ($b.Left + 1), 0)
+    [void] [MpcTest.DpiAware]::GetDpiForMonitor($mon, 0, [ref] $x, [ref] $y)
+    $result.plugged = [ordered]@{ device = $pluggedScreen.DeviceName; bounds = @($b.Left, $b.Top, $b.Width, $b.Height); percent = $PluggedScale; result = $set; effectiveDpi = [int] $x }
+} elseif ($PluggedScale) {
+    $result.plugged = [ordered]@{ device = $null }
+}
+
 # An empty line is a launch with no file at all (a case about what the player restores by itself), and
 # Start-Process refuses an empty -ArgumentList.
 $p = if ($ArgumentLine) { Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru } else { Start-Process -FilePath $Exe -PassThru }
@@ -1006,6 +1039,8 @@ if ($rendererNames.Count) {
     }
     if (-not $rendererExisted) { Remove-Item $rendererKey -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
+if ($PluggedScale -and $pluggedScreen) { $result.plugged.restored = Set-PrimaryScale 0 $pluggedScreen.DeviceName }
 
 $result.finished = (Get-Date).ToString('o')
 $result | ConvertTo-Json -Depth 4 | Set-Content $Out

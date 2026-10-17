@@ -207,6 +207,9 @@ try {
             [string] $Switches = '/play /close',
             [hashtable] $Settings = @{},
             [string] $PlugModes = '',          # non-empty: plug the virtual monitor with these modes for the case
+            [int] $PluggedScale = 0,           # with PlugModes: the plugged monitor's display scale in percent for
+                                               # the case (the primary stays at 100%); {plugged} in a setting is
+                                               # replaced on the guest by that monitor's device name
             [double] $CaptureAtSec = 0,
             [double] $CloseAtSec = 0,          # non-zero: close the player's window at this time instead of /close
             [ValidateSet('WM_CLOSE', 'SC_CLOSE')] [string] $CloseKind = 'WM_CLOSE',
@@ -272,8 +275,8 @@ try {
         $httpEncoded = (@($HttpAt | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt, $ControlAt {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt, $controlAt)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt, $ControlAt, $PluggedScale {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt, $controlAt, $pluggedScale)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -321,6 +324,7 @@ try {
             if ($closeDialogAt) { $taskArgs += (' -CloseDialogAt "{0}"' -f $closeDialogAt) }
             if ($acceptDialogAt) { $taskArgs += (' -AcceptDialogAt "{0}"' -f $acceptDialogAt) }
             if ($controlAt) { $taskArgs += (' -ControlAt "{0}"' -f $controlAt) }
+            if ($pluggedScale) { $taskArgs += " -PluggedScale $pluggedScale" }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -2364,6 +2368,44 @@ try {
             }
         }
         Complete-Case 'status-audio-icon-follows-dpi-change' $problems
+    }
+
+    # 54. Leaving fullscreen on a monitor of a different DPI must give back the window it took: #4319.
+    #    The window sits on the primary (100%); the fullscreen monitor is the plugged one at 200%, and
+    #    FullscreenSeparateControls=0 so the frame itself moves there. Coming back, Windows sends
+    #    WM_DPICHANGED with the restored rect scaled by 96/192, and the unfixed player took it: the
+    #    window halved on every exit. Two round trips (posted ID_VIEW_FULLSCREEN, 830); after each, the
+    #    window must be the size it was before the first. The probes while fullscreen guard the setup:
+    #    a toggle that did not land on the 200% monitor proves nothing.
+    if (Test-CaseSelected 'fullscreen-exit-keeps-size-across-dpi') {
+        $c = Invoke-PlayerCase -Name 'fullscreen-exit-keeps-size-across-dpi' -Clip 'long.mkv' -Switches '/play' `
+            -PlugModes '3840x2160@60' -PluggedScale 200 `
+            -Settings @{ FullScreenMonitor = '{plugged}'; FullscreenSeparateControls = 0 } `
+            -PostCommands '4:830,7:830,10:830,13:830' -ProbeAt '3,6,9,12,15' -CloseAtSec 16
+        $posts = @($c.Run.posts)
+        $probes = @($c.Run.probes)
+        $plugged = $c.Run.plugged
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $plugged -or -not $plugged.device) { $problems += 'no second monitor was found on the guest after the plug' }
+        elseif ($plugged.effectiveDpi -ne 192) { $problems += "the plugged monitor's effective DPI was $($plugged.effectiveDpi), not 192, so the case proves nothing" }
+        if (@($posts | Where-Object delivered).Count -ne 4) { $problems += 'not every posted fullscreen toggle reached a window' }
+        if ($probes.Count -ne 5 -or @($probes | Where-Object { $_.mainRect }).Count -ne 5) {
+            $problems += 'the main window was not found at every probe'
+        } elseif (-not $problems) {
+            $size = { param($r) '{0}x{1}' -f ($r.right - $r.left), ($r.bottom - $r.top) }
+            $before = $probes[0]
+            if ($before.dpi -ne 96) { $problems += "the window started at $($before.dpi) DPI, not on the 100% primary" }
+            foreach ($i in 1, 3) {
+                if ($probes[$i].dpi -ne 192) { $problems += "at $($probes[$i].at) s the window was at $($probes[$i].dpi) DPI ($(& $size $probes[$i].mainRect)): fullscreen did not go to the 200% monitor, so the case proves nothing" }
+            }
+            foreach ($i in 2, 4) {
+                $r = $probes[$i].mainRect; $b = $before.mainRect
+                if ([math]::Abs(($r.right - $r.left) - ($b.right - $b.left)) -gt 2 -or [math]::Abs(($r.bottom - $r.top) - ($b.bottom - $b.top)) -gt 2) {
+                    $problems += "after leaving fullscreen ($($probes[$i].at) s) the window was $(& $size $r) at $($probes[$i].dpi) DPI, not the $(& $size $b) it was before"
+                }
+            }
+        }
+        Complete-Case 'fullscreen-exit-keeps-size-across-dpi' $problems
     }
 }
 finally {
