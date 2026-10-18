@@ -331,6 +331,56 @@ Invoke-FFmpeg $rg @(
     '-metadata', 'REPLAYGAIN_TRACK_GAIN=-6.00 dB'
 )
 
+# --- tail.dsm: stereo.mkv's tones as 16 bit PCM in a DirectShow Media file, --
+# with two zero bytes after the last packet. ffmpeg cannot write DSM, so the
+# packets are written here (layout from DSMMuxer.cpp): a file info packet, one
+# media type packet, then a sample packet per 100 ms, every one a sync point,
+# and no sync point table, so a seek takes FindSyncPoint's scan. Fewer than
+# three bytes left after a packet made the splitter's Sync() return without
+# moving, and every caller looped on it at full CPU (fixed on patch770).
+$tailDsm = Join-Path $OutDir 'tail.dsm'
+if ($Force -or -not (Test-Path $tailDsm)) {
+    $raw = Join-Path $OutDir 'tail.pcm'
+    Invoke-FFmpeg $raw @(
+        '-f', 'lavfi', '-i', (Tone 440), '-f', 'lavfi', '-i', (Tone 880),
+        '-filter_complex', '[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]',
+        '-map', '[a]', '-c:a', 'pcm_s16le', '-f', 's16le'
+    )
+    $pcm = [IO.File]::ReadAllBytes($raw)
+    Remove-Item $raw
+    $ms = [IO.MemoryStream]::new()
+    $be = { param([uint64] $v, [int] $n) for ($i = $n - 1; $i -ge 0; $i--) { $ms.WriteByte([byte](($v -shr (8 * $i)) -band 0xFF)) } }
+    # sync word "DSMS", 5 bits of packet type, 3 bits of length size minus one (always 4 bytes here)
+    $header = { param([int] $type, [uint64] $len) & $be 0x44534D53 4; $ms.WriteByte([byte](($type -shl 3) -bor 3)); & $be $len 4 }
+    $guid = { param([string] $g) $ms.Write(([guid]$g).ToByteArray(), 0, 16) }
+
+    & $header 0 1                                   # DSMP_FILEINFO: the version, no keys
+    $ms.WriteByte(1)
+
+    # WAVEFORMATEX: PCM, 2 channels, 48000 Hz, 192000 bytes/s, block 4, 16 bits, no extra
+    $wfx = [byte[]](1,0, 2,0, 0x80,0xBB,0,0, 0x00,0xEE,2,0, 4,0, 16,0, 0,0)
+    & $header 2 (1 + 16 * 3 + 4 + $wfx.Length)      # DSMP_MEDIATYPE
+    $ms.WriteByte(0)                                # track 0
+    & $guid '73647561-0000-0010-8000-00aa00389b71'  # MEDIATYPE_Audio
+    & $guid '00000001-0000-0010-8000-00aa00389b71'  # MEDIASUBTYPE_PCM
+    & $be 0x80000004L 4                             # fixed size samples, not temporal, sample size 4
+    & $guid '05589f81-c356-11ce-bf01-00aa0055595a'  # FORMAT_WaveFormatEx
+    $ms.Write($wfx, 0, $wfx.Length)
+
+    $chunk = 19200                                  # 100 ms
+    for ($off = 0; $off -lt $pcm.Length; $off += $chunk) {
+        $n = [math]::Min($chunk, $pcm.Length - $off)
+        & $header 4 (2 + 4 + 3 + $n)                # DSMP_SAMPLE
+        $ms.WriteByte(0)                            # track 0
+        $ms.WriteByte(0xA3)                         # sync point, positive, 4 byte start, 3 byte duration
+        & $be ([uint64]($off / 192000 * 1e7)) 4
+        & $be ([uint64]($n / 192000 * 1e7)) 3
+        $ms.Write($pcm, $off, $n)
+    }
+    $ms.WriteByte(0); $ms.WriteByte(0)
+    [IO.File]::WriteAllBytes($tailDsm, $ms.ToArray())
+}
+
 # --- RAR fixtures, for the RARFileSource cases. Stored (-m0): the source -----
 # filter only plays uncompressed members. They need rar.exe on the host;
 # without it they stay absent and the RAR cases report themselves skipped.
@@ -436,6 +486,10 @@ $clips = [ordered]@{
             seconds = 8
             audio   = @([ordered]@{ track = 1; default = $true; tones = @(440, 440) })
             replayGainTrackDb = -6.0
+        }
+        'tail.dsm' = [ordered]@{
+            audio = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
+            note  = 'PCM in DSM, two zero bytes after the last packet'
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }

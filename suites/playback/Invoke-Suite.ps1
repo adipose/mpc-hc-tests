@@ -156,7 +156,7 @@ try {
     Copy-Item -ToSession $session $zip 'C:\mpc-test\player.zip' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-ApiCase.guest.ps1') 'C:\mpc-test\' -Force
-    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png', '.flac', '.rar' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png', '.flac', '.rar', '.dsm' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -2406,6 +2406,26 @@ try {
             }
         }
         Complete-Case 'fullscreen-exit-keeps-size-across-dpi' $problems
+    }
+
+    # 55. A DSM file with two bytes after its last packet plays to the end and exits. The DSM splitter's Sync()
+    #    returned false without moving when fewer than three bytes were left, and DemuxLoop, which treats false as
+    #    "keep scanning", spun on it at full CPU: no end of stream, so /close never came (unfixed a19e22c0a6).
+    if (Test-CaseSelected 'dsm-trailing-bytes-plays-to-end') {
+        $c = Invoke-PlayerCase -Name 'dsm-trailing-bytes-plays-to-end' -Clip 'tail.dsm'
+        Complete-Case 'dsm-trailing-bytes-plays-to-end' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Audio $c.Wav $clips.clips.'tail.dsm'.audio[0].tones $seconds)
+        )
+    }
+
+    # 56. The same file started at 3.95 s, after the last packet's start: tail.dsm has no sync point table, so the
+    #    seek scans with FindSyncPoint, whose second pass reaches the end of the file without finding a later
+    #    packet and looped on the same Sync() before playback could start. Only the exit is asserted: what plays
+    #    is the last packet's 100 ms, too short to measure.
+    if (Test-CaseSelected 'dsm-trailing-bytes-seek-near-end') {
+        $c = Invoke-PlayerCase -Name 'dsm-trailing-bytes-seek-near-end' -Clip 'tail.dsm' -Switches '/play /close /start 3950'
+        Complete-Case 'dsm-trailing-bytes-seek-near-end' @((Get-ProcessProblem $c.Run))
     }
 }
 finally {
