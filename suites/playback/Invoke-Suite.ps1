@@ -2427,6 +2427,21 @@ try {
         $c = Invoke-PlayerCase -Name 'dsm-trailing-bytes-seek-near-end' -Clip 'tail.dsm' -Switches '/play /close /start 3950'
         Complete-Case 'dsm-trailing-bytes-seek-near-end' @((Get-ProcessProblem $c.Run))
     }
+
+    # 57. Shift subtitle after a track change. Paused on subshift.mkv's SRT track, "Next subtitle" leaves
+    #    m_nCurSubtitle on a cue; switching to track 2, which libass renders and the Subresync bar cannot edit,
+    #    empties the bar, and the shift used that index anyway: ShiftSubtitle read past the empty list and
+    #    SaveSubtitle called through a null m_pSubStream (unfixed d74fa713a8: 0xC0000005 at the first shift).
+    #    Posted: pause, ID_GOTO_NEXT_SUB, ID_STREAM_SUB_NEXT, ID_SUBRESYNC_SHIFT_UP twice. The player must
+    #    still be there for the close at 10 s, and exit 0.
+    if (Test-CaseSelected 'subtitle-shift-after-track-change') {
+        $c = Invoke-PlayerCase -Name 'subtitle-shift-after-track-change' -Clip 'subshift.mkv' -Switches '/play' `
+            -Settings @{ RenderSSAUsingLibass = 1; AfterPlayback = 0 } -PostCommands '3:888,4:32781,5:954,6:32783,7:32783' -CloseAtSec 10
+        $posts = @($c.Run.posts)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($posts.Count -lt 5 -or @($posts | Where-Object { -not $_.delivered }).Count) { $problems += 'not every posted command reached the player' }
+        Complete-Case 'subtitle-shift-after-track-change' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

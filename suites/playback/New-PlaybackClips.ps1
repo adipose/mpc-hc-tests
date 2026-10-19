@@ -331,6 +331,28 @@ Invoke-FFmpeg $rg @(
     '-metadata', 'REPLAYGAIN_TRACK_GAIN=-6.00 dB'
 )
 
+# --- subshift.mkv: long.mkv with an SRT track holding a cue every second ----
+# (default) and the cyan band ASS as track 2. "Next subtitle" on the SRT track
+# leaves an index into the Subresync bar's list; with RenderSSAUsingLibass=1
+# track 2 is one the bar cannot edit, so switching to it empties the bar, and a
+# shift used that index on the empty bar (fixed on patch771).
+$subshift = Join-Path $OutDir 'subshift.mkv'
+if ($Force -or -not (Test-Path $subshift)) {
+    $cues = Join-Path $OutDir 'cues.srt'
+    $lines = foreach ($i in 1..($longSeconds - 1)) {
+        $from = [TimeSpan]::FromSeconds($i); $to = [TimeSpan]::FromSeconds($i + 0.5)
+        "$i"; ('{0:hh\:mm\:ss\,fff} --> {1:hh\:mm\:ss\,fff}' -f $from, $to); "cue $i"; ''
+    }
+    [IO.File]::WriteAllLines($cues, [string[]]$lines, [Text.UTF8Encoding]::new($false))
+    Invoke-FFmpeg $subshift @(
+        '-i', $long, '-i', $cues, '-i', $cyan,
+        '-map', '0:v', '-map', '0:a', '-map', '1:s', '-map', '2:s',
+        '-c:v', 'copy', '-c:a', 'copy', '-c:s:0', 'srt', '-c:s:1', 'ass',
+        '-disposition:s:0', 'default', '-disposition:s:1', '0'
+    )
+    Remove-Item $cues
+}
+
 # --- tail.dsm: stereo.mkv's tones as 16 bit PCM in a DirectShow Media file, --
 # with two zero bytes after the last packet. ffmpeg cannot write DSM, so the
 # packets are written here (layout from DSMMuxer.cpp): a file info packet, one
@@ -490,6 +512,10 @@ $clips = [ordered]@{
         'tail.dsm' = [ordered]@{
             audio = @([ordered]@{ track = 1; default = $true; tones = @(440, 880) })
             note  = 'PCM in DSM, two zero bytes after the last packet'
+        }
+        'subshift.mkv' = [ordered]@{
+            seconds = $longSeconds
+            note    = 'long.mkv plus an SRT track with a cue at every whole second from 1 s (default) and the cyan band ASS as track 2'
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
