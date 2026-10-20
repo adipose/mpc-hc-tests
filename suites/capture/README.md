@@ -67,6 +67,20 @@ depend on the #4285 mux fix (#4300, a761b87396). Skipped
 without `MPCVR\` beside the player (a release zip has it, a source build does
 not).
 
+`record-mkv`: record to Matroska for `-MkvSeconds` (default 8) and walk the
+file's Segment from end to end. It must hold one Info and one Tracks, and
+every SeekHead entry must point at an element of the ID it names. The muxer
+writes the SeekHead into a `Void` reserved at the start, sized for the
+duration or for 24 hours, and used to write it over Info and Tracks when it
+did not fit (bug ledger 149, patch773). A normal build cannot reach that in a
+test's time, so the case only guards Matroska recording in general. To see
+the bug, build with `voidlen = 300` forced after the reservation is computed
+in `CMatroskaMuxerFilter::ThreadProc` and run with `-MkvSeconds 30`: unfixed,
+the file does not parse and ffprobe finds no streams; fixed, the SeekHead
+keeps Info, Tracks, Cues and Tags and drops the cluster entries. Below about
+200 bytes the fixed build fails too, on a separate bug: a gap of 2 to 125
+bytes after the SeekHead is left without a `Void` header.
+
 ## Running
 
     pwsh -File suites\capture\Invoke-Suite.ps1 -PlayerBinary <exe> -Case record-with-previews

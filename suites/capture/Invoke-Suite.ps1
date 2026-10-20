@@ -40,7 +40,7 @@
                              be66b4b8b1; unfixed 2.8.2 connects it). Skipped
                              without MPCVR\ beside the player.
 
-      bar-float-redock       Float and re-dock the capture bar, the last time
+      bar-float-redock      Float and re-dock the capture bar, the last time
                              with no queued message reaching the bar between
                              dock and float, then close its floating frame.
                              The hide flag must reach the ini and the player
@@ -48,6 +48,13 @@
                              was never subclassed in that sequence, so its
                              close was not remembered (state the code relied
                              on, not a crash; see the case).
+
+      record-mkv             Record to Matroska for -MkvSeconds and walk the
+                             Segment: one Info, one Tracks, every SeekHead
+                             entry on an element of its ID. Guards ledger
+                             149, where a SeekHead too big for its reserved
+                             Void was written over Info and Tracks; README
+                             says how to reach that with a test build.
 
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
@@ -68,7 +75,8 @@ param(
     [string] $VMName = '',
     [string] $OutDir = (Join-Path $PSScriptRoot 'results'),
     [string] $PlayerBinary,
-    [string[]] $Case
+    [string[]] $Case,
+    [int] $MkvSeconds = 8
 )
 
 Set-StrictMode -Version Latest
@@ -362,7 +370,8 @@ function Start-CapturePlayer {
     # (device, output flags, file name) are the test's, not the machine's.
     # An empty -AudioDisplayName configures no audio device: the player then takes audio from the video device.
     # -Settings adds [Settings] keys (the renderer, for preview-with-mpcvr).
-    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName, [hashtable] $Settings = @{})
+    # -FileFormat is the capture bar's container: 0 AVI, 2 Matroska.
+    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName, [hashtable] $Settings = @{}, [int] $FileFormat = 0)
     $dir = Join-Path $OutDir "$Name\player"
     New-Item -ItemType Directory -Force $dir | Out-Null
     Copy-Item $PlayerBinary (Join-Path $dir 'mpc-hc64.exe') -Force
@@ -386,7 +395,7 @@ VidOutput=1
 AudOutput=1
 VidPreview=1
 AudPreview=1
-FileFormat=0
+FileFormat=$FileFormat
 SepAudio=0
 FileName=$AviPath
 "@ | Set-Content (Join-Path $dir 'mpc-hc64.ini') -Encoding ascii
@@ -440,7 +449,56 @@ function Read-AviStreams {
     $streams
 }
 
-$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect', 'bar-float-redock')
+function Read-MkvLayout {
+    # The top level of a Matroska file's Segment, and the entries of its SeekHead. Throws on a child it
+    # cannot read, which is what an element written over another one looks like.
+    param([string] $Path)
+    $b = [IO.File]::ReadAllBytes($Path)
+    function Vint([int] $at, [switch] $KeepMarker) {
+        $first = $b[$at]; $n = 1
+        while ($n -le 8 -and -not ($first -band (0x80 -shr ($n - 1)))) { $n++ }
+        if ($n -gt 8 -or $at + $n -gt $b.Length) { throw "bad EBML number at $at" }
+        [uint64]$v = if ($KeepMarker) { $first } else { $first -band ((0x80 -shr ($n - 1)) - 1) }
+        $allOnes = $v -eq ((0x80 -shr ($n - 1)) - 1)
+        for ($i = 1; $i -lt $n; $i++) { $v = ($v -shl 8) -bor $b[$at + $i]; if ($b[$at + $i] -ne 0xFF) { $allOnes = $false } }
+        [pscustomobject]@{ Value = $v; Length = $n; Unknown = (-not $KeepMarker -and $allOnes) }
+    }
+    function Element([int] $at) {
+        $id = Vint $at -KeepMarker; $size = Vint ($at + $id.Length)
+        [pscustomobject]@{ Id = [uint32]$id.Value; Pos = $at; Data = $at + $id.Length + $size.Length; Size = $size.Value; Unknown = $size.Unknown }
+    }
+    $ebml = Element 0
+    if ($ebml.Id -ne 0x1A45DFA3) { throw 'no EBML header' }
+    $seg = Element ($ebml.Data + [int]$ebml.Size)
+    if ($seg.Id -ne 0x18538067) { throw 'no Segment after the EBML header' }
+    $end = if ($seg.Unknown) { $b.Length } else { [Math]::Min($b.Length, $seg.Data + [int64]$seg.Size) }
+    $known = 0x114D9B74, 0xEC, 0x1549A966, 0x1654AE6B, 0x1F43B675, 0x1C53BB6B, 0x1254C367, 0x1941A469, 0x1043A770
+    $children = @(); $entries = @(); $at = $seg.Data
+    while ($at -lt $end) {
+        $e = Element $at
+        if ($known -notcontains $e.Id) { throw ("unknown element 0x{0:X} at {1} in the Segment" -f $e.Id, $at) }
+        if ($e.Data + [int64]$e.Size -gt $end) { throw ("element 0x{0:X} at {1} runs past the end of the file" -f $e.Id, $at) }
+        $children += $e
+        if ($e.Id -eq 0x114D9B74) {
+            $s = $e.Data
+            while ($s -lt $e.Data + $e.Size) {
+                $seek = Element $s; $id = $null; $pos = $null; $f = $seek.Data
+                while ($f -lt $seek.Data + $seek.Size) {
+                    $fe = Element $f
+                    [uint64]$v = 0; for ($i = 0; $i -lt $fe.Size; $i++) { $v = ($v -shl 8) -bor $b[$fe.Data + $i] }
+                    if ($fe.Id -eq 0x53AB) { $id = [uint32]$v } elseif ($fe.Id -eq 0x53AC) { $pos = $v }
+                    $f = $fe.Data + [int]$fe.Size
+                }
+                $entries += [pscustomobject]@{ Id = $id; Pos = $seg.Data + [int64]$pos }
+                $s = $seek.Data + [int]$seek.Size
+            }
+        }
+        $at = $e.Data + [int]$e.Size
+    }
+    [pscustomobject]@{ Children = $children; SeekEntries = $entries }
+}
+
+$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect', 'bar-float-redock', 'record-mkv')
 if ($Case) { $cases = $cases | Where-Object { $n = $_; $Case | Where-Object { $n -like $_ } } }
 
 # --- record-with-previews, record-camera-audio --------------------------------------------
@@ -727,6 +785,55 @@ if ($cases -contains 'bar-float-redock') {
     }
     $ini = Get-Content (Join-Path $player.Dir 'mpc-hc64.ini') -ErrorAction SilentlyContinue
     if (-not $problems -and -not ($ini -match '^HideCaptureSettings=1')) { $problems += 'HideCaptureSettings not 1 in the ini after closing the floating frame' }
+    Report $name $problems
+}
+
+# --- record-mkv ---------------------------------------------------------------------------
+#
+# Record to Matroska and read the file's top level back. The muxer reserves a Void after the Segment header
+# and writes the SeekHead over it when recording stops, one entry per one-second cluster. The reservation
+# is sized for the duration, or for 24 hours when none is known, and nothing used to check that the SeekHead
+# fitted: a longer capture wrote it over the Info and Tracks that follow, and the file would not open (ledger
+# 149). A real run cannot reach that in a test's time; a build with the reservation forced down to 100 bytes
+# does within seconds, and -MkvSeconds sets the length. Either way the Segment must parse from end to end,
+# hold one Info and one Tracks, and every SeekHead entry must point at an element of the ID it names.
+
+if ($cases -contains 'record-mkv') {
+    $name = 'record-mkv'
+    $problems = @()
+    $mkv = Join-Path $OutDir "$name\test.mkv"
+    New-Item -ItemType Directory -Force (Split-Path $mkv) | Out-Null
+    Remove-Item $mkv -ErrorAction SilentlyContinue
+    $player = Start-CapturePlayer $name $mkv -FileFormat 2
+    try {
+        if (-not (Click $player.Dialog $IDC_BUTTON2 $player.Record)) { $problems += 'Record click did not return within 15 s' }
+        Start-Sleep -Seconds $MkvSeconds
+        if (-not (Click $player.Dialog $IDC_BUTTON2 $player.Record)) { $problems += 'Stop click did not return within 15 s' }
+        Start-Sleep -Seconds 2
+    } finally {
+        if (-not (Stop-CapturePlayer $player)) { $problems += 'player did not close on WM_CLOSE within 20 s' }
+    }
+    if (-not (Test-Path $mkv)) { $problems += 'no MKV written' }
+    else {
+        try {
+            $layout = Read-MkvLayout $mkv
+            $ids = @($layout.Children | ForEach-Object { $_.Id })
+            $layout.Children | ForEach-Object { '0x{0:X8} at {1}, {2} bytes' -f $_.Id, $_.Pos, $_.Size } | Set-Content (Join-Path $OutDir "$name\layout.txt")
+            $clusters = @($ids | Where-Object { $_ -eq 0x1F43B675 }).Count
+            $seekClusters = @($layout.SeekEntries | Where-Object { $_.Id -eq 0x1F43B675 }).Count
+            Note Gray ("{0}: {1} bytes, {2} clusters, SeekHead {3} with {4} entries ({5} for clusters)" -f $name, (Get-Item $mkv).Length, $clusters,
+                $(if ($ids -contains 0x114D9B74) { 'present' } else { 'absent' }), $layout.SeekEntries.Count, $seekClusters)
+            if (@($ids | Where-Object { $_ -eq 0x1549A966 }).Count -ne 1) { $problems += 'expected one Info' }
+            if (@($ids | Where-Object { $_ -eq 0x1654AE6B }).Count -ne 1) { $problems += 'expected one Tracks' }
+            if (-not $clusters) { $problems += 'no clusters' }
+            foreach ($s in $layout.SeekEntries) {
+                $hit = $layout.Children | Where-Object { $_.Pos -eq $s.Pos }
+                if (-not $hit -or $hit.Id -ne $s.Id) { $problems += ('SeekHead entry for 0x{0:X} points at {1}, where there is {2}' -f $s.Id, $s.Pos, $(if ($hit) { '0x{0:X}' -f $hit.Id } else { 'no element' })) }
+            }
+        } catch {
+            $problems += "the file does not parse: $_"
+        }
+    }
     Report $name $problems
 }
 

@@ -110,6 +110,11 @@
     <ClCompile Include="test_Mixer.cpp" />
     <ClCompile Include="test_USFSubtitles.cpp" />
     <ClCompile Include="test_VobFile.cpp" />
+    <!-- Seek::FitInto (ledger 149): MatroskaFile.cpp is plain EBML writing
+         over an IStream, compiled in directly like Profile.cpp; its own
+         stdafx.h is the /Yu boundary and DSUtil.h comes from this PCH. -->
+    <ClCompile Include="..\..\src\filters\muxer\MatroskaMuxer\MatroskaFile.cpp" />
+    <ClCompile Include="test_MatroskaSeekHead.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="HostHooks.h" />
