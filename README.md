@@ -82,6 +82,9 @@ suites/
   lifecycle/          How the frame comes down while a modal it owns is up:
                       exit or close with Options open, and a settings reset
                       that relaunches the player
+  language/           Switching the interface language at runtime: after
+                      leaving Hebrew for English, new windows must be laid
+                      out left to right
 ```
 
 ## Unit tests
