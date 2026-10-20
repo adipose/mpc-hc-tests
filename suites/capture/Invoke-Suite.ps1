@@ -40,6 +40,14 @@
                              be66b4b8b1; unfixed 2.8.2 connects it). Skipped
                              without MPCVR\ beside the player.
 
+      bar-float-redock       Float and re-dock the capture bar four times, then
+                             close its floating frame. The frame subclass that
+                             remembers the bar as hidden must be unhooked on
+                             re-dock; the hide flag must reach the ini and the
+                             player must close cleanly. Passes on upstream too:
+                             MFC destroys each floating frame inside the dock,
+                             so the stale subclass is never reached this way.
+
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
     audio source is the first audio capture device, or the one whose friendly
@@ -327,6 +335,8 @@ public static class W {
   public static string Text(IntPtr h) { var s = new StringBuilder(1024); SendMessage(h, 0x000D, (IntPtr)1024, s); return s.ToString(); }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 }
@@ -425,7 +435,7 @@ function Read-AviStreams {
     $streams
 }
 
-$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect')
+$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect', 'bar-float-redock')
 if ($Case) { $cases = $cases | Where-Object { $n = $_; $Case | Where-Object { $n -like $_ } } }
 
 # --- record-with-previews, record-camera-audio --------------------------------------------
@@ -640,6 +650,61 @@ if ($cases -contains 'preview-with-mpcvr') {
         }
         Report $name $problems
     }
+}
+
+# --- bar-float-redock ---------------------------------------------------------------------
+#
+# Float the capture bar, dock it again from its floating frame's caption, three times over, then float it
+# and close the floating frame with SC_CLOSE. CPlayerCaptureBar subclasses the floating frame to see that
+# close and remember the bar as hidden (#2979, d04854b549). It used to forget the saved window procedure on
+# re-dock without unhooking the frame, so a frame that outlived the re-dock forwarded its messages to
+# nothing, and a frame subclassed twice saved its own procedure as the original. The player must answer
+# throughout, the hide flag must reach the ini, and the player must close cleanly.
+# Docking is toggled with posted double clicks, which CSizingControlBar and CMiniDockFrameWnd act on without
+# tracking the pointer; WM_NULL after each one makes the bar's PreTranslateMessage see the new parent.
+
+if ($cases -contains 'bar-float-redock') {
+    $name = 'bar-float-redock'
+    $problems = @()
+    New-Item -ItemType Directory -Force (Join-Path $OutDir $name) | Out-Null
+    $player = Start-CapturePlayer $name (Join-Path $OutDir "$name\unused.avi")
+    $WM_NULL = 0; $WM_LBUTTONDBLCLK = 0x203; $WM_NCLBUTTONDBLCLK = 0xA3; $WM_SYSCOMMAND = 0x112; $HTCAPTION = 2; $SC_CLOSE = 0xF060
+    $bar = $W::GetParent($player.Dialog)
+    function Send($h, $m, $wp) { $r = [IntPtr]::Zero; $W::SendMessageTimeout($h, $m, [IntPtr]$wp, [IntPtr]::Zero, 2, 10000, [ref]$r) -ne [IntPtr]::Zero }
+    function Settle { $W::PostMessage($player.Dialog, $WM_NULL, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null; Start-Sleep -Milliseconds 700 }
+    function Frame { $W::GetParent($W::GetParent($bar)) }
+    $frames = @()
+    try {
+        for ($n = 1; $n -le 4 -and -not $problems; $n++) {
+            if (-not (Send $bar $WM_LBUTTONDBLCLK 0)) { $problems += "float $n did not return"; break }
+            Settle
+            $frame = Frame
+            if ($frame -eq $player.Main) { $problems += "float $n left the bar docked"; break }
+            $frames += $frame
+            if ($n -eq 4) { break }
+            if (-not (Send $frame $WM_NCLBUTTONDBLCLK $HTCAPTION)) { $problems += "re-dock $n did not return"; break }
+            Settle
+            if ((Frame) -ne $player.Main) { $problems += "re-dock $n left the bar floating"; break }
+            if ($player.Process.HasExited) { $problems += "player exited after re-dock $n, code $($player.Process.ExitCode)"; break }
+            if (-not $W::Answers($player.Main, 3000)) { $problems += "main window not answering after re-dock $n"; break }
+        }
+        $distinct = @($frames | Select-Object -Unique).Count
+        $alive = @($frames | Select-Object -Unique | Where-Object { $W::IsWindow($_) }).Count
+        Note Gray "$name`: $($frames.Count) floats used $distinct distinct frame(s), $alive still a window"
+        if (-not $problems) {
+            Send $frames[-1] $WM_SYSCOMMAND $SC_CLOSE | Out-Null
+            Settle
+            if ($player.Process.HasExited) { $problems += "player exited after closing the floating frame, code $($player.Process.ExitCode)" }
+            elseif ($W::IsWindowVisible($bar)) { $problems += 'bar still visible after SC_CLOSE on its floating frame' }
+        }
+    } finally {
+        if ($player.Process.HasExited) { if (-not $problems) { $problems += "player exited, code $($player.Process.ExitCode)" } }
+        elseif (-not (Stop-CapturePlayer $player)) { $problems += 'player did not close on WM_CLOSE within 20 s' }
+        elseif ($player.Process.ExitCode -ne 0) { $problems += "player exit code $($player.Process.ExitCode)" }
+    }
+    $ini = Get-Content (Join-Path $player.Dir 'mpc-hc64.ini') -ErrorAction SilentlyContinue
+    if (-not $problems -and -not ($ini -match '^HideCaptureSettings=1')) { $problems += 'HideCaptureSettings not 1 in the ini after closing the floating frame' }
+    Report $name $problems
 }
 
 [pscustomobject]@{ Suite = 'capture'; Passed = $passed; Failed = $failed; Skipped = $skipped; Notes = $notes }
