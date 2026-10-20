@@ -149,6 +149,19 @@ Invoke-FFmpeg $forced @(
     '-disposition:a:0', 'forced', '-disposition:a:1', 'default'
 )
 
+# --- markup.mkv: stereo.mkv's content with markup for a title. --------------
+# The segment title and the audio track's name are both an img tag with an
+# onerror handler, for the web interface case: text from the media must reach
+# its pages as text, never as markup.
+$markup = Join-Path $OutDir 'markup.mkv'
+Invoke-FFmpeg $markup @(
+    '-f', 'lavfi', '-i', (Tone 440), '-f', 'lavfi', '-i', (Tone 880),
+    '-filter_complex', "$quad;[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=0.5[a]",
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-c:a', 'pcm_s16le',
+    '-metadata', 'title=<img src=x onerror=alert(1)>', '-metadata:s:a:0', 'title=<img src=x onerror=alert(1)>'
+)
+
 # --- subs.mkv: two ASS subtitle tracks; the SECOND carries the default flag. -
 # Each track draws one solid band across the centre of the picture, magenta
 # for track 1 and cyan for track 2, so the colour at the centre of a captured

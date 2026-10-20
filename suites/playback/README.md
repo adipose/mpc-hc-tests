@@ -162,6 +162,7 @@ centre the box there. The band cases only ask which colour is present.
 | `dsm-trailing-bytes-plays-to-end` | `tail.dsm`, PCM in DSM written by the clip script with two zero bytes after the last packet: plays its 4.0 s, 440/880 Hz, and exits 0 (unfixed a19e22c0a6: `Sync()` returns without moving, `DemuxLoop` spins at full CPU, never exits) | patch770 |
 | `subtitle-shift-after-track-change` | `subshift.mkv` with `RenderSSAUsingLibass=1`, paused: Next subtitle on the SRT track, next subtitle track (the libass ASS, which the Subresync bar cannot edit), then Shift subtitle up twice; the player is still there for the close at 10 s and exits 0 (unfixed d74fa713a8: 0xC0000005 at the first shift, `SaveSubtitle` through a null `m_pSubStream`) | patch771 |
 | `dsm-trailing-bytes-seek-near-end` | the same file with `/start 3950`, past the last packet's start, so `FindSyncPoint`'s scan reaches the end: exits 0 (unfixed: the scan spins on the same `Sync()`) | patch770 |
+| `web-pages-escape-media-text` | `markup.mkv`, whose title and audio track name are `<img src=x onerror=alert(1)>`, with `TitleBarTextTitle=1`: `/status.html` carries the title, and `/variables.html`'s audiotrack paragraph has it escaped (unfixed, before #4334: the raw tag). The script side, `javascript.js` writing the title with `innerHTML`, needs a browser and is not checked | #4334 (patch776) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
