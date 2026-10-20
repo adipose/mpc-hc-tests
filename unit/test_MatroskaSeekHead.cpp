@@ -135,6 +135,86 @@ TEST(MatroskaSeekHead, TooSmallEvenWithoutClustersDoesNotFit)
     EXPECT_EQ(seek.FitInto(SizeWithout(0) - 1), -1);
 }
 
+// Void::Fill covers the gap between the SeekHead and Info. The loop it replaced
+// computed (1 << 0) - 2 as a QWORD, so a gap of 2 to 125 bytes got no Void
+// header at all, and a single minimally sized Void cannot total 129 or 16386.
+
+namespace
+{
+    // the Voids Fill wrote, as their total sizes; empty if anything else was written
+    std::vector<QWORD> FillAndParse(QWORD len, QWORD& written)
+    {
+        CComPtr<IStream> pStream;
+        EXPECT_HRESULT_SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &pStream));
+        EXPECT_HRESULT_SUCCEEDED(Void::Fill(pStream, len));
+        ULARGE_INTEGER end = {};
+        pStream->Seek({}, STREAM_SEEK_CUR, &end);
+        written = end.QuadPart;
+
+        std::vector<BYTE> b((size_t)written);
+        pStream->Seek({}, STREAM_SEEK_SET, nullptr);
+        ULONG got = 0;
+        pStream->Read(b.data(), (ULONG)b.size(), &got);
+
+        std::vector<QWORD> voids;
+        size_t at = 0;
+        while (at < b.size()) {
+            if (b[at] != 0xEC || at + 1 >= b.size()) {
+                return {};
+            }
+            BYTE first = b[at + 1];
+            int n = 1;
+            while (n <= 8 && !(first & (0x80 >> (n - 1)))) {
+                n++;
+            }
+            if (n > 8 || at + 1 + n > b.size()) {
+                return {};
+            }
+            QWORD size = first & ((0x80 >> (n - 1)) - 1);
+            for (int i = 1; i < n; i++) {
+                size = (size << 8) | b[at + 1 + i];
+            }
+            QWORD total = 1 + n + size;
+            if (at + total > b.size()) {
+                return {};
+            }
+            voids.push_back(total);
+            at += (size_t)total;
+        }
+        return voids;
+    }
+}
+
+TEST(MatroskaVoidFill, EveryGapIsCoveredByVoids)
+{
+    for (QWORD len : { 2, 3, 125, 126, 127, 128, 129, 130, 16384, 16385, 16386, 16387, 100000, 2097154 }) {
+        QWORD written = 0;
+        std::vector<QWORD> voids = FillAndParse(len, written);
+        EXPECT_EQ(written, len) << "gap " << len;
+        EXPECT_FALSE(voids.empty()) << "gap " << len << " is not all Void elements";
+        EXPECT_LE(voids.size(), 2u) << "gap " << len;
+    }
+}
+
+TEST(MatroskaVoidFill, SizesOneVoidCannotTotalTakeTwo)
+{
+    QWORD written = 0;
+    EXPECT_EQ(FillAndParse(125, written), (std::vector<QWORD> { 125 }));
+    EXPECT_EQ(FillAndParse(129, written), (std::vector<QWORD> { 2, 127 }));
+    EXPECT_EQ(FillAndParse(16386, written), (std::vector<QWORD> { 2, 16384 }));
+}
+
+TEST(MatroskaVoidFill, ZeroWritesNothingAndOneCannotBeFilled)
+{
+    QWORD written = 0;
+    EXPECT_TRUE(FillAndParse(0, written).empty());
+    EXPECT_EQ(written, 0u);
+
+    CComPtr<IStream> pStream;
+    ASSERT_HRESULT_SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &pStream));
+    EXPECT_EQ(Void::Fill(pStream, 1), E_INVALIDARG);
+}
+
 TEST(MatroskaSeekHead, ZeroSpaceDoesNotFit)
 {
     Seek seek;

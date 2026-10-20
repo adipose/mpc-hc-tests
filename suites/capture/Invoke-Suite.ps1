@@ -53,8 +53,10 @@
                              Segment: one Info, one Tracks, every SeekHead
                              entry on an element of its ID. Guards ledger
                              149, where a SeekHead too big for its reserved
-                             Void was written over Info and Tracks; README
-                             says how to reach that with a test build.
+                             Void was written over Info and Tracks, and the
+                             gap after a SeekHead that fitted could be left
+                             as bare filler; README says how to reach both
+                             with a test build.
 
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
@@ -464,7 +466,9 @@ function Read-MkvLayout {
         [pscustomobject]@{ Value = $v; Length = $n; Unknown = (-not $KeepMarker -and $allOnes) }
     }
     function Element([int] $at) {
-        $id = Vint $at -KeepMarker; $size = Vint ($at + $id.Length)
+        $id = Vint $at -KeepMarker
+        if ($id.Length -gt 4) { throw "bad element ID at $at" }
+        $size = Vint ($at + $id.Length)
         [pscustomobject]@{ Id = [uint32]$id.Value; Pos = $at; Data = $at + $id.Length + $size.Length; Size = $size.Value; Unknown = $size.Unknown }
     }
     $ebml = Element 0
@@ -476,6 +480,7 @@ function Read-MkvLayout {
     $children = @(); $entries = @(); $at = $seg.Data
     while ($at -lt $end) {
         $e = Element $at
+        if ($b[$at] -eq 0x80) { throw "bare Void filler (0x80) at $at, with no Void header over it" }
         if ($known -notcontains $e.Id) { throw ("unknown element 0x{0:X} at {1} in the Segment" -f $e.Id, $at) }
         if ($e.Data + [int64]$e.Size -gt $end) { throw ("element 0x{0:X} at {1} runs past the end of the file" -f $e.Id, $at) }
         $children += $e
@@ -826,6 +831,12 @@ if ($cases -contains 'record-mkv') {
             if (@($ids | Where-Object { $_ -eq 0x1549A966 }).Count -ne 1) { $problems += 'expected one Info' }
             if (@($ids | Where-Object { $_ -eq 0x1654AE6B }).Count -ne 1) { $problems += 'expected one Tracks' }
             if (-not $clusters) { $problems += 'no clusters' }
+            # before Info there is only the SeekHead and the Void(s) covering the rest of the reservation
+            $info = [Array]::IndexOf($ids, [uint32]0x1549A966)
+            if ($info -gt 0) {
+                $before = @($ids[0..($info - 1)] | Where-Object { $_ -ne 0x114D9B74 -and $_ -ne 0xEC })
+                if ($before) { $problems += ('before Info: {0}, expected only the SeekHead and Void' -f (($before | ForEach-Object { '0x{0:X}' -f $_ }) -join ', ')) }
+            }
             foreach ($s in $layout.SeekEntries) {
                 $hit = $layout.Children | Where-Object { $_.Pos -eq $s.Pos }
                 if (-not $hit -or $hit.Id -ne $s.Id) { $problems += ('SeekHead entry for 0x{0:X} points at {1}, where there is {2}' -f $s.Id, $s.Pos, $(if ($hit) { '0x{0:X}' -f $hit.Id } else { 'no element' })) }

@@ -77,9 +77,13 @@ test's time, so the case only guards Matroska recording in general. To see
 the bug, build with `voidlen = 300` forced after the reservation is computed
 in `CMatroskaMuxerFilter::ThreadProc` and run with `-MkvSeconds 30`: unfixed,
 the file does not parse and ffprobe finds no streams; fixed, the SeekHead
-keeps Info, Tracks, Cues and Tags and drops the cluster entries. Below about
-200 bytes the fixed build fails too, on a separate bug: a gap of 2 to 125
-bytes after the SeekHead is left without a `Void` header.
+keeps Info, Tracks, Cues and Tags and drops the cluster entries. Everything
+between the SeekHead and Info must also be `Void` elements: the loop that
+covered that gap wrapped at its first width, so a gap of 2 to 125 bytes was
+left as bare 0x80 filler with no header. `voidlen = 100` with `-MkvSeconds 1`
+reaches it, since the SeekHead still fits: unfixed fails on the filler,
+fixed passes. ffmpeg plays the unfixed file without a warning, so this case
+is the check.
 
 ## Running
 
