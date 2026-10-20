@@ -2442,6 +2442,31 @@ try {
         if ($posts.Count -lt 5 -or @($posts | Where-Object { -not $_.delivered }).Count) { $problems += 'not every posted command reached the player' }
         Complete-Case 'subtitle-shift-after-track-change' $problems
     }
+
+    # 58. Text from the media reaches the web pages as text: ledger 28. markup.mkv's segment title and audio
+    #    track name are both <img src=x onerror=alert(1)>. With TitleBarTextTitle=1 the window title, which
+    #    /status.html reports and javascript.js used to write with innerHTML, is that tag; the status answer
+    #    must carry it, or the case proves nothing. /variables.html puts the audio track's name in its
+    #    audiotrack paragraph, and that must arrive escaped (unfixed, before #4334: the raw tag). The script
+    #    side, the player page's title cell, needs a browser and is not checked here.
+    if (Test-CaseSelected 'web-pages-escape-media-text') {
+        $c = Invoke-PlayerCase -Name 'web-pages-escape-media-text' -Clip 'markup.mkv' -Settings ($web + @{ TitleBarTextTitle = 1 }) `
+            -HttpAt '2.5|GET|/status.html|', '2.6|GET|/variables.html|'
+        $answers = @($c.Run.http)
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($answers.Count -lt 2 -or $answers[0].status -ne 200 -or $answers[1].status -ne 200) {
+            $problems += "the web requests got status $(($answers | ForEach-Object { $_.status }) -join ', '), expected 200, 200"
+        } else {
+            if ($answers[0].bodyText -notmatch [regex]::Escape('OnStatus("<img src=x onerror=alert(1)>"')) {
+                $problems += "/status.html does not carry the media title: $($answers[0].bodyText)"
+            }
+            $line = @($answers[1].bodyText -split "`n" | Where-Object { $_ -match 'id="audiotrack"' })[0]
+            if (-not $line) { $problems += '/variables.html has no audiotrack paragraph' }
+            elseif ($line -match '<img') { $problems += "/variables.html writes the track name as markup: $($line.Trim())" }
+            elseif ($line -notmatch [regex]::Escape('&lt;img src=x onerror=alert(1)&gt;')) { $problems += "/variables.html does not show the track name: $($line.Trim())" }
+        }
+        Complete-Case 'web-pages-escape-media-text' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
