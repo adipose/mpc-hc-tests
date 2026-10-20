@@ -40,13 +40,14 @@
                              be66b4b8b1; unfixed 2.8.2 connects it). Skipped
                              without MPCVR\ beside the player.
 
-      bar-float-redock       Float and re-dock the capture bar four times, then
-                             close its floating frame. The frame subclass that
-                             remembers the bar as hidden must be unhooked on
-                             re-dock; the hide flag must reach the ini and the
-                             player must close cleanly. Passes on upstream too:
-                             MFC destroys each floating frame inside the dock,
-                             so the stale subclass is never reached this way.
+      bar-float-redock       Float and re-dock the capture bar, the last time
+                             with no queued message reaching the bar between
+                             dock and float, then close its floating frame.
+                             The hide flag must reach the ini and the player
+                             must close cleanly. Up to 652dfb716f the new frame
+                             was never subclassed in that sequence, so its
+                             close was not remembered (state the code relied
+                             on, not a crash; see the case).
 
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
@@ -337,6 +338,10 @@ public static class W {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  // Dock from the floating frame's caption and float again from the bar, back to back, so the player's thread
+  // has no time to pull a queued message between the two.
+  public static void DockAndFloat(IntPtr frame, IntPtr bar) { SendMessage(frame, 0xA3, (IntPtr)2, IntPtr.Zero); SendMessage(bar, 0x203, IntPtr.Zero, IntPtr.Zero); }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 }
@@ -656,12 +661,19 @@ if ($cases -contains 'preview-with-mpcvr') {
 #
 # Float the capture bar, dock it again from its floating frame's caption, three times over, then float it
 # and close the floating frame with SC_CLOSE. CPlayerCaptureBar subclasses the floating frame to see that
-# close and remember the bar as hidden (#2979, d04854b549). It used to forget the saved window procedure on
-# re-dock without unhooking the frame, so a frame that outlived the re-dock forwarded its messages to
-# nothing, and a frame subclassed twice saved its own procedure as the original. The player must answer
-# throughout, the hide flag must reach the ini, and the player must close cleanly.
-# Docking is toggled with posted double clicks, which CSizingControlBar and CMiniDockFrameWnd act on without
-# tracking the pointer; WM_NULL after each one makes the bar's PreTranslateMessage see the new parent.
+# close and remember the bar as hidden (#2979, d04854b549). The player must answer throughout, the hide flag
+# must reach the ini, and the player must close cleanly.
+# Docking is toggled with sent double clicks, which CSizingControlBar and CMiniDockFrameWnd act on without
+# tracking the pointer. A posted WM_NULL after each step makes the bar's PreTranslateMessage, which is where
+# the subclassing happens, see the new parent. The last re-dock and float are sent back to back from one call
+# (W.DockAndFloat) with the main window minimized, so no paint or pointer message is queued to the bar while
+# it is docked and the bar never sees itself docked. Up to 652dfb716f the bar kept only the saved window
+# procedure, not which frame it belonged to, and cleared it only on seeing the bar docked: the new frame was
+# then never subclassed and its close did not set the hide flag. That is how this fails on upstream (4 of 4
+# runs; without the minimize a paint got in once in two). Real input always queues a message to the bar
+# before the user can double click it, so this checks the state the code depended on, not a sequence a user
+# is known to hit. The crash the stale subclass could cause (a frame outliving the re-dock) is not
+# reachable: MFC destroys the floating frame inside the dock call.
 
 if ($cases -contains 'bar-float-redock') {
     $name = 'bar-float-redock'
@@ -675,18 +687,29 @@ if ($cases -contains 'bar-float-redock') {
     function Frame { $W::GetParent($W::GetParent($bar)) }
     $frames = @()
     try {
-        for ($n = 1; $n -le 4 -and -not $problems; $n++) {
+        for ($n = 1; $n -le 3 -and -not $problems; $n++) {
             if (-not (Send $bar $WM_LBUTTONDBLCLK 0)) { $problems += "float $n did not return"; break }
             Settle
             $frame = Frame
             if ($frame -eq $player.Main) { $problems += "float $n left the bar docked"; break }
             $frames += $frame
-            if ($n -eq 4) { break }
+            if ($n -eq 3) { break }
             if (-not (Send $frame $WM_NCLBUTTONDBLCLK $HTCAPTION)) { $problems += "re-dock $n did not return"; break }
             Settle
             if ((Frame) -ne $player.Main) { $problems += "re-dock $n left the bar floating"; break }
             if ($player.Process.HasExited) { $problems += "player exited after re-dock $n, code $($player.Process.ExitCode)"; break }
             if (-not $W::Answers($player.Main, 3000)) { $problems += "main window not answering after re-dock $n"; break }
+        }
+        if (-not $problems) {
+            # The last re-dock and float, with the main window minimized so nothing paints or sits under the pointer.
+            $W::ShowWindow($player.Main, 6) | Out-Null   # SW_MINIMIZE
+            Start-Sleep -Milliseconds 700
+            $W::DockAndFloat($frames[-1], $bar)
+            $W::ShowWindow($player.Main, 9) | Out-Null   # SW_RESTORE
+            Settle
+            $frame = Frame
+            if ($frame -eq $player.Main -or $frame -eq $frames[-1]) { $problems += 'the last re-dock and float did not leave the bar in a new frame' }
+            else { $frames += $frame }
         }
         $distinct = @($frames | Select-Object -Unique).Count
         $alive = @($frames | Select-Object -Unique | Where-Object { $W::IsWindow($_) }).Count
