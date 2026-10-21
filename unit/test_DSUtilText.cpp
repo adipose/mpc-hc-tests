@@ -159,6 +159,55 @@ TEST(PathUtils, UrlAndFullPathClassification)
     EXPECT_FALSE(PathUtils::IsFullFilePath(http));
 }
 
+// Ledger 32: the yt-dlp command line wrapped the URL and the temp path in bare quotes, so a
+// quote in the URL ended the argument and a trailing backslash escaped the closing quote.
+// QuoteArg must survive the CommandLineToArgvW / CRT parse unchanged.
+static std::vector<CString> SplitCommandLine(const CString& cmdline)
+{
+    std::vector<CString> args;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(cmdline, &argc);
+    if (argv) {
+        for (int i = 0; i < argc; i++) {
+            args.emplace_back(argv[i]);
+        }
+        LocalFree(argv);
+    }
+    return args;
+}
+
+TEST(PathUtils, QuoteArgRoundTrips)
+{
+    const LPCWSTR cases[] = {
+        L"https://example.com/watch?v=abc&list=x",
+        L"https://example.com/a\" --exec calc \"x",
+        L"https://example.com/b\\",
+        L"https://example.com/c\\\\",
+        L"temp:C:\\Users\\me\\AppData\\Local\\Temp\\",
+        L"a\\\"b",
+        L"a\\\\\"b",
+        L"\"",
+        L"--exec",
+        L"-J",
+        L"with space",
+        L"",
+    };
+    for (LPCWSTR arg : cases) {
+        auto args = SplitCommandLine(L"yt-dlp.exe -J " + PathUtils::QuoteArg(arg) + L" next");
+        ASSERT_EQ(args.size(), 4u) << arg;
+        EXPECT_EQ(args[2], CString(arg));
+        EXPECT_EQ(args[3], L"next") << arg;
+    }
+}
+
+TEST(PathUtils, QuoteArgForm)
+{
+    EXPECT_EQ(PathUtils::QuoteArg(L"plain"), L"\"plain\"");
+    EXPECT_EQ(PathUtils::QuoteArg(L"C:\\Temp\\"), L"\"C:\\Temp\\\\\"");
+    EXPECT_EQ(PathUtils::QuoteArg(L"a\"b"), L"\"a\\\"b\"");
+    EXPECT_EQ(PathUtils::QuoteArg(L"a\\b"), L"\"a\\b\""); // a backslash before anything but a quote stays single
+}
+
 // #1717, #3766, #3992: long paths get the \\?\ prefix, URLs do not
 TEST(PathUtils, ExtendMaxPathLength)
 {
