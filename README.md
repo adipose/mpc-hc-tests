@@ -85,6 +85,9 @@ suites/
   language/           Switching the interface language at runtime: after
                       leaving Hebrew for English, new windows must be laid
                       out left to right
+  web/                The web interface's JSON answers polled in tight loops
+                      while files open and close under them: no fault, every
+                      body parses, the sizes seen are real ones
 ```
 
 ## Unit tests
