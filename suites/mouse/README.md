@@ -69,6 +69,14 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `playlist-playing-item-drawn-while-renaming` | row 0 (a 15 s clip) renamed until it ends and row 1 starts playing | row 1 is drawn with its name while the edit is still open (#4279 item 9) |
 | `playlist-web-index-repaints` | the web interface's `setplaylistindex` moves playback from row 0 to row 1 | both rows look as a forced redraw of the list draws them (#4279 item 1) |
 | `panel-zone-holds-while-editing` | the playlist and the Edit List editor docked side by side, the playlist's edit open, the pointer on the video past the delay | neither panel hides or moves, and the edit stays open; both hide once it is cancelled (#4279 item 10) |
+| `fullscreen-toggle-no-basic-frame-<theme>` | five fullscreen round trips by real double-clicks on the video, the screen recorded at 60 fps with ffmpeg's gdigrab (dark theme, theme off) | no recorded frame in the 0.8 s after any toggle shows the Vista/7 basic frame's light blue border where the window stood, and every round really covered the screen and came back (#4330) |
+
+The fullscreen frame cases need ffmpeg on the host's PATH: it is copied to the
+guest to record, and reads the recording back on the host. The unfixed build
+never shows the basic frame on the first entry after launch, so the case makes
+five round trips. madVR makes the flash last far longer (about 0.3 s), but it
+is not on the guests and the case does not need it: without it the unfixed build
+still showed the frame on most entries on both Windows 10 and 11.
 
 The Options/theme case runs in `Run-OptionsThemeCase.guest.ps1`, one case per
 job. The theme comes from the ini (`MPCTheme`, `ModernThemeMode` 0 = Dark / 1 =

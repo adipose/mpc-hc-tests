@@ -52,7 +52,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -220,7 +220,10 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
+    $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
     if ($combocase) { Copy-Item -ToSession $session $combocase 'C:\mpc-test\mouse\combocase.exe' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\mouse\player') { Remove-Item 'C:\mpc-test\mouse\player' -Recurse -Force }
@@ -1117,6 +1120,94 @@ try {
         }
     }
 
+    # The fullscreen frame job (#4330): one launch of the player, Run-FullscreenFrameCase recording the screen
+    # while it toggles fullscreen. Same scheduled-task shape as the others.
+    function Invoke-FullscreenFrameJob {
+        param([string] $Name, [string] $IniText)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $jobJson = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; Clip = 'C:\mpc-test\mouse\pw-long.mkv'; Ffmpeg = 'C:\mpc-test\mouse\ffmpeg.exe'
+            OutDir = $guestOut; Fps = 60; Rounds = 5; DwellMs = 2000; Window = @{ X = 60; Y = 60; W = 900; H = 600 }
+        } | ConvertTo-Json -Depth 4
+        $json = Invoke-Command -Session $session -ArgumentList $jobJson, $guestOut, $IniText, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-FullscreenFrameCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(180)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Start-Sleep -Seconds 1
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64, ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # The recorded frames that show the basic frame's left border where the window stood. The border is a
+    # light steel blue around (186,209,234), which is in neither the dark nor the light theme, the Windows
+    # 10/11 frame, the wallpaper nor the clip. A frame counts when a quarter of a 14 px wide strip over the
+    # window's left edge is that colour. The whole recording is read: gdigrab starts capturing a variable
+    # while after it is launched, so the guest's event times do not place a toggle in the video.
+    function Get-BasicFrames {
+        param($Job)
+        $w = $Job.Run.window
+        $x = $w[0] - 2; $y = $w[1] + 40; $sw = 14; $sh = $w[3] - $w[1] - 80
+        $raw = Join-Path $Job.Dir 'strip.rgb'
+        & $ffmpegExe -hide_banner -loglevel error -y -i (Join-Path $Job.Dir 'rec.mkv') -fps_mode passthrough -vf "crop=$($sw):$($sh):$($x):$($y),format=rgb24" -f rawvideo $raw
+        $bytes = [IO.File]::ReadAllBytes($raw)
+        [IO.File]::Delete($raw)
+        $fb = $sw * $sh * 3
+        $hits = [System.Collections.Generic.List[int]]::new()
+        for ($f = 0; ($f + 1) * $fb -le $bytes.Length; $f++) {
+            $n = 0
+            # every other row is plenty for a quarter of the strip
+            for ($row = 0; $row -lt $sh; $row += 2) {
+                $o = $f * $fb + $row * $sw * 3
+                for ($i = $o; $i -lt $o + $sw * 3; $i += 3) {
+                    $r = $bytes[$i]; $g = $bytes[$i + 1]; $b = $bytes[$i + 2]
+                    if ($r -ge 140 -and $r -le 205 -and $g -ge 170 -and $g -le 225 -and $b -ge 200 -and $b -le 245 -and $b -gt $r + 25) { $n++ }
+                }
+            }
+            if ($n * 8 -ge $sw * $sh) { $hits.Add($f) }
+        }
+        [pscustomobject]@{ Frames = [int]($bytes.Length / $fb); Hits = $hits }
+    }
+
+    function Test-NoBasicFrame {
+        param($Job)
+        $p = @()
+        $scr = $Job.Run.screen
+        if (-not (Test-Path (Join-Path $Job.Dir 'rec.mkv'))) { return @('no recording came back from the guest') }
+        # Every round must really have gone fullscreen and come back, or no flash is no evidence.
+        foreach ($r in $Job.Run.rounds) {
+            if ($r.fullscreen[2] - $r.fullscreen[0] -ne $scr[0] -or $r.fullscreen[3] - $r.fullscreen[1] -ne $scr[1]) { $p += "round $($r.round) never covered the screen: $($r.fullscreen -join ',')" }
+            if (($r.windowed -join ',') -ne ($Job.Run.window -join ',')) { $p += "round $($r.round) came back to $($r.windowed -join ',') instead of $($Job.Run.window -join ',')" }
+        }
+        $c = Get-BasicFrames $Job
+        if ($c.Frames -lt 300) { $p += "only $($c.Frames) frames recorded" }
+        if ($c.Hits.Count) { $p += "the basic frame showed in $($c.Hits.Count) of $($c.Frames) recorded frames (frames $($c.Hits -join ','))" }
+        $p
+    }
+
     # 9. The player window, its docked panels and the playlist's inline edit under real input (#4279). One
     #    launch per case; Run-PlayerWindowCase.guest.ps1's header says what the unfixed build did in each.
     #    HideWindowedControls=1 is auto-hide in a window, where the panels hide like fullscreen's do.
@@ -1158,6 +1249,27 @@ try {
         if (-not $havePwMedia) { $why += 'no media\pw-*.mkv and no ffmpeg on PATH to make them' }
         if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
         Note Yellow "player window cases not run: $($why -join '; ')"
+    }
+
+    # 10. No Vista/7 basic frame across fullscreen toggles (#4330). Five round trips by real double-clicks
+    #     with the screen recorded; Run-FullscreenFrameCase.guest.ps1's header says what the unfixed build
+    #     did. The first entry after launch never showed it, the later ones and some exits did.
+    $ffNames = 'dark', 'themeoff' | ForEach-Object { "fullscreen-toggle-no-basic-frame-$_" }
+    if (-not (Wanted $ffNames)) {
+    } elseif ($havePwMedia -and $haveLav -and $ffmpegExe) {
+        foreach ($name in $ffNames) {
+            if (-not (Wanted $name)) { $skipped++; continue }
+            $theme = if ($name -like '*-dark') { @{ MPCTheme = 1; ModernThemeMode = 0 } } else { @{ MPCTheme = 0 } }
+            $c = Invoke-FullscreenFrameJob -Name $name -IniText (PwIni ($theme + @{ Loop = 1 }))
+            Complete-Case $name (Test-NoBasicFrame $c)
+        }
+    } else {
+        $skipped += $ffNames.Count
+        $why = @()
+        if (-not $havePwMedia) { $why += 'no media\pw-long.mkv' }
+        if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
+        if (-not $ffmpegExe) { $why += 'no ffmpeg on PATH to record and read the screen' }
+        Note Yellow "fullscreen frame cases not run: $($why -join '; ')"
     }
 }
 finally {
