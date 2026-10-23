@@ -16,10 +16,14 @@ param(
     [Parameter(Mandatory)] [string] $Out,
     [int] $TimeoutSec = 40,
     [double] $CloseAtSec = 0,          # 0 = CMD_CLOSEAPP two seconds after the last command
-    [string] $Commands = ''            # comma-separated base64 entries, each the UTF-8 of
+    [string] $Commands = '',           # comma-separated base64 entries, each the UTF-8 of
                                        # <seconds>:<CMD name or number>:<payload>; the payload may
                                        # be empty and may hold spaces or quotes, which is why the
                                        # entries ride base64 (the task line is built by hand)
+    [int] $Cycles = 0,                 # after the timed commands: this many CMD_CLOSEFILE/CMD_OPENFILE
+                                       # rounds on -Clip, each sent only once the last one's CMD_STATE
+                                       # (CLOSED, then LOADED) came back
+    [double] $CycleStepTimeoutSec = 20 # a round step whose state never comes ends the cycling there
 )
 
 $ErrorActionPreference = 'Continue'
@@ -134,6 +138,29 @@ namespace MpcTest {
                 Marshal.FreeCoTaskMem(cds);
             }
         }
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam, int flags, int timeout, out IntPtr result);
+
+        // Send with a limit, for commands whose handler may never return (a close that hangs in
+        // teardown). SMTO_NORMAL still dispatches the player's own sent notifications while it
+        // waits. The system has copied the payload into the player by the time this returns, so
+        // freeing the buffers after a timeout is safe. False: not answered within the limit.
+        public static bool SendWithin(IntPtr to, IntPtr from, long code, string payload, int ms) {
+            if (payload == null) { payload = ""; }
+            IntPtr text = Marshal.StringToCoTaskMemUni(payload);
+            IntPtr cds = Marshal.AllocCoTaskMem(IntPtr.Size * 3);
+            try {
+                Marshal.WriteIntPtr(cds, 0, (IntPtr)(code & 0xFFFFFFFFL));
+                Marshal.WriteInt32(cds, IntPtr.Size, (payload.Length + 1) * 2);
+                Marshal.WriteIntPtr(cds, IntPtr.Size * 2, text);
+                IntPtr ignored;
+                return SendMessageTimeoutW(to, ApiHostWindow.WM_COPYDATA, from, cds, 0 /* SMTO_NORMAL */, ms, out ignored) != IntPtr.Zero;
+            } finally {
+                Marshal.FreeCoTaskMem(text);
+                Marshal.FreeCoTaskMem(cds);
+            }
+        }
     }
 }
 '@ -ReferencedAssemblies 'System.Windows.Forms'
@@ -216,6 +243,55 @@ foreach ($step in $steps) {
     }
 }
 $result.sent = $sent
+
+# Close/open rounds, each paced by the player's own CMD_STATE notifications (MLS in MainFrm.h:
+# 0 CLOSED, 2 LOADED, 4 FAILING) rather than by the clock, so a slow load is never cut short into
+# the abort path. The first round waits for the startup open to reach LOADED. A step whose state
+# never comes, or a send the player never answers, ends the cycling and is recorded as the stall.
+function Wait-ApiState {
+    param([int] $From, [string[]] $States, [double] $Limit)
+    $deadline = ((Get-Date) - $caseStart).TotalSeconds + $Limit
+    while (((Get-Date) - $caseStart).TotalSeconds -lt $deadline -and -not $p.HasExited) {
+        [System.Windows.Forms.Application]::DoEvents()
+        for ($i = $From; $i -lt $hostWindow.Received.Count; $i++) {
+            $m = $hostWindow.Received[$i]
+            if ($m.Code -eq [long] $apiCommands['CMD_STATE'] -and $States -contains $m.Payload) { return $m }
+        }
+        Start-Sleep -Milliseconds 5
+    }
+    $null
+}
+if ($Cycles -gt 0 -and $playerHwnd -ne [IntPtr]::Zero) {
+    $rounds = @()
+    $stall = $null
+    if (-not (Wait-ApiState 0 @('2') $CycleStepTimeoutSec)) { $stall = 'the startup open never reached LOADED' }
+    $limitMs = [int] ($CycleStepTimeoutSec * 1000)
+    for ($n = 1; $n -le $Cycles -and -not $stall; $n++) {
+        $round = [ordered]@{ n = $n }
+        foreach ($step in @(
+                @{ name = 'close'; cmd = 'CMD_CLOSEFILE'; payload = ''; states = @('0') },
+                @{ name = 'open'; cmd = 'CMD_OPENFILE'; payload = $Clip; states = @('2', '4') })) {
+            $from = $hostWindow.Received.Count
+            $at = ((Get-Date) - $caseStart).TotalSeconds
+            if (-not [MpcTest.ApiCopyData]::SendWithin($playerHwnd, $hostHwnd, [long] $apiCommands[$step.cmd], $step.payload, $limitMs)) {
+                $stall = "round $n $($step.cmd) was not answered within $CycleStepTimeoutSec s"
+                break
+            }
+            $state = Wait-ApiState $from $step.states $CycleStepTimeoutSec
+            if (-not $state) {
+                $stall = "round $n $($step.cmd): no CMD_STATE $($step.states -join '/') within $CycleStepTimeoutSec s"
+                break
+            }
+            $round["$($step.name)Ms"] = [int] (($state.At - $at) * 1000)
+            if ($state.Payload -eq '4') {
+                $stall = "round $n CMD_OPENFILE failed (CMD_STATE 4, FAILING)"
+                break
+            }
+        }
+        $rounds += $round
+    }
+    $result.cycles = [ordered]@{ asked = $Cycles; rounds = $rounds; stall = $stall }
+}
 
 # Close as a controlling application would: CMD_CLOSEAPP, which posts WM_CLOSE to the player's
 # frame, so the player's own shutdown runs. With no close time given, two seconds after the last

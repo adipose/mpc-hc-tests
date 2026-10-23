@@ -18,6 +18,7 @@ Run-PlayerCase.guest.ps1  target side: start the player in the console session,
 Run-ApiCase.guest.ps1     target side for the /slave API cases: host a window
                           the player connects back to, send it WM_COPYDATA
                           commands at given times (as src/MPCTestAPI does),
+                          or close/open rounds paced by its CMD_STATE replies,
                           record every reply in order, close with CMD_CLOSEAPP
 ```
 
@@ -163,6 +164,7 @@ centre the box there. The band cases only ask which colour is present.
 | `subtitle-shift-after-track-change` | `subshift.mkv` with `RenderSSAUsingLibass=1`, paused: Next subtitle on the SRT track, next subtitle track (the libass ASS, which the Subresync bar cannot edit), then Shift subtitle up twice; the player is still there for the close at 10 s and exits 0 (unfixed d74fa713a8: 0xC0000005 at the first shift, `SaveSubtitle` through a null `m_pSubStream`) | patch771 |
 | `dsm-trailing-bytes-seek-near-end` | the same file with `/start 3950`, past the last packet's start, so `FindSyncPoint`'s scan reaches the end: exits 0 (unfixed: the scan spins on the same `Sync()`) | patch770 |
 | `web-pages-escape-media-text` | `markup.mkv`, whose title and audio track name are `<img src=x onerror=alert(1)>`, with `TitleBarTextTitle=1`: `/status.html` carries the title, and `/variables.html`'s audiotrack paragraph has it escaped (unfixed, before #4334: the raw tag). The script side, `javascript.js` writing the title with `innerHTML`, needs a browser and is not checked | #4334 (patch776) |
+| `subtitle-pin-close-reopen-cycles` | `/slave` API, `subs.mkv` (two embedded ASS tracks, so each load creates the internal subtitle input pin): 100 rounds of `CMD_CLOSEFILE` then `CMD_OPENFILE`, each sent once the last one's `CMD_STATE` (CLOSED, then LOADED) came back, all within 20 s per step, and the player exits 0. A guard, not a repro: the lost wakeup it covers (the pin's destructor notifying between the decode thread's predicate check and its block, so the join never returns) is a narrow race and the unfixed build passes too. 1000 rounds on win10-parity-2 took under 90 ms a step | ledger 90 (patch781) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

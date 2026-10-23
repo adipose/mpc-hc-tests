@@ -421,7 +421,9 @@ try {
             [string] $Clip,
             [string[]] $Commands = @(),
             [hashtable] $Settings = @{},
-            [double] $CloseAtSec = 0          # zero: CMD_CLOSEAPP two seconds after the last command
+            [double] $CloseAtSec = 0,         # zero: CMD_CLOSEAPP two seconds after the last command
+            [int] $Cycles = 0,                # close/open rounds on the clip after the commands (Run-ApiCase -Cycles)
+            [int] $DeadlineSec = 90           # how long the guest waits for the run's result
         )
         $tag = '{0}-{1}' -f $Name, (Get-Date -Format 'HHmmss')
         $guestOut = "C:\mpc-test\out\$tag.json"
@@ -433,8 +435,8 @@ try {
 
         $commandsEncoded = (@($Commands | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
 
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $Clip, $commandsEncoded, $CloseAtSec, $guestOut, $consoleUser {
-            param($iniText, $clip, $commandsEncoded, $closeAtSec, $out, $user)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $Clip, $commandsEncoded, $CloseAtSec, $guestOut, $consoleUser, $Cycles, $DeadlineSec {
+            param($iniText, $clip, $commandsEncoded, $closeAtSec, $out, $user, $cycles, $deadlineSec)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -445,11 +447,12 @@ try {
             $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File C:\mpc-test\Run-ApiCase.guest.ps1 -Exe C:\mpc-test\player\mpc-hc64.exe -Clip `"C:\mpc-test\media\$clip`" -Out $out"
             if ($commandsEncoded) { $taskArgs += " -Commands $commandsEncoded" }
             if ($closeAtSec -gt 0) { $taskArgs += " -CloseAtSec $closeAtSec" }
+            if ($cycles -gt 0) { $taskArgs += " -Cycles $cycles" }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcApiCase' -Action $action -Principal $principal -Force | Out-Null
             Start-ScheduledTask -TaskName 'MpcApiCase'
-            $deadline = (Get-Date).AddSeconds(90)
+            $deadline = (Get-Date).AddSeconds($deadlineSec)
             while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) {
                 Start-Sleep -Seconds 2
             }
@@ -2466,6 +2469,34 @@ try {
             elseif ($line -notmatch [regex]::Escape('&lt;img src=x onerror=alert(1)&gt;')) { $problems += "/variables.html does not show the track name: $($line.Trim())" }
         }
         Complete-Case 'web-pages-escape-media-text' $problems
+    }
+
+    # 59. Repeated close and reopen of a file with embedded text subtitles: ledger 90. Each close
+    #    destroys the subtitle input pin, whose destructor wakes the pin's decode thread and joins it.
+    #    Unfixed, the exit flag was a plain bool set without the queue mutex, so the notify could land
+    #    between the thread's predicate check and its block; the wakeup is lost and the join never
+    #    returns. That window is narrow and no run is known to hit it, so this case cannot fail the
+    #    unfixed build on demand. It guards teardown of that pin: every round, paced by the player's
+    #    CMD_STATE (CLOSED, then LOADED), must complete within 20 s per step.
+    if (Test-CaseSelected 'subtitle-pin-close-reopen-cycles') {
+        $rounds = 100
+        $c = Invoke-ApiCase -Name 'subtitle-pin-close-reopen-cycles' -Clip 'subs.mkv' -Cycles $rounds -DeadlineSec 240
+        $problems = @((Get-ProcessProblem $c.Run))
+        if (-not $c.Run.connect) {
+            $problems += 'the player never connected to the API host'
+        } elseif (-not $c.Run.cycles) {
+            $problems += 'the run recorded no close/open rounds'
+        } else {
+            $done = @($c.Run.cycles.rounds | Where-Object { $null -ne $_.openMs })
+            if ($c.Run.cycles.stall) { $problems += "stalled: $($c.Run.cycles.stall)" }
+            if ($done.Count -ne $rounds) { $problems += "$($done.Count) of $rounds rounds completed" }
+            if ($done.Count) {
+                $closeMax = ($done | Measure-Object closeMs -Maximum).Maximum
+                $openMax = ($done | Measure-Object openMs -Maximum).Maximum
+                Note Gray "$($done.Count) rounds; slowest close $closeMax ms, slowest open $openMax ms"
+            }
+        }
+        Complete-Case 'subtitle-pin-close-reopen-cycles' $problems
     }
 }
 finally {
