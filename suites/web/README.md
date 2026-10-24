@@ -1,12 +1,16 @@
 # web suite
 
-The web interface's JSON answers while the player is busy underneath them.
+The web interface's JSON answers while the player is busy underneath them,
+and requests that arrive in more than one read.
 
 ```
-Invoke-Suite.ps1              deploy the player and two clips, run one launch per case, assert
-Run-WebStressCase.guest.ps1   target side: start the player, poll /status.json and /playlist.json
-                              from several clients in tight loops while command lines alternate
-                              two files under them, record what came back (result.json)
+Invoke-Suite.ps1                  deploy the player and two clips, run one launch per case, assert
+Run-WebStressCase.guest.ps1       target side: start the player, poll /status.json and /playlist.json
+                                  from several clients in tight loops while command lines alternate
+                                  two files under them, record what came back (result.json)
+Run-WebSplitHeaderCase.guest.ps1  target side: start the player with no file, send one request per
+                                  split of its header terminator over a raw socket, record the
+                                  status line each got (result.json)
 ```
 
 ## Cases
@@ -14,6 +18,13 @@ Run-WebStressCase.guest.ps1   target side: start the player, poll /status.json a
 | case | what it does | what must hold |
 |---|---|---|
 | `json-under-file-changes` | two clients poll both documents as fast as they can for 60 s while a WM_COPYDATA command line alternates a 150 entry playlist of `stereo.mkv` with `subs.mkv` alone (two embedded subtitle tracks) every 700 ms | the player survives and exits 0 on close; every 200 body parses; no failed request; the pollers saw both playlist sizes (1 and 150) and both subtitle track counts (0 and 3), so the opens really ran under the reads, and no size the player never had |
+| `header-split-across-reads` | five connections each write `GET /status.html HTTP/1.0\r\n\r\n` with the last 0 to 4 bytes held back, wait 200 ms so the server reads the first part alone, write the rest and read with a 3 s timeout. 1 to 3 split the `\r\n\r\n` across two reads; 0 and 4 are the controls | every connection gets `200`; the player survives and closes |
+
+Before the fix (ledger 30) `CWebClientSocket::OnReceive` started the next
+search for `\r\n\r\n` at the end of everything received so far, past the bytes
+holding the start of a split terminator, so it was never found and the client
+waited until it gave up. On the unfixed build on the host the three splits got
+no answer and both controls got their 200.
 
 ## Why this shape
 

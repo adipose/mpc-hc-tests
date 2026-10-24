@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    The web suite: the web interface's JSON answers while the player is busy underneath them.
+    The web suite: the web interface's JSON answers while the player is busy underneath them, and
+    requests that arrive in more than one read.
 
 .DESCRIPTION
     remote.html polls /status.json and /playlist.json once a second for as long as it is open. Those
@@ -9,7 +10,7 @@
     thread could take (ledger 29). After the fix the builders run on the UI thread, reached with a
     bounded SendMessageTimeout, and a frame that does not answer in time gets a 503.
 
-    Cases (Run-WebStressCase.guest.ps1 on the target, in the console session, one launch each):
+    Cases (a .guest.ps1 on the target, in the console session, one launch each):
 
       json-under-file-changes    two clients poll both documents in tight loops for -Seconds while a
                                  command line alternates a long playlist of a plain clip with a clip
@@ -18,7 +19,12 @@
                                  fail, the pollers must have seen both playlist sizes and both subtitle
                                  track counts (or the opens never raced the reads), and no other size:
                                  a playlist of 0 or 261 entries when it was only ever 1 or 150 is a walk
-                                 over nodes being freed and reused
+                                 over nodes being freed and reused (Run-WebStressCase.guest.ps1)
+      header-split-across-reads  one request per split, its "\r\n\r\n" with 1, 2 or 3 bytes held back
+                                 and sent 200 ms later, plus the whole terminator in either read as the
+                                 control. Every split must get its 200: before the fix (ledger 30) the
+                                 next search for the terminator started past the bytes that held its
+                                 start, and the connection sat unanswered (Run-WebSplitHeaderCase.guest.ps1)
 
     A torn walk does not have to fault: in 120 s runs the unfixed build survived on the host and on a
     guest while reporting sizes it never had, so the sizes are what separates the builds. The 503 count
@@ -41,7 +47,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Web interface JSON answers (status, playlist) polled while files open and close under them: the player must not fault and every body must parse (ledger 29)'
+$description = 'Web interface JSON answers (status, playlist) polled while files open and close under them: the player must not fault and every body must parse (ledger 29); a request header whose end is split across two reads must be answered (ledger 30)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -109,7 +115,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\web', 'C:\mpc-test\web\media', 'C:\mpc-test\web\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\web\player.zip' -Force
-    Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-WebStressCase.guest.ps1') 'C:\mpc-test\web\' -Force
+    foreach ($guestScript in 'Run-WebStressCase.guest.ps1', 'Run-WebSplitHeaderCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $guestScript) 'C:\mpc-test\web\' -Force }
     foreach ($clip in $clips) { Copy-Item -ToSession $session (Join-Path $media $clip) 'C:\mpc-test\web\media\' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\web\player') { Remove-Item 'C:\mpc-test\web\player' -Recurse -Force }
@@ -122,13 +128,13 @@ try {
 
     # One launch per case, from a fresh portable ini, in the console session through a scheduled task.
     function Invoke-WebJob {
-        param([string] $Name, [hashtable] $Job, [string] $IniText, [int] $TimeoutSec)
+        param([string] $Name, [hashtable] $Job, [string] $IniText, [int] $TimeoutSec, [string] $Script = 'Run-WebStressCase.guest.ps1')
         $guestOut = "C:\mpc-test\web\out\$Name"
         $Job.Exe = 'C:\mpc-test\web\player\mpc-hc64.exe'
         $Job.OutDir = $guestOut
         $jobJson = $Job | ConvertTo-Json -Depth 4
-        $json = Invoke-Command -Session $session -ArgumentList $jobJson, $guestOut, $IniText, $consoleUser, $TimeoutSec {
-            param($job, $out, $iniText, $user, $timeoutSec)
+        $json = Invoke-Command -Session $session -ArgumentList $jobJson, $guestOut, $IniText, $consoleUser, $TimeoutSec, $Script {
+            param($job, $out, $iniText, $user, $timeoutSec, $guestScript)
             $ErrorActionPreference = 'Continue'
             Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
             if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -139,7 +145,7 @@ try {
             [IO.File]::WriteAllText('C:\mpc-test\web\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
             [IO.File]::WriteAllText('C:\mpc-test\web\job.json', $job)
 
-            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\web\Run-WebStressCase.guest.ps1 -Job C:\mpc-test\web\job.json'
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\web\$guestScript -Job C:\mpc-test\web\job.json"
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcWebCase' -Action $action -Principal $principal -Force | Out-Null
@@ -154,8 +160,10 @@ try {
         $local = Join-Path $OutDir $Name
         New-Item -ItemType Directory -Force $local | Out-Null
         Set-Content (Join-Path $local 'result.json') $json
-        foreach ($n in 1..$Job.Clients) {
-            try { Copy-Item -FromSession $session "$guestOut\poller-$n.log" $local -ErrorAction Stop } catch { }
+        if ($Job.ContainsKey('Clients')) {
+            foreach ($n in 1..$Job.Clients) {
+                try { Copy-Item -FromSession $session "$guestOut\poller-$n.log" $local -ErrorAction Stop } catch { }
+            }
         }
         $run = $json | ConvertFrom-Json
         if ($run.error) { throw "case $Name failed on the guest: $($run.error)" }
@@ -203,6 +211,24 @@ try {
         # reported, not asserted; a build that answered nothing fails on the good-answer floor above.
         Note Gray ("  {0} good answers, {1} x 503, {2} refused, {3} opens, playlist sizes [{4}], subtitle counts [{5}], survived={6}, exit={7}" -f $run.ok, $run.s503, $run.refused, $run.opens, $sizesText, $subsText, $run.survived, $run.exitCode)
         Complete-Case 'json-under-file-changes' $p
+    }
+
+    if (Wanted 'header-split-across-reads') {
+        $job = @{ Port = $port; GapMs = 200; ReadTimeoutMs = 3000 }
+        $run = Invoke-WebJob -Name 'header-split-across-reads' -Job $job -IniText ($ini + "`r`n") -TimeoutSec 90 -Script 'Run-WebSplitHeaderCase.guest.ps1'
+        $p = @()
+        # Keyed by how many bytes of the request were held back for the second write: 1 to 3 split the
+        # "\r\n\r\n", 0 and 4 keep it whole in one read and are the controls.
+        foreach ($holdBack in 0..4) {
+            $line = $run.answers."$holdBack"
+            if ($line -notmatch '^HTTP/1\.[01] 200') {
+                $p += "with $holdBack bytes held back: $(if ($line) { $line } else { 'no answer within 3 s' })"
+            }
+        }
+        if (-not $run.survived) { $p += ('the player died during the run, exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        elseif (-not $run.closed) { $p += 'the player did not close within 20 s of WM_CLOSE' }
+        Note Gray ("  answers by bytes held back: {0}" -f (($run.answers.PSObject.Properties | ForEach-Object { "$($_.Name)=[$($_.Value)]" }) -join ' '))
+        Complete-Case 'header-split-across-reads' $p
     }
 }
 finally {
