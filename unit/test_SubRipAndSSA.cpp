@@ -304,6 +304,24 @@ TEST(LibassSrt, FontTag)
     EXPECT_EQ(SrtToAss("<font color=nonsense>x</font>"), "{\\c&HFFFFFF&}x" + restore);
 }
 
+// Ledger 93. The RGB-to-BGR swap indexed characters 4 and 5 without checking
+// the length, so a three-digit HTML colour read and wrote past a three-byte
+// string: a debug assertion, garbage in release. #RGB now expands to RRGGBB
+// as in HTML, and anything else that is not six hex digits falls back to
+// white. Isolated because before the fix a debug build died here.
+TEST_ISOLATED(LibassSrt, FontColorLength)
+{
+    STSStyle style;
+    const std::string restore = "{\\c}{\\fn" + std::string(CT2CA(style.fontName)) + "}{\\fs" + std::to_string((int)std::round(style.fontSize)) + "}";
+
+    EXPECT_EQ(SrtToAss("<font color=\"#f00\">red</font>"), "{\\c&H0000ff&}red" + restore);
+    EXPECT_EQ(SrtToAss("<font color=\"#1a2\">x</font>"), "{\\c&H22aa11&}x" + restore);
+    EXPECT_EQ(SrtToAss("<font color=\"#12345\">x</font>"), "{\\c&HFFFFFF&}x" + restore);
+    EXPECT_EQ(SrtToAss("<font color=\"#1234567\">x</font>"), "{\\c&HFFFFFF&}x" + restore);
+    EXPECT_EQ(SrtToAss("<font color=\"#12345g\">x</font>"), "{\\c&HFFFFFF&}x" + restore);
+    EXPECT_EQ(SrtToAss("<font color=\"#000000\">black</font>"), "{\\c&H000000&}black" + restore);
+}
+
 TEST(LibassSrt, MicroDvdExtensions)
 {
     EXPECT_EQ(SrtToAss("{y:i}italic"), "{\\i1}italic");
