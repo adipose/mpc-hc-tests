@@ -190,6 +190,7 @@ namespace MpcTest {
     public static class Geometry {
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out WinRect rect);
         [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(int action, int param, out WinRect rect, int winIni);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out WinRect rect, int size);
     }
@@ -282,7 +283,7 @@ function Find-PlayerToolbar {
 # sets WS_HSCROLL/WS_VSCROLL while the scrollbar is shown, so the style says whether one is there.
 # Also one probe of the player toolbar: TB_BUTTONCOUNT (WM_USER + 24) and, per button, the idCommand
 # of its TBBUTTON, recorded as toolbarIds in button order. And one probe of the main window's
-# geometry: window rect, DWM extended frame bounds (frameRect), maximized, and the primary
+# geometry: window rect, DWM extended frame bounds (frameRect), maximized, iconic, and the primary
 # monitor's work area.
 function Get-PlaylistProbe {
     param([double] $At, [int] $ProcessId)
@@ -324,6 +325,7 @@ function Get-PlaylistProbe {
     $probe.mainRect = $null
     $probe.frameRect = $null
     $probe.maximized = $null
+    $probe.iconic = $null
     $probe.workArea = $null
     $main = Find-ProcessWindow -ProcessId $ProcessId -Class 'MediaPlayerClassicW'
     if ($main -ne [IntPtr]::Zero) {
@@ -336,6 +338,7 @@ function Get-PlaylistProbe {
             $probe.frameRect = [ordered]@{ left = $fr.left; top = $fr.top; right = $fr.right; bottom = $fr.bottom }
         }
         $probe.maximized = [MpcTest.Geometry]::IsZoomed($main)
+        $probe.iconic = [MpcTest.Geometry]::IsIconic($main)
         $probe.dpi = [MpcTest.User32]::GetDpiForWindow($main)
     }
     # The process's visible top-level windows, class and title: what else is on screen when a probe
