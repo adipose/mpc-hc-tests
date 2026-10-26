@@ -193,6 +193,18 @@ try {
             [void] $mpcpl.AppendLine("$i,filename,C:\mpc-test\media\list30\$name")
         }
         [IO.File]::WriteAllText('C:\mpc-test\media\list30.mpcpl', $mpcpl.ToString(), [Text.UTF8Encoding]::new($true))
+        # Playlists that list themselves, for the m3u recursion cases. self.m3u lists clip.mkv (stereo.mkv), then
+        # itself by its bare name and again by another spelling, upper case through ..\. a.m3u lists a.mkv
+        # (stereo.mkv) and b.m3u, which lists b.mkv (twotracks.mkv, 1200 Hz on its default track) and a.m3u.
+        if (Test-Path 'C:\mpc-test\media\m3u') { Remove-Item 'C:\mpc-test\media\m3u' -Recurse -Force }
+        New-Item -ItemType Directory 'C:\mpc-test\media\m3u' | Out-Null
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\m3u\clip.mkv'
+        Copy-Item 'C:\mpc-test\media\stereo.mkv' 'C:\mpc-test\media\m3u\a.mkv'
+        Copy-Item 'C:\mpc-test\media\twotracks.mkv' 'C:\mpc-test\media\m3u\b.mkv'
+        $ascii = [Text.Encoding]::ASCII
+        [IO.File]::WriteAllText('C:\mpc-test\media\m3u\self.m3u', "#EXTM3U`r`nclip.mkv`r`nself.m3u`r`n..\m3u\SELF.m3u`r`n", $ascii)
+        [IO.File]::WriteAllText('C:\mpc-test\media\m3u\a.m3u', "#EXTM3U`r`na.mkv`r`nb.m3u`r`n", $ascii)
+        [IO.File]::WriteAllText('C:\mpc-test\media\m3u\b.m3u', "#EXTM3U`r`nb.mkv`r`na.m3u`r`n", $ascii)
     }
 
     $version = Invoke-Command -Session $session { (Get-Item 'C:\mpc-test\player\mpc-hc64.exe').VersionInfo.ProductVersion }
@@ -2466,6 +2478,107 @@ try {
             elseif ($line -notmatch [regex]::Escape('&lt;img src=x onerror=alert(1)&gt;')) { $problems += "/variables.html does not show the track name: $($line.Trim())" }
         }
         Complete-Case 'web-pages-escape-media-text' $problems
+    }
+
+    # 59. An m3u that lists itself plays its clip once and stops: #4350 (patch789).
+    #    ParseM3UPlayList opened a nested .m3u/.m3u8 entry with no check against the playlists it was already
+    #    inside, so m3u\self.m3u, which lists clip.mkv and then itself (as "self.m3u" and as "..\m3u\SELF.m3u"),
+    #    recursed until the stack overflowed. The fix skips an entry naming a playlist already being parsed,
+    #    compared canonicalized and case-insensitively. One capture, stereo.mkv's, and /close exits 0.
+    if (Test-CaseSelected 'm3u-lists-itself') {
+        $c = Invoke-PlayerCase -Name 'm3u-lists-itself' -Clip 'm3u\self.m3u'
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 1) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 1 (the clip, once)" }
+        else { $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds) }
+        Complete-Case 'm3u-lists-itself' $problems
+    }
+
+    # 60. The same through two playlists: m3u\a.m3u lists a.mkv and b.m3u, which lists b.mkv and a.m3u again.
+    #    The playlist is a.mkv then b.mkv, each heard once (LoopMode=1 plays the next entry, LoopNum=1 stops
+    #    after one pass); unfixed, a and b open each other until the stack overflows.
+    if (Test-CaseSelected 'm3u-lists-itself-through-another') {
+        $c = Invoke-PlayerCase -Name 'm3u-lists-itself-through-another' -Clip 'm3u\a.m3u' -Settings @{ LoopMode = 1; LoopNum = 1 }
+        $second = @($clips.clips.'twotracks.mkv'.audio | Where-Object default)[0]     # m3u\b.mkv is a copy of twotracks.mkv
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (a.mkv, then b.mkv)" }
+        else {
+            $problems += (Test-Audio $c.Wavs[0] $stereo.audio[0].tones $seconds 1.0)
+            $problems += (Test-Audio $c.Wavs[1] $second.tones $seconds 1.0)
+        }
+        Complete-Case 'm3u-lists-itself-through-another' $problems
+    }
+
+    # 61-63. PauseWhenMinimized (Advanced, patch789): CMainFrame::OnSize pauses a playing file that has video
+    #    when the window is minimized, and resumes it on restore unless something played, paused or stopped
+    #    in between. steps.mkv (video, and a tone stepping 300..1200 Hz every 2 s) says by its pitch where
+    #    playback is, so the captures tell a pause (the tone picks up where it stopped) from a mute (it jumps
+    #    ahead). Minimize and restore are WM_SYSCOMMAND SC_MINIMIZE (61472) and SC_RESTORE (61728) posted to the
+    #    frame: not pointer input, so posting is the real path; the probes check the window really was iconic.
+    #    The player starts sounding about 1 s after launch, so with a close at 11 s an uninterrupted run sounds
+    #    for about 10 s and a 4 s pause takes that to about 6.
+
+    # Seconds of sound across a case's captures (0.25 s windows of Get-ToneTimeline with a tone in them) and
+    # the last tone heard.
+    function Get-SoundSummary {
+        param([string[]] $Wavs)
+        $windows = 0; $last = 0
+        foreach ($w in $Wavs) {
+            foreach ($t in @(& (Join-Path $PSScriptRoot 'Get-ToneTimeline.ps1') -Wav $w | Where-Object { $_.hz -gt 0 })) { $windows++; $last = $t.hz }
+        }
+        [pscustomobject]@{ Seconds = $windows * 0.25; LastHz = $last }
+    }
+
+    function Get-IconicProblems {
+        param($Run, [hashtable] $Want)   # probe time -> whether the frame must be iconic then
+        $probes = @($(if ($Run.PSObject.Properties['probes']) { $Run.probes }))
+        foreach ($at in $Want.Keys) {
+            $p = @($probes | Where-Object { [double]$_.at -eq $at })[0]
+            if (-not $p -or $null -eq $p.iconic) { "no probe of the frame at $at s" }
+            elseif ([bool]$p.iconic -ne $Want[$at]) { "at $at s the frame was $(if ($p.iconic) { 'minimized' } else { 'not minimized' }), expected $(if ($Want[$at]) { 'minimized' } else { 'restored' })" }
+        }
+        $posts = @($(if ($Run.PSObject.Properties['posts']) { $Run.posts }))
+        if (-not $posts -or @($posts | Where-Object { -not $_.delivered }).Count) { 'not every posted message reached the frame' }
+    }
+
+    # 61. Minimized at 3 s, restored at 7: about 4 s of the run is silent and the tone resumes where it stopped.
+    #    Unfixed (no such setting) the audio plays straight through, about 10 s.
+    if (Test-CaseSelected 'pause-when-minimized') {
+        $c = Invoke-PlayerCase -Name 'pause-when-minimized' -Clip 'steps.mkv' -Switches '/play' -Settings @{ PauseWhenMinimized = 1 } `
+            -PostCommands '3:msg:274:61472,7:msg:274:61728' -ProbeAt '4,8' -CloseAtSec 11
+        $s = Get-SoundSummary $c.Wavs
+        Note Gray "pause-when-minimized: $($s.Seconds) s of sound in $($c.Wavs.Count) capture(s), last tone $($s.LastHz) Hz"
+        $problems = @((Get-ProcessProblem $c.Run)) + @(Get-IconicProblems $c.Run @{ 4.0 = $true; 8.0 = $false })
+        if ($s.Seconds -gt 8.0) { $problems += "$($s.Seconds) s of sound: the minimize did not pause (an uninterrupted run sounds about 10 s, a paused one about 6)" }
+        elseif ($s.Seconds -lt 4.0) { $problems += "$($s.Seconds) s of sound: playback did not resume after the restore (about 6 s expected)" }
+        # steps.mkv's segment k (300 + 100k Hz) starts at 2k s: S seconds played end in segment floor(S/2), so a
+        # later tone means the position ran on while silent, a mute rather than a pause.
+        elseif ((($s.LastHz - 300) / 100) -gt ([math]::Floor($s.Seconds / 2) + 1)) { $problems += "the last tone is $($s.LastHz) Hz after $($s.Seconds) s of sound: the position ran on while silent" }
+        Complete-Case 'pause-when-minimized' $problems
+    }
+
+    # 62. The user's own pause wins: minimized at 3 s (paused by the setting), played at 4 (ID_PLAY_PLAY 887),
+    #    paused at 6 (ID_PLAY_PAUSE 888), restored at 7. The user's play cleared the minimize's claim on the pause,
+    #    so the restore must not resume it: about 2 + 2 s of sound. Resumed, it would be about 4 s more.
+    if (Test-CaseSelected 'pause-when-minimized-user-pause-wins') {
+        $c = Invoke-PlayerCase -Name 'pause-when-minimized-user-pause-wins' -Clip 'steps.mkv' -Switches '/play' -Settings @{ PauseWhenMinimized = 1 } `
+            -PostCommands '3:msg:274:61472,4:887,6:888,7:msg:274:61728' -ProbeAt '3.5,8' -CloseAtSec 11
+        $s = Get-SoundSummary $c.Wavs
+        Note Gray "pause-when-minimized-user-pause-wins: $($s.Seconds) s of sound in $($c.Wavs.Count) capture(s), last tone $($s.LastHz) Hz"
+        $problems = @((Get-ProcessProblem $c.Run)) + @(Get-IconicProblems $c.Run @{ 3.5 = $true; 8.0 = $false })
+        if ($s.Seconds -gt 5.5) { $problems += "$($s.Seconds) s of sound: the restore resumed what the user had paused (about 4 s expected)" }
+        elseif ($s.Seconds -lt 3.0) { $problems += "$($s.Seconds) s of sound: the play posted while minimized did not sound (about 4 s expected)" }
+        Complete-Case 'pause-when-minimized-user-pause-wins' $problems
+    }
+
+    # 63. The control: with the setting off (the default) a minimize does not interrupt playback, about 10 s.
+    if (Test-CaseSelected 'pause-when-minimized-off') {
+        $c = Invoke-PlayerCase -Name 'pause-when-minimized-off' -Clip 'steps.mkv' -Switches '/play' `
+            -PostCommands '3:msg:274:61472,7:msg:274:61728' -ProbeAt '4,8' -CloseAtSec 11
+        $s = Get-SoundSummary $c.Wavs
+        Note Gray "pause-when-minimized-off: $($s.Seconds) s of sound in $($c.Wavs.Count) capture(s), last tone $($s.LastHz) Hz"
+        $problems = @((Get-ProcessProblem $c.Run)) + @(Get-IconicProblems $c.Run @{ 4.0 = $true; 8.0 = $false })
+        if ($s.Seconds -lt 8.5) { $problems += "$($s.Seconds) s of sound with the setting off: the minimize interrupted playback (about 10 s expected)" }
+        Complete-Case 'pause-when-minimized-off' $problems
     }
 }
 finally {
