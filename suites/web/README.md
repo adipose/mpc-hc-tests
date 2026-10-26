@@ -11,6 +11,9 @@ Run-WebStressCase.guest.ps1       target side: start the player, poll /status.js
 Run-WebSplitHeaderCase.guest.ps1  target side: start the player with no file, send one request per
                                   split of its header terminator over a raw socket, record the
                                   status line each got (result.json)
+Run-WebMalformedCase.guest.ps1    target side: start the player with no file, send the malformed
+                                  requests over raw sockets, record the header block each got
+                                  (result.json)
 ```
 
 ## Cases
@@ -19,12 +22,20 @@ Run-WebSplitHeaderCase.guest.ps1  target side: start the player with no file, se
 |---|---|---|
 | `json-under-file-changes` | two clients poll both documents as fast as they can for 60 s while a WM_COPYDATA command line alternates a 150 entry playlist of `stereo.mkv` with `subs.mkv` alone (two embedded subtitle tracks) every 700 ms | the player survives and exits 0 on close; every 200 body parses; no failed request; the pollers saw both playlist sizes (1 and 150) and both subtitle track counts (0 and 3), so the opens really ran under the reads, and no size the player never had |
 | `header-split-across-reads` | five connections each write `GET /status.html HTTP/1.0\r\n\r\n` with the last 0 to 4 bytes held back, wait 200 ms so the server reads the first part alone, write the rest and read with a 3 s timeout. 1 to 3 split the `\r\n\r\n` across two reads; 0 and 4 are the controls | every connection gets `200`; the player survives and closes |
+| `malformed-requests` | three raw requests: `GET /status.html` with an ordinary header line (control), the same with a header line that has no colon after it, and `GET /status.html?redir=%2F%0D%0AX-Injected%3A%20yes` | the control and the colonless request both get `200` and the player survives; the `302` has no `X-Injected` header line of its own |
 
 Before the fix (ledger 30) `CWebClientSocket::OnReceive` started the next
 search for `\r\n\r\n` at the end of everything received so far, past the bytes
 holding the start of a split terminator, so it was never found and the client
 waited until it gave up. On the unfixed build on the host the three splits got
 no answer and both controls got their 200.
+
+In `malformed-requests`, before patch789 `ParseHeader` took every header line's colon as found. With
+none left in the buffer the key length went negative and the request was
+dropped, so the colonless request got no answer at all; the player itself
+survived (6898c670d6 on win10-parity-2). The decoded `redir` parameter went
+into the `Location` line with its line break, so the unfixed build answered
+with `Location: /` followed by `X-Injected: yes` as a header of its own.
 
 ## Why this shape
 

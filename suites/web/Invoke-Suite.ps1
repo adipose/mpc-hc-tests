@@ -25,6 +25,11 @@
                                  control. Every split must get its 200: before the fix (ledger 30) the
                                  next search for the terminator started past the bytes that held its
                                  start, and the connection sat unanswered (Run-WebSplitHeaderCase.guest.ps1)
+      malformed-requests         a header line without a colon must get its 200 like the control and
+                                 leave the player running (before patch789 ParseHeader read from a null
+                                 pointer), and a redir parameter holding "\r\nX-Injected: yes" must not
+                                 put a header line of its own into the 302 (response splitting)
+                                 (Run-WebMalformedCase.guest.ps1)
 
     A torn walk does not have to fault: in 120 s runs the unfixed build survived on the host and on a
     guest while reporting sizes it never had, so the sizes are what separates the builds. The 503 count
@@ -47,7 +52,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Web interface JSON answers (status, playlist) polled while files open and close under them: the player must not fault and every body must parse (ledger 29); a request header whose end is split across two reads must be answered (ledger 30)'
+$description = 'Web interface JSON answers (status, playlist) polled while files open and close under them: the player must not fault and every body must parse (ledger 29); a request header whose end is split across two reads must be answered (ledger 30); a header line without a colon and a redir holding a line break are handled safely (patch789)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -115,7 +120,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\web', 'C:\mpc-test\web\media', 'C:\mpc-test\web\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\web\player.zip' -Force
-    foreach ($guestScript in 'Run-WebStressCase.guest.ps1', 'Run-WebSplitHeaderCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $guestScript) 'C:\mpc-test\web\' -Force }
+    foreach ($guestScript in 'Run-WebStressCase.guest.ps1', 'Run-WebSplitHeaderCase.guest.ps1', 'Run-WebMalformedCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $guestScript) 'C:\mpc-test\web\' -Force }
     foreach ($clip in $clips) { Copy-Item -ToSession $session (Join-Path $media $clip) 'C:\mpc-test\web\media\' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\web\player') { Remove-Item 'C:\mpc-test\web\player' -Recurse -Force }
@@ -229,6 +234,26 @@ try {
         elseif (-not $run.closed) { $p += 'the player did not close within 20 s of WM_CLOSE' }
         Note Gray ("  answers by bytes held back: {0}" -f (($run.answers.PSObject.Properties | ForEach-Object { "$($_.Name)=[$($_.Value)]" }) -join ' '))
         Complete-Case 'header-split-across-reads' $p
+    }
+
+    if (Wanted 'malformed-requests') {
+        $job = @{ Port = $port; ReadTimeoutMs = 3000 }
+        $run = Invoke-WebJob -Name 'malformed-requests' -Job $job -IniText ($ini + "`r`n") -TimeoutSec 90 -Script 'Run-WebMalformedCase.guest.ps1'
+        $p = @()
+        foreach ($name in 'control', 'no-colon') {
+            $status = ("$($run.answers.$name)" -split "`r`n")[0]
+            if ($status -notmatch '^HTTP/1\.[01] 200') { $p += "${name}: $(if ($status) { $status } else { 'no answer within 3 s' })" }
+        }
+        # The 302 must keep the injected text inside its Location line, if anywhere, never on a line of its own.
+        $redirLines = "$($run.answers.'redir-crlf')" -split "`r`n"
+        if ($redirLines[0] -notmatch '^HTTP/1\.[01] 302') { $p += "redir-crlf: $(if ($redirLines[0]) { $redirLines[0] } else { 'no answer within 3 s' })" }
+        if (@($redirLines | Where-Object { $_ -match '^X-Injected:' }).Count) { $p += 'redir-crlf: the redir parameter added a header line of its own (X-Injected)' }
+        if (-not $run.survived) { $p += ('the player died during the run, exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        elseif (-not $run.closed) { $p += 'the player did not close within 20 s of WM_CLOSE' }
+        foreach ($name in 'control', 'no-colon', 'redir-crlf') {
+            Note Gray ("  {0}: {1}" -f $name, (("$($run.answers.$name)" -split "`r`n") -join ' | '))
+        }
+        Complete-Case 'malformed-requests' $p
     }
 }
 finally {
