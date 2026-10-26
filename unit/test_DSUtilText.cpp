@@ -22,6 +22,7 @@
 #include "TestUtil.h"
 #include "../../src/DSUtil/ISOLang.h"
 #include "../../src/DSUtil/PathUtils.h"
+#include "../../src/DSUtil/FileHandle.h"
 #include "../../src/DSUtil/text.h"
 #include "moreuuids.h"
 
@@ -116,6 +117,46 @@ TEST(ISOLang, EmptyCodeMatchesNothing)
 }
 
 // --- PathUtils --------------------------------------------------------------
+
+// 6898c670d6 (from #4350): a root that does not exist is its own parent, and
+// CreateDirRecursive recursed on it until the stack ran out
+TEST_ISOLATED(PathUtils, CreateDirRecursiveStopsAtAMissingDrive)
+{
+    DWORD drives = GetLogicalDrives();
+    wchar_t letter = 0;
+    for (wchar_t c = L'Z'; c >= L'D'; c--) {
+        if (!(drives & (1u << (c - L'A')))) {
+            letter = c;
+            break;
+        }
+    }
+    ASSERT_NE(letter, 0) << "no unused drive letter";
+    CStringW path;
+    path.Format(L"%c:\\mpc-test\\a\\b", letter);
+    EXPECT_FALSE(PathUtils::CreateDirRecursive(path));
+}
+
+TEST(PathUtils, CreateDirRecursiveCreatesEveryLevel)
+{
+    CStringW path = mpctest::TempDir() + L"create-dir-recursive\\a\\b";
+    EXPECT_TRUE(PathUtils::CreateDirRecursive(path));
+    EXPECT_TRUE(PathUtils::IsDir(path));
+}
+
+// 6898c670d6 (from #4350): without ReleaseBuffer the string kept its old
+// length, so the result compared equal but was the wrong length
+TEST(PathUtils, RenameAndRemoveFileExtSetTheLength)
+{
+    CStringW renamed = RenameFileExt(L"C:\\video\\clip.mkv", L".ssa");
+    EXPECT_EQ(renamed, L"C:\\video\\clip.ssa");
+    EXPECT_EQ(renamed.GetLength(), 17);
+    renamed = RenameFileExt(L"C:\\video\\clip.mkv", L".x");
+    EXPECT_EQ(renamed, L"C:\\video\\clip.x");
+    EXPECT_EQ(renamed.GetLength(), 15);
+    CStringW removed = RemoveFileExt(L"C:\\video\\clip.mkv");
+    EXPECT_EQ(removed, L"C:\\video\\clip");
+    EXPECT_EQ(removed.GetLength(), 13);
+}
 
 TEST(PathUtils, NameAndExtension)
 {
