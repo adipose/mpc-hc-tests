@@ -495,6 +495,26 @@ TEST(Text, HtmlSpecialCharsDecode)
     EXPECT_EQ(HtmlSpecialCharsDecode("Tom &amp; Jerry &lt;3 &gt; 2 &quot;q&quot;"), "Tom & Jerry <3 > 2 \"q\"");
 }
 
+// patch789 (from #4350): "&amp;" was decoded first, so an escaped entity was
+// decoded a second time
+TEST(Text, HtmlSpecialCharsDecodeOnce)
+{
+    EXPECT_EQ(HtmlSpecialCharsDecode("&amp;lt;b&amp;gt;"), "&lt;b&gt;");
+    EXPECT_EQ(HtmlSpecialCharsDecode("&amp;amp;"), "&amp;");
+}
+
+// patch789 (from #4350): quotes were escaped before backslashes, so the
+// backslash added for a quote was escaped again and the JSON was invalid.
+// DVBChannel uses this for channel names in /dvb/channels.json.
+TEST(Text, EscapeJSONString)
+{
+    EXPECT_EQ(EscapeJSONString("say \"hi\""), "say \\\"hi\\\"");
+    EXPECT_EQ(EscapeJSONString("a\\b"), "a\\\\b");
+    EXPECT_EQ(EscapeJSONString("\\\""), "\\\\\\\"");
+    EXPECT_EQ(EscapeJSONString("a/b"), "a\\/b");
+    EXPECT_EQ(EscapeJSONString("1\n2\t3"), "1\\n2\\t3");
+}
+
 TEST(Text, StartsEndsWith)
 {
     EXPECT_TRUE(StartsWith(L"hello world", L"hello"));
@@ -519,8 +539,9 @@ TEST(Text, TrimLeadingUTF16BOM)
     TrimLeadingUTF16BOM(s);
     EXPECT_EQ(s, L"text");
 
-    // the byteswapped BOM counts too, and the two can mix
-    s = L"\xFFEF\xFEFF" L"text";
+    // the byteswapped BOM counts too, and the two can mix. It is U+FFFE; this
+    // tested U+FFEF until patch789, the value text.cpp had by mistake
+    s = L"\xFFFE\xFEFF" L"text";
     TrimLeadingUTF16BOM(s);
     EXPECT_EQ(s, L"text");
 
