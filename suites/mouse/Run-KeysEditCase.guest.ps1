@@ -181,14 +181,126 @@ public class MpcPlWin {
     [void][MouseRig]::GetWindowRect($root, [ref]$dr)
     Save-ScreenRegion (Join-Path $outDir 'keys-dblclick.png') $dr.L $dr.T $dr.R ([Math]::Min($dr.B, [MouseRig]::GetSystemMetrics(1)))
 
-    # Cancel closes the dialog so nothing the editor holds is saved. (Escape is no way out: a hotkey editor
-    # takes Escape as the key to assign, measured on develop.)
     $result.caseK = [ordered]@{
         selectedBeforeDbl    = $selectedBeforeDbl
         editSeen             = $editSeen
         editSeenAt           = $editSeenAt
         editId               = $editId
     }
+
+    # Ledger 127: Esc in the RemoteCmd and RepCnt editors. The in-place Edit reports Esc as an end of edit
+    # with a null pszText; unfixed, CPPageAccelTbl::OnEndListLabelEdit built a CString from it once
+    # anything had been typed, so the cell was emptied (RepCnt read back 0) and Apply lit. Fixed, the
+    # cell keeps its value and the page stays unmodified. RemoteCmd is empty by default, so Apply is what
+    # tells there; it runs first so RepCnt's step cannot have lit it. (The hotkey editor is not part of
+    # this: it takes Escape as the key to assign.)
+    function Read-ListItemText {
+        param([IntPtr] $List, [int] $Index, [int] $SubItem)
+        $size = ([UIntPtr]::new([uint64]1024))
+        $mem = [MpcPlWin]::VirtualAllocEx($hProc, [IntPtr]::Zero, $size, 0x1000, 0x04)
+        if ($mem -eq [IntPtr]::Zero) { return $null }
+        try {
+            # LVITEMW on x64: iSubItem at 8, pszText at 24, cchTextMax at 32; the text buffer follows at 128.
+            $in = New-Object byte[] 128
+            [BitConverter]::GetBytes([int]$SubItem).CopyTo($in, 8)
+            [BitConverter]::GetBytes([int64]($mem.ToInt64() + 128)).CopyTo($in, 24)
+            [BitConverter]::GetBytes([int]400).CopyTo($in, 32)
+            $w = [UIntPtr]::Zero
+            [void][MpcPlWin]::WriteProcessMemory($hProc, $mem, $in, ([UIntPtr]::new([uint64]128)), [ref]$w)
+            $len = [MouseRig]::SendMessage($List, 0x1073, [IntPtr]$Index, $mem).ToInt32()   # LVM_GETITEMTEXTW
+            if ($len -le 0) { return '' }
+            $out = New-Object byte[] ($len * 2)
+            $r = [UIntPtr]::Zero
+            [void][MpcPlWin]::ReadProcessMemory($hProc, [IntPtr]($mem.ToInt64() + 128), $out, ([UIntPtr]::new([uint64]$out.Length)), [ref]$r)
+            [Text.Encoding]::Unicode.GetString($out)
+        } finally {
+            [void][MpcPlWin]::VirtualFreeEx($hProc, $mem, [UIntPtr]::Zero, 0x8000)
+        }
+    }
+
+    # A click on row 0's command cell ends the hotkey editor the step above left open and moves the
+    # selection off row 1. That alone lights Apply (the editor's own SetWindowText at creation marks the
+    # cell dirty, so leaving it commits the same key), so Apply is pressed with a real click to start the
+    # Esc steps from an unmodified page.
+    Move-PointerGlide $p0.X $p0.Y
+    [void][MouseRig]::Click()
+    Start-Sleep -Milliseconds 400
+    $applyBtn = [MouseRig]::FindChild($root, 0x3021)   # ID_APPLY_NOW
+    $applyAfterHotkey = [MouseRig]::IsWindowEnabled($applyBtn)
+    if ($applyAfterHotkey) {
+        $ar = New-Object MouseRig+RECT
+        [void][MouseRig]::GetWindowRect($applyBtn, [ref]$ar)
+        Move-PointerGlide ([int](($ar.L + $ar.R) / 2)) ([int](($ar.T + $ar.B) / 2))
+        [void][MouseRig]::Click()
+        Start-Sleep -Milliseconds 500
+    }
+
+    # RemoteCmd (4) and RepCnt (5) can sit right of the visible area, so the list is scrolled to bring
+    # RepCnt's right edge in; row 1's rectangle is re-read after, since its left moves with the scroll.
+    $colLeft = @{}
+    $x = 0
+    foreach ($c in 0..5) {
+        $colLeft[$c] = $x
+        $x += [MouseRig]::SendMessage($list, 0x101D, [IntPtr]$c, [IntPtr]0).ToInt32()
+    }
+    $colWidth = @{ 4 = $colLeft[5] - $colLeft[4]; 5 = $x - $colLeft[5] }
+    $lc = New-Object MouseRig+RECT
+    [void][MouseRig]::GetClientRect($list, [ref]$lc)
+    $dx = $x - ($lc.R - $lc.L) + 4
+    if ($dx -gt 0) { [void][MouseRig]::SendMessage($list, 0x1014, [IntPtr]$dx, [IntPtr]0) }   # LVM_SCROLL
+    Start-Sleep -Milliseconds 200
+    $rows[1] = Read-ListItemRect $list 1
+    function CellPoint { param([int] $Col)
+        @{ X = $origin.X + $rows[1].L + $colLeft[$Col] + [int]($colWidth[$Col] / 2); Y = $origin.Y + $rows[1].T + [int]($itemHeight / 2) }
+    }
+
+    function Invoke-EscEdit {
+        param([int] $Col, [uint16[]] $Keys)
+        $before = Read-ListItemText $list 1 $Col
+        $pt = CellPoint $Col
+        # Select row 1 by this cell, then one more click once the double-click time has passed: a click on
+        # the selected row arms the page's edit timer, which opens the editor for the clicked column.
+        Move-PointerGlide $pt.X $pt.Y
+        [void][MouseRig]::Click()
+        Start-Sleep -Milliseconds ($result.list.doubleClickTime + 250)
+        [void][MouseRig]::Click()
+        $seen = $false
+        $id = 0
+        $deadline = (Get-Date).AddSeconds(2)
+        while (-not $seen -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+            if (Test-EditChild $list) { $seen = $true; $id = $script:editId }
+        }
+        $typed = $null
+        if ($seen) {
+            foreach ($k in $Keys) { [void][MouseRig]::KeyPress($k); Start-Sleep -Milliseconds 60 }
+            Start-Sleep -Milliseconds 200
+            $typed = Get-WindowTextOf $script:editHwnd
+            [void][MouseRig]::KeyPress(0x1B)   # VK_ESCAPE
+            Start-Sleep -Milliseconds 500
+        }
+        [ordered]@{
+            before       = $before
+            editSeen     = $seen
+            editId       = $id
+            typed        = $typed
+            editGone     = -not (Test-EditChild $list)
+            after        = (Read-ListItemText $list 1 $Col)
+            applyEnabled = [MouseRig]::IsWindowEnabled($applyBtn)
+            dialogOpen   = ([MouseRig]::FindTop([uint32]$proc.Id, '', $j.DialogTitle) -ne [IntPtr]::Zero)
+        }
+    }
+    $result.caseEsc = [ordered]@{
+        applyFound       = ($applyBtn -ne [IntPtr]::Zero)
+        applyAfterHotkey = $applyAfterHotkey
+        applyBefore      = [MouseRig]::IsWindowEnabled($applyBtn)
+        rmcmd       = (Invoke-EscEdit 4 @(0x41, 0x42))   # "ab"
+        rmrepcnt    = (Invoke-EscEdit 5 @(0x39))         # "9"
+    }
+    Save-ScreenRegion (Join-Path $outDir 'keys-esc.png') $dr.L $dr.T $dr.R ([Math]::Min($dr.B, [MouseRig]::GetSystemMetrics(1)))
+
+    # Cancel closes the dialog so nothing the editors held is saved. (Escape is no way out: a hotkey editor
+    # takes Escape as the key to assign, measured on develop.)
     [void][MouseRig]::PostMessage($root, 0x0111, [IntPtr]2, [IntPtr]::Zero)   # WM_COMMAND, IDCANCEL
     $dialogClosed = $false
     $deadline = (Get-Date).AddSeconds(5)

@@ -18,7 +18,8 @@
     must move the selection to it without skipping the item the search starts from (#3844), and a click on
     the time column of the selected entry must not open an editor holding the time (#3885). A fourth case
     (Run-KeysEditCase.guest.ps1) double-clicks a key entry's hotkey cell in Options > Player > Keys, which
-    must open the in-place hotkey editor (#3853).
+    must open the in-place hotkey editor (#3853). The same run types into the RemoteCmd and RepCnt cells
+    and presses Esc, which must keep the old value and leave Apply off.
 
     One more case (Run-OptionsThemeCase.guest.ps1) sits in the Options dialog: the D3D9 render
     device selection must be hidden on a one-adapter guest (#4033).
@@ -52,7 +53,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853, and Esc in its text cells; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -624,6 +625,28 @@ try {
         $problems
     }
 
+    # Esc in the RemoteCmd and RepCnt editors cancels: the cell keeps its value and Apply stays off.
+    # Unfixed, the page took Esc's null text as an empty entry, so RepCnt read back 0 and Apply lit.
+    function Test-KeysEsc {
+        param($Job)
+        $run = $Job.Run
+        if (-not $run.PSObject.Properties['caseEsc'] -or -not $run.caseEsc) { return @('the guest run ended before the Esc step') }
+        $e = $run.caseEsc
+        if (-not $e.applyFound) { return @('the Apply button was not found on the Options dialog') }
+        if ($e.applyBefore) { return @('Apply was already enabled before the Esc step') }
+        $problems = @()
+        foreach ($name in 'rmcmd', 'rmrepcnt') {
+            $s = $e.$name
+            if (-not $s.editSeen) { $problems += "$name`: no in-place editor opened on the cell"; continue }
+            if (-not $s.typed) { $problems += "$name`: the typed keys did not reach the editor"; continue }
+            if (-not $s.dialogOpen) { $problems += "$name`: Esc closed the Options dialog instead of the editor"; continue }
+            if (-not $s.editGone) { $problems += "$name`: the editor was still open after Esc" }
+            if ("$($s.after)" -ne "$($s.before)") { $problems += "$name`: Esc changed the cell from '$($s.before)' to '$($s.after)' (typed '$($s.typed)')" }
+            if ($s.applyEnabled) { $problems += "$name`: Esc marked the page modified (Apply enabled)" }
+        }
+        $problems
+    }
+
     # The status bar job: one launch of the player per clip, Run-StatusTipCase hovering the audio channel
     # icon with real input. Same scheduled-task shape as the Keys job.
     function Invoke-StatusTipJob {
@@ -1045,11 +1068,13 @@ try {
 
     # 5. The Keys page of Options: a double-click on a key entry's hotkey cell must open the in-place
     #    hotkey editor (#3853, f17f348494). It plays nothing, so it runs even when the playlist cases are
-    #    skipped, in its own player instance.
-    if (Wanted 'keys-double-click-edits') {
+    #    skipped, in its own player instance. The same run presses Esc in the RemoteCmd and RepCnt editors,
+    #    which must cancel the edit.
+    if (Wanted 'keys-double-click-edits', 'keys-esc-cancels-text-edit') {
         $keysIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idKeysPage`r`n"
         $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
-        Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c)
+        if (Wanted 'keys-double-click-edits') { Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c) }
+        if (Wanted 'keys-esc-cancels-text-edit') { Complete-Case 'keys-esc-cancels-text-edit' (Test-KeysEsc $c) }
     }
 
     # The Options/theme case (theme 14b), one guest script driven through Invoke-OptionsThemeJob;
