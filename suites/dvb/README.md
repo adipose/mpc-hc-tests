@@ -30,6 +30,7 @@ major * 1000 + minor). No release has `/dvbscan` without that fix (#4136,
 | `Install-MpcHarness.ps1` | copies `harness.ps1` in and registers the scheduled task that runs it |
 | `Invoke-MpcScan.ps1` | one run, from the host |
 | `Invoke-MpcBatch.ps1` | a plan of runs and rig changes |
+| `Test-MpcAudioPinType.ps1` | standalone: a running-graph switch to an ADTS track leaves the demux's `adts` pin connected as ADTS, read from the Pin Info page |
 | `Add-AtscVhfMap.ps1` / `Remove-AtscVhfMap.ps1` | map ATSC VHF channels onto existing captures, and undo |
 | `plans/` | the plans used for the ATSC work |
 
