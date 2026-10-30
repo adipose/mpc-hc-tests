@@ -74,6 +74,7 @@
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="test_AudioParser.cpp" />
+    <ClCompile Include="test_AudioSwitcher.cpp" />
     <ClCompile Include="test_Harness.cpp" />
     <ClCompile Include="test_GolombBuffer.cpp" />
     <ClCompile Include="test_HdmvClipInfo.cpp" />
@@ -196,6 +197,13 @@
     </ProjectReference>
     <ProjectReference Include="..\..\src\thirdparty\AudioTools\AudioTools.vcxproj">
       <Project>{1b6de4c0-9d27-4150-a327-e7f3b492b5f0}</Project>
+    </ProjectReference>
+    <!-- AudioSwitcher: CStreamSwitcherFilter::Enable on a real filter graph. -->
+    <ProjectReference Include="..\..\src\filters\Filters.vcxproj">
+      <Project>{273b3149-3192-4b75-a791-470320b90812}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\src\filters\switcher\AudioSwitcher\AudioSwitcher.vcxproj">
+      <Project>{d8db3e7e-d50e-4ec3-a9b9-dad18f5fe466}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
