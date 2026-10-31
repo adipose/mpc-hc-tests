@@ -49,11 +49,17 @@ namespace VersionInfo
 }
 
 // SubPic.lib: CSubPicAllocatorPresenterImpl reads the renderer settings in
-// SetVideoSize and AlphaBltSubPic; the player defines this in AppSettings.cpp.
-// The matrix guess under test never calls it.
+// SetVideoSize and AlphaBltSubPic, and CRenderedTextSubtitle multiplies every
+// style's font size by fontScaleOverride, which nothing but the player sets;
+// left at zero, text sized by its style renders as a dot. The player defines
+// this in AppSettings.cpp.
 CRenderersSettings& GetRenderersSettings()
 {
-    static CRenderersSettings settings;
+    static CRenderersSettings settings = [] {
+        CRenderersSettings s;
+        s.fontScaleOverride = 1.0;
+        return s;
+    }();
     return settings;
 }
 

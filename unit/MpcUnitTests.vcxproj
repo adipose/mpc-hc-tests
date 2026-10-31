@@ -73,6 +73,7 @@
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="bench_RtsRender.cpp" />
     <ClCompile Include="test_AudioParser.cpp" />
     <ClCompile Include="test_AudioSwitcher.cpp" />
     <ClCompile Include="test_Harness.cpp" />
@@ -85,6 +86,7 @@
     <ClCompile Include="test_DSUtilText.cpp" />
     <ClCompile Include="test_Rasterizer.cpp" />
     <ClCompile Include="test_Resources.cpp" />
+    <ClCompile Include="test_RtsFontCache.cpp" />
     <ClCompile Include="test_SubPicMatrix.cpp" />
     <ClCompile Include="test_TextFile.cpp" />
     <ClCompile Include="test_WebVTT.cpp" />
