@@ -33,10 +33,10 @@
 #pragma comment(lib, "dbghelp.lib")
 
 // A render benchmark for the internal subtitle renderer (CRenderedTextSubtitle,
-// ISR), not a pass/fail test. It renders a script frame by frame into a
-// 1920x1080 RGB32 buffer the way the subpic queue does, times each Render
-// call, and hashes every frame (bbox and pixels), so a speed change can be
-// checked for an unchanged output by comparing the two hash lists.
+// ISR), not a pass/fail test. It renders a script frame by frame into an
+// RGB32 buffer the way the subpic queue does, times each Render call, and
+// hashes every frame (bbox and pixels), so a speed change can be checked for
+// an unchanged output by comparing the two hash lists.
 //
 // Skipped unless MPCTEST_RTS_BENCH is set. Further variables:
 //   MPCTEST_RTS_BENCH_SCRIPT  an .ass to render instead of the built-in
@@ -44,6 +44,7 @@
 //   MPCTEST_RTS_BENCH_FONTS   a folder of fonts to load privately first
 //   MPCTEST_RTS_BENCH_FROM / _TO   range in seconds (default: whole script)
 //   MPCTEST_RTS_BENCH_STEP    render every Nth frame (default 1)
+//   MPCTEST_RTS_BENCH_W / _H  frame size in pixels (default 1920x1080)
 //   MPCTEST_RTS_BENCH_OUT     file for the per-frame "index ms hash" lines
 //   MPCTEST_RTS_BENCH_PROFILE samples the rendering thread every millisecond
 //                             and prints the functions it was found in, self
@@ -326,7 +327,7 @@ TEST(RtsBench, RenderFrames)
     }
     const int step = std::max(1, EnvInt(L"MPCTEST_RTS_BENCH_STEP", 1));
 
-    const int w = 1920, h = 1080;
+    const int w = EnvInt(L"MPCTEST_RTS_BENCH_W", 1920), h = EnvInt(L"MPCTEST_RTS_BENCH_H", 1080);
     const double fps = 24000.0 / 1001;
     const REFERENCE_TIME frameDur = REFERENCE_TIME(10000000 / fps);
     std::vector<DWORD> bits(size_t(w) * h);
