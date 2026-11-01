@@ -198,9 +198,52 @@ namespace
         return !r.IsRectEmpty() && At(f, r.left, r.bottom - 1) == kClear && At(f, r.right - 1, r.bottom - 1) == kClear;
     }
 
+    // Ink of one row, right exclusive; left > right when the row is empty
+    void RowInk(const Frame& f, int y, int& left, int& right)
+    {
+        left = kWidth;
+        right = 0;
+        for (int x = 0; x < kWidth; x++) {
+            if (At(f, x, y) != kClear) {
+                left = std::min(left, x);
+                right = x + 1;
+            }
+        }
+    }
+
+    // Goes by rows rather than by the ink's corners, because lines of different widths leave those clear anyway
+    bool CornersOfTheEndRowsAreRound(const Frame& f)
+    {
+        const CRect r = Ink(f);
+        if (r.IsRectEmpty()) {
+            return false;
+        }
+        int left, right, nextLeft, nextRight;
+        RowInk(f, r.top, left, right);
+        RowInk(f, r.top + 4, nextLeft, nextRight);
+        const bool top = nextLeft < left && nextRight > right;
+        RowInk(f, r.bottom - 1, left, right);
+        RowInk(f, r.bottom - 5, nextLeft, nextRight);
+        return top && nextLeft < left && nextRight > right;
+    }
+
     struct FallbackCase {
         const char* name;
         const char* text;
+    };
+
+    // Each of these is one shape, unlike the fallbacks below
+    const FallbackCase kUnified[] = {
+        { "large over small", "{\\fs30}first line\\N{\\fs16}second line" },
+        { "small over large", "{\\fs16}first line\\N{\\fs30}second line" },
+        { "size change in a line", "first {\\fs30}large{\\fs18} line" },
+        { "size change in one of two lines", "first {\\fs30}large{\\fs18} line\\Nsecond line" },
+        { "font differs between lines", "{\\fnTimes New Roman}first line\\N{\\fnArial}second line" },
+        { "scale differs between lines", "{\\fscx150\\fscy120}first line\\N{\\fscx100\\fscy100}second line" },
+        { "spacing differs between lines", "{\\fsp3}first line\\N{\\fsp0}second line" },
+        { "border differs between lines", "{\\bord8}first line\\N{\\bord2}second line" },
+        { "border differs in a line", "{\\bord8}first {\\bord2}second" },
+        { "size and border differ", "{\\fs30\\bord6}first line\\N{\\fs16\\bord2}second line" },
     };
 
     // Each of these can't be one shape, so the option must change nothing at all
@@ -209,11 +252,12 @@ namespace
         { "outline colour differs between lines", "{\\3c&H0000FF&}first line\\N{\\3c&H00FF00&}second line" },
         { "shadow colour differs between lines", "{\\4c&H0000FF&}first line\\N{\\4c&H00FF00&}second line" },
         { "outline alpha differs between lines", "{\\3a&H80&}first line\\N{\\3a&H00&}second line" },
-        { "font size differs between lines", "{\\fs30}first line\\N{\\fs16}second line" },
-        { "font size differs in a line", "{\\fs30}first {\\fs16}second" },
-        { "border differs between lines", "{\\bord8}first line\\N{\\bord2}second line" },
-        { "border differs in a line", "{\\bord8}first {\\bord2}second" },
-        { "scale differs between lines", "{\\fscx150}first line\\N{\\fscx100}second line" },
+        { "shadow depth differs between lines", "{\\shad4}first line\\N{\\shad2}second line" },
+        { "shadow depth differs in a line", "{\\shad4}first {\\shad2}second" },
+        { "border on one line only", "{\\bord0}first line\\N{\\bord2}second line" },
+        { "rotation differs between lines", "{\\frz5}first line\\N{\\frz0}second line" },
+        { "shear differs between lines", "{\\fax0.3}first line\\N{\\fax0}second line" },
+        { "blur differs between lines", "{\\blur2}first line\\N{\\blur0}second line" },
         { "ko karaoke", "{\\ko100}first {\\ko100}second" },
         { "k karaoke", "{\\k100}first {\\k100}second" },
         { "ko karaoke on each line", "{\\ko100}first line\\N{\\ko100}second line" },
@@ -288,6 +332,61 @@ TEST(RoundedBox, FallbackLaysOutAsWithTheOptionOffWithAThickBorder)
     thick.style = BoxStyle(6.0, 3.0);
     thick.style.alpha[2] = 0x60;
     ExpectFallbackIsUnchanged(thick);
+}
+
+TEST(RoundedBox, MixedSizesAndBordersDrawOneShape)
+{
+    SKIP_WITHOUT_THE_OPTION();
+    for (const FallbackCase& c : kUnified) {
+        for (const std::string& doc : { Srt(c.text), Ass(c.text) }) {
+            SCOPED_TRACE(std::string(c.name) + (doc[0] == '[' ? " (ass)" : " (srt)"));
+            EXPECT_NE(Differing(RenderDoc(doc, true), RenderDoc(doc, false)), 0) << "the option changed nothing";
+            EXPECT_TRUE(CornersOfTheEndRowsAreRound(RenderDoc(doc, true)));
+
+            // Without the text and half transparent, one shape is one value wherever the box is. A gap
+            // would show as a clear pixel, and boxes drawn twice as a darker one.
+            Options options;
+            options.style.alpha[0] = 0xFF;
+            options.style.alpha[2] = 0x80;
+            const Frame on = RenderDoc(doc, true, options);
+            const CRect r = Ink(on);
+            ASSERT_FALSE(r.IsRectEmpty());
+            const DWORD box = At(on, r.CenterPoint().x, r.CenterPoint().y);
+            for (int y = r.top + 1; y < r.bottom - 1; y++) { // the end rows can be antialiased
+                EXPECT_EQ(At(on, r.CenterPoint().x, y), box) << "not the same box at y=" << y;
+            }
+            int darker = 0;
+            for (DWORD px : on) {
+                darker += (px >> 24) < (box >> 24);
+            }
+            EXPECT_EQ(darker, 0) << "pixels drawn over twice";
+        }
+    }
+}
+
+// The smallest line's radius: all corners fit it, so the large line's are no rounder
+TEST(RoundedBox, RadiusComesFromTheSmallestLine)
+{
+    SKIP_WITHOUT_THE_OPTION();
+    // How far the top row starts from the box's side, which is the radius of the corner
+    const auto cornerInset = [](const std::string& doc) {
+        const Frame f = RenderDoc(doc, true);
+        const CRect r = Ink(f);
+        int left, right, widestLeft = kWidth;
+        for (int y = r.top; y < r.bottom; y++) {
+            RowInk(f, y, left, right);
+            widestLeft = std::min(widestLeft, left);
+        }
+        RowInk(f, r.top, left, right);
+        return left - widestLeft;
+    };
+    // A large line over a small one, against a large line alone and a small line alone
+    const int mixed = cornerInset(Srt("{\\fs30}first line that is the widest\\N{\\fs12}second"));
+    const int largeAlone = cornerInset(Srt("{\\fs30}first line that is the widest"));
+    const int smallAlone = cornerInset(Srt("{\\fs12}first line that is the widest"));
+    EXPECT_GT(largeAlone, smallAlone * 2);
+    EXPECT_GT(mixed, 0) << "square corners";
+    EXPECT_NEAR(mixed, smallAlone, 2);
 }
 
 // The narrower wrap width of a rounded box must not apply to a fallback either
@@ -528,6 +627,18 @@ TEST(RoundedBox, DumpFrames)
         Options shadowOnly;
         shadowOnly.style = BoxStyle(0.0, 2.0);
         both(name + "-shadow-srt", Srt(c.text), shadowOnly);
+    }
+
+    n = 0;
+    for (const FallbackCase& c : kUnified) {
+        CStringA name;
+        name.Format("unified%02d", n++);
+        fprintf(list, "# %s = %s\n", name.GetString(), c.name);
+        Options transparent;
+        transparent.style.alpha[2] = 0x80;
+        both(name + "-srt", Srt(c.text), Options());
+        both(name + "-ass", Ass(c.text), Options());
+        both(name + "-transparent", Ass(c.text), transparent);
     }
 
     Options margins;
