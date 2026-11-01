@@ -56,6 +56,7 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `keys-double-click-edits` | a real double-click on a key entry's hotkey cell in Options > Player > Keys | the in-place hotkey editor opens within 1 s (#3853) |
 | `keys-esc-cancels-text-edit` | same run: a click into the RemoteCmd and then the RepCnt cell of a selected key entry, real keys typed, then Esc | each cell keeps its old value (RepCnt stays 5) and Apply stays disabled |
 | `options-d3d9-device-hidden-on-one-adapter` | Options > Output, renderer switched to EVR Custom, the D3D9 device controls found on the page (old layout) or in the renderer settings popup | with one adapter the checkbox and combo are hidden, and stay hidden over an enable/disable cycle (#4033) |
+| `options-rounded-box-checkbox-dark`, `-light`, `-classic` | Options > Default Style, real clicks on Border Style, Rounded corners and Apply | the checkbox is enabled only with Opaque box selected, keeps its state while disabled, and its click alone turns Apply on (#4361) |
 | `filedialog-injected-themed-foreground` | File > Open Directory with Windows in dark mode, the player active | the "Include subdirectories" box the player injects into the folder picker paints dark: light text straight on the dialog's background |
 | `filedialog-injected-themed-background` | the same, with notepad holding the foreground | as above (#4281 part 1; see the Windows 11 note below) |
 | `filedialog-injected-themed-minimized` | the same, with the player minimized | as above (#4281 part 1) |

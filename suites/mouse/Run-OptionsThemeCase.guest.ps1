@@ -18,6 +18,11 @@
 #              CB_SETCURSEL + CBN_SELCHANGE, not a real click: OnDSRendererChange runs the same
 #              either way, and what is asserted is the D3D9 controls' visibility, not the combo's
 #              input path (real-input combo driving is what Run-ComboHoverCase covers).
+#
+#   substyle   options-rounded-box-checkbox-*  #4361. Options at the Default Style page, in each theme.
+#              "Rounded corners" (IDC_CHECK_ROUNDEDBOX) is only enabled with Opaque box selected, keeps
+#              its state while disabled, and a click on it alone turns Apply on. Real clicks throughout,
+#              since a click on a disabled control is the point of the last step.
 param([Parameter(Mandatory)] [string] $Job)
 
 $ErrorActionPreference = 'Stop'
@@ -158,8 +163,51 @@ try {
         Close-OptionsDialog $root
     }
 
+    function Invoke-SubStyleCase {
+        $t = Open-Options
+        $root = $t.Root            # the Options dialog, at the Default Style page (the job's ini set LastUsedPage)
+        $result.optionsForeground = $t.Foreground
+
+        $outline = [MouseRig]::FindDescendant($root, [int]$j.Ids.Radio1)
+        $opaque = [MouseRig]::FindDescendant($root, [int]$j.Ids.Radio2)
+        $check = [MouseRig]::FindDescendant($root, [int]$j.Ids.RoundedBox)
+        $apply = [MouseRig]::FindDescendant($root, [int]$j.Ids.Apply)
+        if ($outline -eq [IntPtr]::Zero -or $opaque -eq [IntPtr]::Zero -or $check -eq [IntPtr]::Zero -or $apply -eq [IntPtr]::Zero) {
+            throw 'the Border Style controls or Apply were not found; not on the Default Style page?'
+        }
+
+        function Get-State {
+            param([string] $Name)
+            [ordered]@{
+                opaqueSelected = (Send-Int $opaque 0x00F0 ([IntPtr]::Zero) ([IntPtr]::Zero)) -eq 1   # BM_GETCHECK
+                checkEnabled   = [MouseRig]::IsWindowEnabled($check)
+                checkVisible   = [MouseRig]::IsWindowVisible($check)
+                checked        = (Send-Int $check 0x00F0 ([IntPtr]::Zero) ([IntPtr]::Zero)) -eq 1
+                applyEnabled   = [MouseRig]::IsWindowEnabled($apply)
+                shot           = (Save-WindowShot $Name $root).png
+            }
+        }
+
+        $result.atOpen = Get-State 'at-open'
+        Click-Center $opaque
+        $result.opaqueClicked = Get-State 'opaque-clicked'
+        Click-Center $apply
+        $result.opaqueApplied = Get-State 'opaque-applied'
+        Click-Center $check                # Apply is off here, so this click alone must turn it on
+        $result.checkClicked = Get-State 'check-clicked'
+        Click-Center $apply
+        $result.checkApplied = Get-State 'check-applied'
+        Click-Center $outline
+        $result.outlineClicked = Get-State 'outline-clicked'
+        Click-Center $apply
+        Click-Center $check                # disabled: this click must do nothing
+        $result.disabledClicked = Get-State 'disabled-clicked'
+        Close-OptionsDialog $root
+    }
+
     switch ($j.Case) {
         'd3d9'        { Invoke-D3D9Case }
+        'substyle'    { Invoke-SubStyleCase }
         default       { throw "unknown case '$($j.Case)'" }
     }
 } catch {

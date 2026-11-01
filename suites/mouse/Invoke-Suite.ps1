@@ -21,8 +21,9 @@
     must open the in-place hotkey editor (#3853). The same run types into the RemoteCmd and RepCnt cells
     and presses Esc, which must keep the old value and leave Apply off.
 
-    One more case (Run-OptionsThemeCase.guest.ps1) sits in the Options dialog: the D3D9 render
-    device selection must be hidden on a one-adapter guest (#4033).
+    Run-OptionsThemeCase.guest.ps1 sits in the Options dialog: the D3D9 render device selection must
+    be hidden on a one-adapter guest (#4033), and the default style's "Rounded corners" must follow the
+    Border Style radios and turn Apply on, in each theme (#4361).
 
     Eight cases (Run-PlayerWindowCase.guest.ps1) drive the main window, its docked panels and the
     playlist's inline edit (#4279): the edit must survive auto-hide, a drag out of it and the mouse wheel;
@@ -53,7 +54,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853, and Esc in its text cells; D3D9 device selection on a one-adapter guest, #4033; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853, and Esc in its text cells; D3D9 device selection on a one-adapter guest, #4033; rounded corners checkbox, #4361; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -116,6 +117,10 @@ $idButton1      = Get-ResourceId 'IDC_BUTTON1' 11120          # Output page gear
 $idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the renderer settings popup
 $idOpenDir      = Get-ResourceId 'ID_FILE_OPENDIRECTORY' 33208   # the folder picker, which carries an injected check box
 $idPlayerTime   = Get-ResourceId 'IDC_PLAYERTIME' 12027       # the status bar's time label, whose parent is the bar
+$idSubStylePage = Get-ResourceId 'IDD_PPAGESUBSTYLE' 10033
+$idRadio1       = Get-ResourceId 'IDC_RADIO1' 11040           # Border Style: Outline
+$idRadio2       = Get-ResourceId 'IDC_RADIO2' 11041           # Border Style: Opaque box
+$idRoundedBox   = Get-ResourceId 'IDC_CHECK_ROUNDEDBOX' 22104
 
 # The player window cases (#4279): the playlist's list control, and the commands that show the playlist,
 # the Edit List editor and fullscreen. A docked bar's window id is its command's id.
@@ -704,6 +709,26 @@ try {
     # enable/disable cycle. The unfixed build only disables them: on the old page layout they are
     # visible on the Output page itself, on the current one visible (disabled) in the renderer
     # settings popup, so IsWindowVisible is the whole assertion.
+    function Test-RoundedBoxCheckbox {
+        param($Job)
+        $run = $Job.Run
+        $problems = @()
+        foreach ($phase in 'atOpen', 'opaqueClicked', 'opaqueApplied', 'checkClicked', 'checkApplied', 'outlineClicked', 'disabledClicked') {
+            if (-not $run.$phase) { return @("the guest run ended before the $phase check") }
+            if (-not $run.$phase.checkVisible) { $problems += "$phase`: the checkbox is hidden" }
+        }
+        if ($run.atOpen.opaqueSelected) { $problems += 'the case needs Outline selected at open' }
+        if ($run.atOpen.checkEnabled) { $problems += 'enabled at open with Outline selected' }
+        if (-not $run.opaqueClicked.checkEnabled) { $problems += 'still disabled after clicking Opaque box' }
+        if ($run.opaqueApplied.applyEnabled) { $problems += 'Apply stayed on after clicking it' }
+        if (-not $run.checkClicked.checked) { $problems += 'the click did not check it' }
+        if (-not $run.checkClicked.applyEnabled) { $problems += 'checking it did not turn Apply on' }
+        if ($run.outlineClicked.checkEnabled) { $problems += 'still enabled after clicking Outline' }
+        if (-not $run.outlineClicked.checked) { $problems += 'selecting Outline cleared it' }
+        if (-not $run.disabledClicked.checked -or $run.disabledClicked.applyEnabled) { $problems += 'a click on it while disabled had an effect' }
+        $problems
+    }
+
     function Test-OptionsD3D9Hidden {
         param($Job)
         $run = $Job.Run
@@ -1096,6 +1121,20 @@ try {
             Note Yellow "options-d3d9-device-hidden-on-one-adapter not testable here: the guest has $($c.Run.d3d9Adapters) D3D9 adapters, the controls are only hidden with one"
         } else {
             Complete-Case 'options-d3d9-device-hidden-on-one-adapter' (Test-OptionsD3D9Hidden $c)
+        }
+    }
+
+    # 6b. "Rounded corners" follows the Border Style radios and its click alone enables Apply (#4361),
+    #     in each theme, since the themed check box draws its own disabled state.
+    $subStyleIds = @{ Radio1 = $idRadio1; Radio2 = $idRadio2; RoundedBox = $idRoundedBox; Apply = 12321 }   # ID_APPLY_NOW, afxres.h
+    foreach ($v in @(
+            @{ Name = 'dark'; Theme = "MPCTheme=1`r`nModernThemeMode=0" }
+            @{ Name = 'light'; Theme = "MPCTheme=1`r`nModernThemeMode=1" }
+            @{ Name = 'classic'; Theme = 'MPCTheme=0' })) {
+        $name = "options-rounded-box-checkbox-$($v.Name)"
+        if (Wanted $name) {
+            $ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`n$($v.Theme)`r`nLastUsedPage=$idSubStylePage`r`n"
+            Complete-Case $name (Test-RoundedBoxCheckbox (Invoke-OptionsThemeJob -Name $name -Case 'substyle' -ArgumentLine '' -IniText $ini -Ids $subStyleIds))
         }
     }
 
