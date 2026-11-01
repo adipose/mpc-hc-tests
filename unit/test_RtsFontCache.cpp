@@ -95,9 +95,10 @@ namespace
         ULONG_PTR Original() const { return m_original; }
     };
 
-    std::atomic<int> g_createFontCalls, g_getDCCalls;
+    std::atomic<int> g_createFontCalls, g_getDCCalls, g_textOutCalls;
     decltype(&::CreateFontIndirectW) g_realCreateFont;
     decltype(&::GetDC) g_realGetDC;
+    decltype(&::TextOutW) g_realTextOut;
 
     HFONT WINAPI CountingCreateFont(const LOGFONTW* lf)
     {
@@ -111,8 +112,14 @@ namespace
         return g_realGetDC(hWnd);
     }
 
+    BOOL WINAPI CountingTextOut(HDC hdc, int x, int y, LPCWSTR str, int len)
+    {
+        g_textOutCalls++;
+        return g_realTextOut(hdc, x, y, str, len);
+    }
+
     struct CallCounts {
-        int createFont, getDC;
+        int createFont, getDC, textOut;
     };
 
     template <class Body>
@@ -121,11 +128,14 @@ namespace
         ImportPatch font("gdi32.dll", "CreateFontIndirectW", reinterpret_cast<ULONG_PTR>(&CountingCreateFont));
         ImportPatch dc("user32.dll", "GetDC", reinterpret_cast<ULONG_PTR>(&CountingGetDC));
         g_realCreateFont = reinterpret_cast<decltype(g_realCreateFont)>(font.Original());
+        ImportPatch text("gdi32.dll", "TextOutW", reinterpret_cast<ULONG_PTR>(&CountingTextOut));
         g_realGetDC = reinterpret_cast<decltype(g_realGetDC)>(dc.Original());
+        g_realTextOut = reinterpret_cast<decltype(g_realTextOut)>(text.Original());
         g_createFontCalls = 0;
         g_getDCCalls = 0;
+        g_textOutCalls = 0;
         body();
-        return { g_createFontCalls, g_getDCCalls };
+        return { g_createFontCalls, g_getDCCalls, g_textOutCalls };
     }
 
     std::string Script(const std::string& styles, const std::string& events)
@@ -304,6 +314,14 @@ TEST(RtsFontCache, RenderingDoesNotCallGetDC)
     const int calls = RenderRotatingText().getDC;
     RecordProperty("getDCCalls", calls);
     EXPECT_EQ(calls, 0) << "GetDC ran " << calls << " times over " << kFrames << " frames of one style";
+}
+
+TEST(RtsFontCache, RenderingBuildsEachWordPathOnce)
+{
+    const int calls = RenderRotatingText().textOut;
+    RecordProperty("textOutCalls", calls);
+    EXPECT_GE(calls, 1) << "no TextOutW was counted, so the count is not seeing the renderer";
+    EXPECT_LE(calls, 7) << "TextOutW ran " << calls << " times over " << kFrames << " frames of four words and three spaces";
 }
 
 TEST(RtsFontCache, StylesDifferingInOneFieldRenderDifferently)
