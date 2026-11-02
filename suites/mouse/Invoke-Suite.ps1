@@ -30,6 +30,9 @@
     be drawn while another row is renamed and when the web interface moves playback; and a docked zone
     must not hide part of itself while the playlist is being edited.
 
+    Two cases (Run-MenuReloadCase.guest.ps1) rebuild the menus through a system metrics change, one with
+    a menu open and one with it closed (#4257): the player must survive both and close normally.
+
     Two control cases run first, against combocase.exe, a small program with no player code in it:
 
       control-plain-windows-combo    a plain comctl32 combo never shows the hovered item, which is what
@@ -221,7 +224,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -1295,6 +1298,64 @@ try {
         if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
         if (-not $ffmpegExe) { $why += 'no ffmpeg on PATH to record and read the screen' }
         Note Yellow "fullscreen frame cases not run: $($why -join '; ')"
+    }
+
+    # The menus rebuilt with a menu open (#4257); Run-MenuReloadCase.guest.ps1's header says what the unfixed
+    # build did. The same rebuild with the menu closed is the control: it passed on the unfixed build too.
+    $mrCases = [ordered]@{ 'menu-reload-while-open' = $true; 'menu-reload-while-closed' = $false }
+    if (-not (Wanted @($mrCases.Keys))) {
+    } elseif ($havePwMedia -and $haveLav) {
+        foreach ($name in @($mrCases.Keys)) {
+            if (-not (Wanted $name)) { $skipped++; continue }
+            $guestOut = "C:\mpc-test\mouse\out\$name"
+            $job = @{ Case = $name; Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; Clip = 'C:\mpc-test\mouse\media\pw\bravo.mkv'; OutDir = $guestOut; MenuOpen = $mrCases[$name]; Rounds = 6 } | ConvertTo-Json
+            $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, (PwIni), $consoleUser {
+                param($job, $out, $iniText, $user)
+                $ErrorActionPreference = 'Continue'
+                Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+                if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+                New-Item -ItemType Directory $out | Out-Null
+                & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+                Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+                Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+                [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+                [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+                $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-MenuReloadCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+                $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+                $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+                Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+                Start-ScheduledTask -TaskName 'MpcMouseCase'
+                $deadline = (Get-Date).AddSeconds(150)
+                while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+                Start-Sleep -Seconds 1
+                Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+                Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+                if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+            }
+            if (-not $json) { Complete-Case $name "the case produced no result on the guest"; continue }
+            $local = Join-Path $OutDir $name
+            if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+            New-Item -ItemType Directory -Force $local | Out-Null
+            Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+            $r = $json | ConvertFrom-Json
+            $problems = @()
+            if ($r.error) { $problems += "guest: $($r.error)" }
+            if ($r.crashBox) { $problems += "crashed: $(($r.crashBox -replace '\s+', ' ').Substring(0, [Math]::Min(170, ($r.crashBox -replace '\s+', ' ').Length)))" }
+            elseif ($r.exited -and $r.exitCode -ne 0) { $problems += ('exit code 0x{0:X8} in round {1}' -f [uint32]([int64]$r.exitCode -band 0xFFFFFFFF), ($r.rounds + 1)) }
+            elseif (-not $r.exited) { $problems += 'the player did not exit' }
+            # Only a run that got through can vouch for its reloads and for the menu having been open.
+            if (-not $problems) {
+                if ($r.reloads -lt $r.rounds -or $r.rounds -lt 6) { $problems += "only $($r.reloads) of $($r.rounds) rounds changed the menu handle, so the rebuild did not run" }
+                if ($mrCases[$name] -and $r.inMenuWhenSent -lt $r.rounds) { $problems += "the menu was open for only $($r.inMenuWhenSent) of $($r.rounds) rounds" }
+            }
+            Complete-Case $name $problems
+        }
+    } else {
+        $skipped += $mrCases.Count
+        $why = @()
+        if (-not $havePwMedia) { $why += 'no media\pw-long.mkv' }
+        if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
+        Note Yellow "menu reload cases not run: $($why -join '; ')"
     }
 }
 finally {
