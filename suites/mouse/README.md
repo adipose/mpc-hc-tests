@@ -71,6 +71,7 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `playlist-web-index-repaints` | the web interface's `setplaylistindex` moves playback from row 0 to row 1 | both rows look as a forced redraw of the list draws them (#4279 item 1) |
 | `panel-zone-holds-while-editing` | the playlist and the Edit List editor docked side by side, the playlist's edit open, the pointer on the video past the delay | neither panel hides or moves, and the edit stays open; both hide once it is cancelled (#4279 item 10) |
 | `fullscreen-toggle-no-basic-frame-<theme>` | five fullscreen round trips by real double-clicks on the video, the screen recorded at 60 fps with ffmpeg's gdigrab (dark theme, theme off) | no recorded frame in the 0.8 s after any toggle shows the Vista/7 basic frame's light blue border where the window stood, and every round really covered the screen and came back (#4330) |
+| `high-contrast-lists-<variant>` | a contrast theme on, the theme off (`themeoff-*`) or on in each style and mode, three clips in the playlist, clips in the Edit List editor and entries in Organize Favorites; `control-off` is the same with contrast off | every row shows text, on the background the variant expects, and the list below the rows matches (#4375) |
 
 The fullscreen frame cases need ffmpeg on the host's PATH: it is copied to the
 guest to record, and reads the recording back on the host. The unfixed build
