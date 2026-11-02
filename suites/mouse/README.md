@@ -72,6 +72,8 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `playlist-web-index-repaints` | the web interface's `setplaylistindex` moves playback from row 0 to row 1 | both rows look as a forced redraw of the list draws them (#4279 item 1) |
 | `panel-zone-holds-while-editing` | the playlist and the Edit List editor docked side by side, the playlist's edit open, the pointer on the video past the delay | neither panel hides or moves, and the edit stays open; both hide once it is cancelled (#4279 item 10) |
 | `fullscreen-toggle-no-basic-frame-<theme>` | five fullscreen round trips by real double-clicks on the video, the screen recorded at 60 fps with ffmpeg's gdigrab (dark theme, theme off) | no recorded frame in the 0.8 s after any toggle shows the Vista/7 basic frame's light blue border where the window stood, and every round really covered the screen and came back (#4330) |
+| `menu-reload-while-open` | six rounds of a real click on View, WM_SETTINGCHANGE with SPI_SETNONCLIENTMETRICS while it is open, arrow keys into its submenus, Escape, then a normal close | no crash box and exit code 0, the menu was really open each round, and the menu handle changed each round so a rebuild really ran (#4257) |
+| `menu-reload-while-closed` | the same with the message sent before the click: the control, which the unfixed build passes too | the same, less the menu being open |
 
 The fullscreen frame cases need ffmpeg on the host's PATH: it is copied to the
 guest to record, and reads the recording back on the host. The unfixed build
