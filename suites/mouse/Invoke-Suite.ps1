@@ -132,6 +132,13 @@ $idViewPlaylist = Get-ResourceId 'ID_VIEW_PLAYLIST' 824
 $idViewEdl      = Get-ResourceId 'ID_VIEW_EDITLISTEDITOR' 846
 $idFullscreen   = Get-ResourceId 'ID_VIEW_FULLSCREEN' 830
 
+# The contrast theme cases (#4375): the two other lists that draw their own rows.
+$idEditList     = Get-ResourceId 'IDC_EDITLIST' 12028
+$idEdlNewClip   = Get-ResourceId 'ID_EDL_NEWCLIP' 849
+$idFavOrganize  = Get-ResourceId 'ID_FAVORITES_ORGANIZE' 937
+$idFavList      = Get-ResourceId 'IDC_LIST2' 11161
+$idCloseMedia   = Get-ResourceId 'ID_FILE_CLOSEMEDIA' 803
+
 # The hover lands this long after the click that opens the list. The defect shows up to about 100 ms; the
 # last value is the settled reference the others are compared with.
 $quickDelays = 0, 30, 60, 100
@@ -229,7 +236,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-HighContrastCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -1395,6 +1402,168 @@ try {
         if (-not $havePwMedia) { $why += 'no media\pw-long.mkv' }
         if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
         Note Yellow "menu reload cases not run: $($why -join '; ')"
+    }
+
+    # The contrast theme job (#4375): Run-HighContrastCase launches the player once per variant, each from
+    # its own ini, under the scheme the variant names. Same scheduled-task shape as the file dialog job.
+    function Invoke-HighContrastJob {
+        param([string] $Name, [object[]] $Variants, [string] $ArgumentLine)
+        $guestOut = "C:\mpc-test\mouse\out\$Name"
+        $jobJson = @{
+            Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; OutDir = $guestOut; ArgumentLine = $ArgumentLine; Variants = $Variants; OptionsPages = 30
+            Ids = @{
+                PlaylistList = $idPlaylistList; ViewPlaylist = $idViewPlaylist; EditList = $idEditList; ViewEdl = $idViewEdl
+                EdlNewClip = $idEdlNewClip; FavoritesOrganize = $idFavOrganize; FavoritesList = $idFavList; Options = $idOptions; CloseMedia = $idCloseMedia
+            }
+        } | ConvertTo-Json -Depth 5
+        $json = Invoke-Command -Session $session -ArgumentList $jobJson, $guestOut, $consoleUser {
+            param($job, $out, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-HighContrastCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(900)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Start-Sleep -Seconds 1
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { throw "job $Name produced no result on the guest" }
+        $local = Join-Path $OutDir $Name
+        if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+        New-Item -ItemType Directory -Force $local | Out-Null
+        Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+        $run = $json | ConvertFrom-Json
+        if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
+        if ($run.contrastOnAtEnd -ne $false) { Note Yellow "the guest's contrast theme may still be on ($($run.contrastOnAtEnd)): restore the checkpoint" }
+        [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # A rectangle of a capture: its commonest colour, and how many pixels are anything but (over 48 off in a
+    # channel). Text on a row is that ink: black text on a black row has none.
+    function Measure-Ink {
+        param([System.Drawing.Bitmap] $Bmp, [int] $L, [int] $T, [int] $R, [int] $B)
+        $counts = @{}
+        $pixels = [System.Collections.Generic.List[int]]::new()
+        for ($y = $T; $y -lt $B; $y++) {
+            for ($x = $L; $x -lt $R; $x++) {
+                $v = $Bmp.GetPixel($x, $y).ToArgb() -band 0xFFFFFF
+                $pixels.Add($v)
+                $counts[$v] = 1 + [int]$counts[$v]
+            }
+        }
+        $top = @($counts.GetEnumerator() | Sort-Object Value -Descending)[0].Key
+        $tr = ($top -shr 16) -band 255; $tg = ($top -shr 8) -band 255; $tb = $top -band 255
+        $ink = 0
+        foreach ($v in $pixels) {
+            $d = [math]::Max([math]::Max([math]::Abs((($v -shr 16) -band 255) - $tr), [math]::Abs((($v -shr 8) -band 255) - $tg)), [math]::Abs(($v -band 255) - $tb))
+            if ($d -gt 48) { $ink++ }
+        }
+        [pscustomobject]@{ Bg = @($tr, $tg, $tb); Ink = $ink }
+    }
+
+    function Test-Background {
+        param([string] $Where, [int[]] $Bg, [string] $Expect)
+        $luma = ($Bg[0] * 299 + $Bg[1] * 587 + $Bg[2] * 114) / 1000
+        $bad = switch ($Expect) {
+            'white' { $Bg[0] -ne 255 -or $Bg[1] -ne 255 -or $Bg[2] -ne 255 }
+            'dark'  { $luma -ge 80 }
+            'light' { $luma -lt 180 }
+        }
+        if ($bad) { "$Where has background $($Bg -join ',') where the variant expects $Expect" }
+    }
+
+    # Every list row that shows text must show it, on the background the variant expects, and the empty part
+    # of the list below the rows must be that same background.
+    function Test-HighContrastList {
+        param($Job, $Variant, [string] $ListName, $List, [string] $Png, [int[]] $RowsToRead, [int] $SkipLeft, [string] $Expect)
+        if (-not $List -or -not $List.found) { return @("$ListName was not found") }
+        if ($List.count -lt ($RowsToRead | Measure-Object -Maximum).Maximum + 1) { return @("$ListName holds $($List.count) rows, too few to test") }
+        $bmp = [System.Drawing.Bitmap]::FromFile((Join-Path $Job.Dir $Png))
+        try {
+            $p = @()
+            $plainBg = $null
+            foreach ($i in $RowsToRead) {
+                $row = $List.rows[$i]
+                $m = Measure-Ink $bmp ($row.L + $SkipLeft) ($row.T + 1) ([math]::Min($row.R, $List.client.R) - 2) ($row.B - 1)
+                Note Gray "      $($Variant.Name) $ListName row $i`: background $($m.Bg -join ','), $($m.Ink) text pixels"
+                if ($m.Ink -lt 15) { $p += "$ListName row $i shows no text: $($m.Ink) pixels off its background $($m.Bg -join ',')" }
+                if ($i -eq $RowsToRead[-1]) { $plainBg = $m.Bg; $p += Test-Background "$ListName row $i" $m.Bg $Expect }
+            }
+            $emptyTop = $List.lastRowBottom + 4; $emptyBottom = [math]::Min($emptyTop + 16, $List.client.B - 2)
+            if ($emptyBottom - $emptyTop -ge 6) {
+                $e = Measure-Ink $bmp ($List.client.L + 4) $emptyTop ($List.client.R - 4) $emptyBottom
+                Note Gray "      $($Variant.Name) $ListName below the rows: background $($e.Bg -join ',')"
+                $apart = (0..2 | ForEach-Object { [math]::Abs($e.Bg[$_] - $plainBg[$_]) } | Measure-Object -Maximum).Maximum
+                if ($apart -gt 8) { $p += "$ListName is $($e.Bg -join ',') below its rows and $($plainBg -join ',') behind them" }
+            }
+            $p
+        } finally { $bmp.Dispose() }
+    }
+
+    function Test-HighContrastVariant {
+        param($Job, $Variant)
+        $v = $Job.Run.variants.($Variant.Name)
+        if (-not $v) { return @('the guest run never reached this variant') }
+        if ($v.error) { return @("the guest stopped: $($v.error)") }
+        $p = @()
+        if ($v.contrastOn -ne [bool]$Variant.Scheme) { $p += "contrast was $($v.contrastOn), the variant wants $([bool]$Variant.Scheme): nothing was tested" }
+        # Dark or light, not the exact colour: Windows 11's black scheme has a window of 32,32,32 and its white one 255,250,239.
+        if ($Variant.Scheme -and (($v.sysColours.window | Measure-Object -Maximum).Maximum -lt 128) -ne ($Variant.WindowColour -eq '0,0,0')) { $p += "COLOR_WINDOW is $($v.sysColours.window -join ','), expected something near $($Variant.WindowColour): the scheme did not apply" }
+        if ($v.title -notlike '*bravo*') { $p += "bravo never played: the title is '$($v.title)'" }
+        if ($p.Count) { return $p }
+        $p += Test-HighContrastList $Job $Variant 'playlist' $v.playlist $v.mainPng @(0, 1, 2) 40 $Variant.Expect
+        $p += Test-HighContrastList $Job $Variant 'edit list' $v.editList $v.mainPng @(0) 4 $Variant.Expect
+        $p += Test-HighContrastList $Job $Variant 'favorites' $v.favorites $v.favoritesPng @(0, 1, 2) 4 $Variant.Expect
+        # Contrast off again under the running player: the user's own theme comes back.
+        if ($Variant['RestoreExpect']) {
+            if ($v.contrastOnAfterRestore) { $p += 'contrast was still on after turning it off' }
+            $p += Test-HighContrastList $Job $Variant 'playlist after contrast off' $v.playlistRestored $v.restoredPng @(0, 1, 2) 40 $Variant.RestoreExpect
+        }
+        $p
+    }
+
+    # 11. The lists that draw their own rows, under a contrast theme and with the theme off or on (#4375).
+    #     One job, one launch per variant; Run-HighContrastCase.guest.ps1's header says what the unfixed
+    #     build did. ModernThemeStyle 1 = Windows 10, 2 = Windows 11; ModernThemeMode 0 = Dark, 1 = Light.
+    function HcIni {
+        param([hashtable] $Extra)
+        $favs = "[Favorites\Files]`r`nName0=one;0;0;C:\mpc-test\mouse\media\pw\bravo.mkv`r`nName1=two;0;0;C:\mpc-test\mouse\media\pw\charlie.mkv`r`nName2=three;0;0;C:\mpc-test\mouse\media\pw\alpha.mkv`r`n"
+        # CustomChannelMapping: shows the Audio Switcher page's matrix, for the Options captures.
+        (PwIni (@{ EnableEDLEditor = 1; CustomChannelMapping = 1 } + $Extra)) + $favs
+    }
+    $black = 'High Contrast Black'; $white = 'High Contrast White'
+    $hcVariants = @(
+        @{ Name = 'themeoff-black';    Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'themeoff-white';    Scheme = $white; WindowColour = '255,255,255'; Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'dark-black';        Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 1 }) }
+        @{ Name = 'light-black';       Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 1 }) }
+        @{ Name = 'win11dark-black';   Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 2 }) }
+        @{ Name = 'win11light-black';  Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2 }) }
+        @{ Name = 'live-themeoff';     Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  Live = $true; RestoreExpect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'live-light';        Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  Live = $true; RestoreExpect = 'light'; IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 1 }) }
+        @{ Name = 'control-off';       Scheme = '';     WindowColour = '';            Expect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
+    )
+    $hcNames = $hcVariants | ForEach-Object { "high-contrast-lists-$($_.Name)" }
+    if (-not (Wanted $hcNames)) {
+    } elseif ($havePwMedia -and $haveLav) {
+        $hcWanted = @($hcVariants | Where-Object { $n = "high-contrast-lists-$($_.Name)"; -not $Case -or ($Case | Where-Object { $n -like $_ }) })
+        $skipped += $hcVariants.Count - $hcWanted.Count
+        $hcArgs = '"C:\mpc-test\mouse\media\pw\bravo.mkv" "C:\mpc-test\mouse\media\pw\charlie.mkv" "C:\mpc-test\mouse\media\pw\alpha.mkv" /new /play'
+        $c = Invoke-HighContrastJob -Name 'high-contrast' -Variants $hcWanted -ArgumentLine $hcArgs
+        foreach ($v in $hcWanted) { Complete-Case "high-contrast-lists-$($v.Name)" (Test-HighContrastVariant $c $v) }
+    } else {
+        $skipped += $hcVariants.Count
+        Note Yellow 'high contrast cases not run: they need the pw clips and LAV Filters beside the player'
     }
 }
 finally {
