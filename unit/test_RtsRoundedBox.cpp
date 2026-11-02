@@ -120,7 +120,8 @@ namespace
 
     using Frame = std::vector<DWORD>;
 
-    Frame RenderDoc(const std::string& doc, bool rounded, const Options& options = Options(), double seconds = 1.5)
+    // Several times from one renderer, so that what it keeps between frames is exercised
+    std::vector<Frame> RenderFrames(const std::string& doc, bool rounded, const Options& options, const std::vector<double>& times)
     {
         const bool isAss = doc[0] == '[';
         CCritSec lock;
@@ -138,19 +139,28 @@ namespace
         SetRounded(rts, rounded);
         rts.Deinit();
 
-        Frame bits(size_t(kWidth) * kHeight, kClear);
-        SubPicDesc spd;
-        spd.type = MSP_RGB32;
-        spd.w = kWidth;
-        spd.h = kHeight;
-        spd.bpp = 32;
-        spd.pitch = kWidth * 4;
-        spd.bits = reinterpret_cast<BYTE*>(bits.data());
-        spd.vidrect = { 0, 0, kWidth, kHeight };
+        std::vector<Frame> frames;
+        for (double seconds : times) {
+            Frame bits(size_t(kWidth) * kHeight, kClear);
+            SubPicDesc spd;
+            spd.type = MSP_RGB32;
+            spd.w = kWidth;
+            spd.h = kHeight;
+            spd.bpp = 32;
+            spd.pitch = kWidth * 4;
+            spd.bits = reinterpret_cast<BYTE*>(bits.data());
+            spd.vidrect = { 0, 0, kWidth, kHeight };
 
-        RECT bbox = {};
-        rts.Render(spd, REFERENCE_TIME(seconds * 10000000), 24000.0 / 1001, bbox);
-        return bits;
+            RECT bbox = {};
+            rts.Render(spd, REFERENCE_TIME(seconds * 10000000), 24000.0 / 1001, bbox);
+            frames.push_back(std::move(bits));
+        }
+        return frames;
+    }
+
+    Frame RenderDoc(const std::string& doc, bool rounded, const Options& options = Options(), double seconds = 1.5)
+    {
+        return RenderFrames(doc, rounded, options, { seconds })[0];
     }
 
     DWORD At(const Frame& f, int x, int y) { return f[size_t(y) * kWidth + x]; }
@@ -267,6 +277,32 @@ namespace
         { "whitespace line", "first line\\N \\Nsecond line" },
     };
 
+    // Without the text and half transparent, one shape is one value wherever the box is. A gap
+    // would show as a clear pixel, and boxes drawn twice as a darker one.
+    void ExpectDrawnOnce(const Frame& f)
+    {
+        const CRect r = Ink(f);
+        ASSERT_FALSE(r.IsRectEmpty());
+        const DWORD box = At(f, r.CenterPoint().x, r.CenterPoint().y);
+        for (int y = r.top + 1; y < r.bottom - 1; y++) { // the end rows can be antialiased
+            EXPECT_EQ(At(f, r.CenterPoint().x, y), box) << "not the same box at y=" << y;
+        }
+        int darker = 0;
+        for (DWORD px : f) {
+            darker += (px >> 24) < (box >> 24);
+        }
+        EXPECT_EQ(darker, 0) << "pixels drawn over twice";
+    }
+
+    Options HalfTransparentBox(double border = 2.0, double shadow = 0.0)
+    {
+        Options options;
+        options.style = BoxStyle(border, shadow);
+        options.style.alpha[0] = 0xFF;
+        options.style.alpha[2] = 0x80;
+        return options;
+    }
+
     void ExpectFallbackIsUnchanged(const Options& options)
     {
         for (const FallbackCase& c : kFallbacks) {
@@ -343,23 +379,7 @@ TEST(RoundedBox, MixedSizesAndBordersDrawOneShape)
             EXPECT_NE(Differing(RenderDoc(doc, true), RenderDoc(doc, false)), 0) << "the option changed nothing";
             EXPECT_TRUE(CornersOfTheEndRowsAreRound(RenderDoc(doc, true)));
 
-            // Without the text and half transparent, one shape is one value wherever the box is. A gap
-            // would show as a clear pixel, and boxes drawn twice as a darker one.
-            Options options;
-            options.style.alpha[0] = 0xFF;
-            options.style.alpha[2] = 0x80;
-            const Frame on = RenderDoc(doc, true, options);
-            const CRect r = Ink(on);
-            ASSERT_FALSE(r.IsRectEmpty());
-            const DWORD box = At(on, r.CenterPoint().x, r.CenterPoint().y);
-            for (int y = r.top + 1; y < r.bottom - 1; y++) { // the end rows can be antialiased
-                EXPECT_EQ(At(on, r.CenterPoint().x, y), box) << "not the same box at y=" << y;
-            }
-            int darker = 0;
-            for (DWORD px : on) {
-                darker += (px >> 24) < (box >> 24);
-            }
-            EXPECT_EQ(darker, 0) << "pixels drawn over twice";
+            ExpectDrawnOnce(RenderDoc(doc, true, HalfTransparentBox()));
         }
     }
 }
@@ -438,21 +458,173 @@ TEST(RoundedBox, LinesJoinWithoutAGapOrOverlapAtAnyLineSpacing)
     }
 }
 
-// Keeps the uniform side checked above meaningful: the square boxes do overlap
-TEST(RoundedBox, TransparentSquareBoxesOverlap)
+// #2875, #2619, #1803: the square box of several lines, with the option off
+TEST(SquareBox, LinesAreDrawnOnce)
 {
-    Options options;
-    options.style = BoxStyle(6.0);
-    options.style.alpha[2] = 0x80;
-    const std::string doc = Ass("HHHHHHHHHHHHHHHHHHHH\\NHHHHHHHHHHHHHHHHHHHH");
-
-    const Frame off = RenderDoc(doc, false, options);
-    const CRect r = Ink(off);
-    std::set<DWORD> values;
-    for (int y = r.top; y < r.bottom; y++) {
-        values.insert(At(off, r.left + 1, y));
+    const char* const texts[] = {
+        "HHHHHHHHHHHHHHHHHHHH\\NHHHHHHHHHHHHHHHHHHHH",
+        "A line\\Nand a much longer line in the middle\\Nand a last",
+        "a much longer first line\\Nand a short one",
+        "a short one\\Nand a much longer last line",
+        "{\\fs30}first line\\N{\\fs16}second line",
+        "{\\bord8}first line\\N{\\bord2}second line",
+    };
+    for (const char* text : texts) {
+        for (double border : { 1.0, 2.0, 3.0, 6.0, 12.0 }) {
+            for (const std::string& doc : { Srt(text), Ass(text) }) {
+                SCOPED_TRACE(testing::Message() << text << " border " << border << (doc[0] == '[' ? " ass" : " srt"));
+                ExpectDrawnOnce(RenderDoc(doc, false, HalfTransparentBox(border)));
+            }
+        }
     }
-    EXPECT_GE(values.size(), size_t(2)) << "the square boxes no longer overlap, so this proves nothing";
+}
+
+// Tilted, the column ExpectDrawnOnce walks leaves the box, so only look for pixels drawn twice
+TEST(SquareBox, RotatedLinesAreDrawnOnce)
+{
+    const Frame f = RenderDoc(Ass("{\\frz5}first line\\Nand a longer second line"), false, HalfTransparentBox(6.0));
+    const CRect r = Ink(f);
+    ASSERT_FALSE(r.IsRectEmpty());
+    const DWORD box = At(f, r.CenterPoint().x, r.CenterPoint().y);
+    EXPECT_NE(box, kClear);
+    int darker = 0;
+    for (DWORD px : f) {
+        darker += (px >> 24) < (box >> 24);
+    }
+    EXPECT_EQ(darker, 0) << "pixels drawn over twice";
+}
+
+// A later line's shadow must not land on an earlier line's box
+TEST(SquareBox, ShadowIsDrawnOnce)
+{
+    Options options = HalfTransparentBox(4.0, 3.0);
+    options.style.alpha[2] = 0x00;
+    options.style.alpha[3] = 0x80;
+    const Frame f = RenderDoc(Ass("a much longer first line\\Nand a short one"), false, options);
+    int minAlpha = 0xFF;
+    for (DWORD px : f) {
+        minAlpha = std::min<int>(minAlpha, px >> 24);
+    }
+    EXPECT_EQ(minAlpha, 0) << "the box itself is opaque";
+
+    options.style.alpha[2] = 0xFF; // only the shadow is left to see
+    options.style.alpha[3] = 0x80;
+    ExpectDrawnOnce(RenderDoc(Ass("a much longer first line\\Nand a short one"), false, options));
+}
+
+// The sample of #2619: a border wider than the line is high, so a box reaches past its neighbor
+TEST(SquareBox, BorderTallerThanTheLines)
+{
+    const std::string doc =
+        "[Script Info]\r\n"
+        "ScriptType: v4.00+\r\n"
+        "WrapStyle: 0\r\n"
+        "PlayResX: 1920\r\n"
+        "PlayResY: 1080\r\n"
+        "ScaledBorderAndShadow: yes\r\n"
+        "\r\n"
+        "[V4+ Styles]\r\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n"
+        "Style: Default,Tahoma,75,&HFF01010D,&H000000FF,&H80F7F5EF,&H00000000,0,0,0,0,100,100,0,0,3,75,0,2,15,15,100,1\r\n"
+        "\r\n"
+        "[Events]\r\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n"
+        "Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,Test1 Test2 Test3 Test4 Test5 Test6 Test7 Test8 Test9 Test10 Test11 Test12 Test13 Test14 Test15 Test16 Test17\r\n";
+    ExpectDrawnOnce(RenderDoc(doc, false));
+}
+
+TEST(SquareBox, NoGapBetweenLinesAtAnyBorder)
+{
+    const char* const text = "HHHHHHHHHHHHHHHHHHHH\\NHHHHHHHHHHHHHHHHHHHH\\NHHHHHHHHHHHHHHHHHHHH";
+    for (double border = 0.5; border <= 12.0; border += 0.25) {
+        for (const std::string& doc : { Srt(text), Ass(text) }) {
+            SCOPED_TRACE(testing::Message() << "border " << border << (doc[0] == '[' ? " ass" : " srt"));
+            ExpectDrawnOnce(RenderDoc(doc, false, HalfTransparentBox(border)));
+        }
+    }
+}
+
+// Top aligned, the first line is in the same place alone and above another line, so the
+// box must keep its whole border where a narrower line follows. Bottom aligned, the same
+// goes for the last line. A seam halfway between the lines would take that border away.
+// All lines share the first line's subpixel position, so an edge can move by a pixel.
+TEST(SquareBox, KeepsTheOutlineOfTheLineBoxes)
+{
+    const std::string wide = "a much longer line";
+    Options options = HalfTransparentBox(6.0);
+
+    int aloneLeft, aloneRight, left, right;
+    Frame alone = RenderDoc(Ass("{\\an8}" + wide), false, options);
+    RowInk(alone, Ink(alone).bottom - 1, aloneLeft, aloneRight);
+    RowInk(RenderDoc(Ass("{\\an8}" + wide + "\\Nshort"), false, options), Ink(alone).bottom - 1, left, right);
+    EXPECT_NEAR(left, aloneLeft, 1);
+    EXPECT_NEAR(right, aloneRight, 1);
+
+    alone = RenderDoc(Ass("{\\an2}" + wide), false, options);
+    RowInk(alone, Ink(alone).top, aloneLeft, aloneRight);
+    RowInk(RenderDoc(Ass("{\\an2}short\\N" + wide), false, options), Ink(alone).top, left, right);
+    EXPECT_NEAR(left, aloneLeft, 1);
+    EXPECT_NEAR(right, aloneRight, 1);
+}
+
+// These don't have one rectangle per line, so one shape would change what the script drew
+TEST(SquareBox, BoxesThatAreNotARectangleStayAsTheyAre)
+{
+    const struct {
+        const char* name;
+        const char* first;
+        const char* rest;
+    } cases[] = {
+        { "sign background: one scaled character", "{\\an8\\fscx400\\fscy300}X", "\\NX" },
+        { "sign background: two characters", "{\\an8\\fscx400\\fscy300}XY", "\\N{\\fscx100\\fscy100}x" },
+        { "size change in a line", "{\\an8\\fs30}first {\\fs16}second", "\\Nthird" },
+        { "border change in a line", "{\\an8\\bord12}first {\\bord2}second", "\\Nthird" },
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const Options options = HalfTransparentBox(4.0);
+        const Frame alone = RenderDoc(Ass(c.first), false, options);
+        const Frame two = RenderDoc(Ass(std::string(c.first) + c.rest), false, options);
+        const CRect r = Ink(alone);
+        ASSERT_FALSE(r.IsRectEmpty());
+        for (int y = r.top; y < r.top + r.Height() / 2; y++) {
+            int aloneLeft, aloneRight, left, right;
+            RowInk(alone, y, aloneLeft, aloneRight);
+            RowInk(two, y, left, right);
+            EXPECT_EQ(left, aloneLeft) << "y=" << y;
+            EXPECT_EQ(right, aloneRight) << "y=" << y;
+        }
+    }
+}
+
+TEST(SquareBox, ASingleLineIsNotOneShape)
+{
+    // Words that CLineBG can't join overlap by their borders, as they always have
+    const Frame f = RenderDoc(Ass("{\\3a&H80&}first {\\3a&H80&\\bord2.1}second"), false, HalfTransparentBox(6.0));
+    std::set<DWORD> values(f.begin(), f.end());
+    EXPECT_GE(values.size(), size_t(3)) << "clear, the box, and the box drawn twice";
+}
+
+// The shape is kept with the subtitle, and has to follow it around
+TEST(SquareBox, FramesMatchAFreshRender)
+{
+    const char* const texts[] = {
+        "{\\move(200,200,1000,500)}first line\\Nand a longer second line",
+        "{\\move(200,200,1000,500)\\frz10}first line\\Nand a longer second line",
+        "{\\t(\\bord12)}first line\\Nand a longer second line",
+        "{\\fad(500,500)}first line\\Nand a longer second line",
+    };
+    const std::vector<double> times = { 1.25, 1.5, 3.0, 4.75 };
+    for (const char* text : texts) {
+        for (bool rounded : { false, true }) {
+            SCOPED_TRACE(testing::Message() << text << (rounded ? " rounded" : " square"));
+            const Options options = HalfTransparentBox(4.0);
+            const std::vector<Frame> frames = RenderFrames(Ass(text), rounded, options, times);
+            for (size_t i = 0; i < times.size(); i++) {
+                EXPECT_EQ(Differing(frames[i], RenderDoc(Ass(text), rounded, options, times[i])), 0) << "time " << times[i];
+            }
+        }
+    }
 }
 
 // A box may reach past the margin by its border, as it does without the option
@@ -640,6 +812,12 @@ TEST(RoundedBox, DumpFrames)
         both(name + "-ass", Ass(c.text), Options());
         both(name + "-transparent", Ass(c.text), transparent);
     }
+
+    both("sign-one", Ass("{\\fscx400\\fscy300}X\\NX"), Options());
+    both("sign-two", Ass("{\\fscx400\\fscy300}XY\\Nsecond line"), Options());
+    both("drawing", Ass("{\\p1}m 0 0 l 100 0 100 40 0 40{\\p0}\\Nsecond line"), Options());
+    both("square-shadow", Ass("a much longer first line\\Nand a short one"), HalfTransparentBox(4.0, 3.0));
+    both("square-steps", Ass("A line\\Nand a much longer line in the middle\\Nand a last"), HalfTransparentBox(6.0));
 
     Options margins;
     margins.style.marginRect = CRect(38, 20, 38, 20);
