@@ -3,8 +3,9 @@
 #
 # #4375. The playlist, the Edit List editor and Organize Favorites draw their own rows. With the theme off
 # their text and selection were fixed colours while their background came from COLOR_WINDOW, which a black
-# contrast theme makes black: black text on black. With the theme on, #4256 turned the theme off under a
-# contrast theme, so everyone took that path.
+# contrast theme makes black: black text on black. #4256 turned the theme off under a contrast theme, so
+# everyone took that path. The player now forces the modern dark theme while a contrast theme is on, whatever
+# the settings say, and the user's own theme comes back when contrast goes off (the Live variants).
 #
 # Each variant is its own player launch from a fresh portable ini (the job gives the ini text and the scheme;
 # an empty scheme is the control, contrast off). The rows of the three lists are recorded for the host to
@@ -221,6 +222,15 @@ public class HcRig {
             }
             [void][MouseRig]::PostMessage($opt, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
             Start-Sleep -Milliseconds 600
+
+            if ($v.Live) {
+                Set-Contrast ''
+                $r.contrastOnAfterRestore = [HcRig]::IsOn()
+                Start-Sleep -Seconds 2
+                $r.playlistRestored = Read-List $pl 3
+                $r.restoredPng = "$($v.Name)-restored.png"
+                Save-Screen 'x.png'; Move-Item (Join-Path $outDir 'x.png') (Join-Path $outDir $r.restoredPng) -Force
+            }
 
             # No file: most toolbar buttons disabled.
             Send-Command $root $j.Ids.CloseMedia

@@ -1385,7 +1385,7 @@ try {
     # Every list row that shows text must show it, on the background the variant expects, and the empty part
     # of the list below the rows must be that same background.
     function Test-HighContrastList {
-        param($Job, $Variant, [string] $ListName, $List, [string] $Png, [int[]] $RowsToRead, [int] $SkipLeft, [string] $Expect, [switch] $RowsOnly)
+        param($Job, $Variant, [string] $ListName, $List, [string] $Png, [int[]] $RowsToRead, [int] $SkipLeft, [string] $Expect)
         if (-not $List -or -not $List.found) { return @("$ListName was not found") }
         if ($List.count -lt ($RowsToRead | Measure-Object -Maximum).Maximum + 1) { return @("$ListName holds $($List.count) rows, too few to test") }
         $bmp = [System.Drawing.Bitmap]::FromFile((Join-Path $Job.Dir $Png))
@@ -1400,7 +1400,7 @@ try {
                 if ($i -eq $RowsToRead[-1]) { $plainBg = $m.Bg; $p += Test-Background "$ListName row $i" $m.Bg $Expect }
             }
             $emptyTop = $List.lastRowBottom + 4; $emptyBottom = [math]::Min($emptyTop + 16, $List.client.B - 2)
-            if (-not $RowsOnly -and $emptyBottom - $emptyTop -ge 6) {
+            if ($emptyBottom - $emptyTop -ge 6) {
                 $e = Measure-Ink $bmp ($List.client.L + 4) $emptyTop ($List.client.R - 4) $emptyBottom
                 Note Gray "      $($Variant.Name) $ListName below the rows: background $($e.Bg -join ',')"
                 $apart = (0..2 | ForEach-Object { [math]::Abs($e.Bg[$_] - $plainBg[$_]) } | Measure-Object -Maximum).Maximum
@@ -1422,9 +1422,13 @@ try {
         if ($v.title -notlike '*bravo*') { $p += "bravo never played: the title is '$($v.title)'" }
         if ($p.Count) { return $p }
         $p += Test-HighContrastList $Job $Variant 'playlist' $v.playlist $v.mainPng @(0, 1, 2) 40 $Variant.Expect
-        # The editor has no themed rows: white in every mode, with the theme's background around them in dark.
-        $p += Test-HighContrastList $Job $Variant 'edit list' $v.editList $v.mainPng @(0) 4 'white' -RowsOnly:($Variant.Expect -eq 'dark')
+        $p += Test-HighContrastList $Job $Variant 'edit list' $v.editList $v.mainPng @(0) 4 $Variant.Expect
         $p += Test-HighContrastList $Job $Variant 'favorites' $v.favorites $v.favoritesPng @(0, 1, 2) 4 $Variant.Expect
+        # Contrast off again under the running player: the user's own theme comes back.
+        if ($Variant['RestoreExpect']) {
+            if ($v.contrastOnAfterRestore) { $p += 'contrast was still on after turning it off' }
+            $p += Test-HighContrastList $Job $Variant 'playlist after contrast off' $v.playlistRestored $v.restoredPng @(0, 1, 2) 40 $Variant.RestoreExpect
+        }
         $p
     }
 
@@ -1439,14 +1443,14 @@ try {
     }
     $black = 'High Contrast Black'; $white = 'High Contrast White'
     $hcVariants = @(
-        @{ Name = 'themeoff-black';    Scheme = $black; WindowColour = '0,0,0';       Expect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
-        @{ Name = 'themeoff-white';    Scheme = $white; WindowColour = '255,255,255'; Expect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'themeoff-black';    Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'themeoff-white';    Scheme = $white; WindowColour = '255,255,255'; Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 0 }) }
         @{ Name = 'dark-black';        Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 1 }) }
-        @{ Name = 'light-black';       Scheme = $black; WindowColour = '0,0,0';       Expect = 'light'; IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 1 }) }
+        @{ Name = 'light-black';       Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 1 }) }
         @{ Name = 'win11dark-black';   Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 2 }) }
-        @{ Name = 'win11light-black';  Scheme = $black; WindowColour = '0,0,0';       Expect = 'light'; IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2 }) }
-        @{ Name = 'live-themeoff';     Scheme = $black; WindowColour = '0,0,0';       Expect = 'white'; Live = $true; IniText = (HcIni @{ MPCTheme = 0 }) }
-        @{ Name = 'live-dark';         Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  Live = $true; IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 0; ModernThemeStyle = 1 }) }
+        @{ Name = 'win11light-black';  Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 2 }) }
+        @{ Name = 'live-themeoff';     Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  Live = $true; RestoreExpect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
+        @{ Name = 'live-light';        Scheme = $black; WindowColour = '0,0,0';       Expect = 'dark';  Live = $true; RestoreExpect = 'light'; IniText = (HcIni @{ MPCTheme = 1; ModernThemeMode = 1; ModernThemeStyle = 1 }) }
         @{ Name = 'control-off';       Scheme = '';     WindowColour = '';            Expect = 'white'; IniText = (HcIni @{ MPCTheme = 0 }) }
     )
     $hcNames = $hcVariants | ForEach-Object { "high-contrast-lists-$($_.Name)" }
