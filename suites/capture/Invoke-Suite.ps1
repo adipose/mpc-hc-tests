@@ -58,6 +58,13 @@
                              as bare filler; README says how to reach both
                              with a test build.
 
+      saved-type-stale-punk  Open the device once so the capture dialog saves
+                             its media type, plant a pUnk in the saved raw
+                             AM_MEDIA_TYPE, and open again: the player must
+                             survive. Guards ledger 52, where LoadMediaType
+                             kept the pointer and DeleteMediaType called
+                             Release on it.
+
     No rig: NeedsRig = $false. The suite needs a video capture source where it
     runs. On the host that is whatever camera is installed (e2eSoft VCam); the
     audio source is the first audio capture device, or the one whose friendly
@@ -373,7 +380,8 @@ function Start-CapturePlayer {
     # An empty -AudioDisplayName configures no audio device: the player then takes audio from the video device.
     # -Settings adds [Settings] keys (the renderer, for preview-with-mpcvr).
     # -FileFormat is the capture bar's container: 0 AVI, 2 Matroska.
-    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName, [hashtable] $Settings = @{}, [int] $FileFormat = 0)
+    # -KeepIni reopens with the ini the previous run of the same name left, for what the player saved.
+    param([string] $Name, [string] $AviPath, [string] $AudioDisplayName = $audio.DisplayName, [hashtable] $Settings = @{}, [int] $FileFormat = 0, [switch] $KeepIni)
     $dir = Join-Path $OutDir "$Name\player"
     New-Item -ItemType Directory -Force $dir | Out-Null
     Copy-Item $PlayerBinary (Join-Path $dir 'mpc-hc64.exe') -Force
@@ -385,7 +393,7 @@ function Start-CapturePlayer {
     $d3dx = Join-Path (Split-Path $PlayerBinary -Parent) 'D3DX9_43.dll'
     if (Test-Path $d3dx) { Copy-Item $d3dx $dir -Force }
     $extra = ($Settings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)`r`n" }) -join ''
-    @"
+    if (-not $KeepIni) { @"
 [Settings]
 UpdaterAutoCheck=0
 DefaultCapture=0
@@ -400,7 +408,7 @@ AudPreview=1
 FileFormat=$FileFormat
 SepAudio=0
 FileName=$AviPath
-"@ | Set-Content (Join-Path $dir 'mpc-hc64.ini') -Encoding ascii
+"@ | Set-Content (Join-Path $dir 'mpc-hc64.ini') -Encoding ascii }
     $p = Start-Process (Join-Path $dir 'mpc-hc64.exe') -ArgumentList '/new', '/device' -PassThru
     $main = $null
     for ($i = 0; $i -lt 60 -and -not $main; $i++) {
@@ -503,7 +511,7 @@ function Read-MkvLayout {
     [pscustomobject]@{ Children = $children; SeekEntries = $entries }
 }
 
-$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect', 'bar-float-redock', 'record-mkv')
+$cases = @('record-with-previews', 'resolution-changes', 'record-camera-audio', 'preview-with-mpcvr', 'preview-after-reselect', 'bar-float-redock', 'record-mkv', 'saved-type-stale-punk')
 if ($Case) { $cases = $cases | Where-Object { $n = $_; $Case | Where-Object { $n -like $_ } } }
 
 # --- record-with-previews, record-camera-audio --------------------------------------------
@@ -843,6 +851,58 @@ if ($cases -contains 'record-mkv') {
             }
         } catch {
             $problems += "the file does not parse: $_"
+        }
+    }
+    Report $name $problems
+}
+
+# --- saved-type-stale-punk ----------------------------------------------------------------
+#
+# The capture dialog saves the device's media type as the raw AM_MEDIA_TYPE, pointers included, in
+# [Capture\<device>] MediaType, and reloads it the next time the device opens. Open once so the type is
+# saved, plant a pUnk in the saved struct (a pointer from "an earlier process": 0x4141414141414141, which
+# faults on any use), and open again. LoadMediaType used to keep pUnk, and the DeleteMediaType after
+# SetFormat called Release on it, so the second open crashed. The fix clears it on load.
+
+if ($cases -contains 'saved-type-stale-punk') {
+    $name = 'saved-type-stale-punk'
+    $problems = @()
+    New-Item -ItemType Directory -Force (Join-Path $OutDir $name) | Out-Null
+    $avi = Join-Path $OutDir "$name\unused.avi"
+    $player = Start-CapturePlayer $name $avi
+    if (-not (Stop-CapturePlayer $player)) { $problems += 'first open: player did not close on WM_CLOSE within 20 s' }
+    $ini = Join-Path $player.Dir 'mpc-hc64.ini'
+    # The saved struct in the ini's A-P form: two characters a byte, low nibble first. On x64 pUnk is the
+    # eight bytes at offset 64 of the 88-byte struct.
+    $section = '[Capture\' + ($video.DisplayName -replace '\\', '/') + ']'
+    $lines = [Collections.Generic.List[string]] (Get-Content $ini)
+    $at = $lines.IndexOf($section)
+    $mt = -1
+    if ($at -ge 0) { for ($i = $at + 1; $i -lt $lines.Count -and -not $lines[$i].StartsWith('['); $i++) { if ($lines[$i].StartsWith('MediaType=')) { $mt = $i } } }
+    if ($mt -lt 0) { $problems += "first open saved no MediaType under $section" }
+    elseif ($lines[$mt].Length -ne 'MediaType='.Length + 176) { $problems += "saved MediaType is $(($lines[$mt].Length - 10) / 2) bytes, expected 88 (an x64 AM_MEDIA_TYPE)" }
+    else {
+        $v = $lines[$mt].Substring(10)
+        $lines[$mt] = 'MediaType=' + $v.Substring(0, 128) + ('BE' * 8) + $v.Substring(144)
+        $lines | Set-Content $ini -Encoding ascii
+        $crash = $null
+        try {
+            $player = Start-CapturePlayer $name $avi -KeepIni
+            try {
+                Start-Sleep -Seconds 3
+                # The player's own exception handler reports the fault in a dialog titled "Unexpected error" (an
+                # access violation in UpdateVideoControls, unfixed) and the process stays up behind it.
+                $crash = $W::TopWindows([uint32]$player.Process.Id) | Where-Object { $W::Txt($_) -eq 'Unexpected error' }
+                if ($crash) { $problems += 'second open: the player reported an unexpected error (crash)' }
+                elseif ($player.Process.HasExited) { $problems += "second open: player exited, code 0x$('{0:X8}' -f $player.Process.ExitCode)" }
+                elseif (-not $W::Answers($player.Main, 3000)) { $problems += 'second open: main window not answering' }
+            } finally {
+                if ($crash) { Stop-Process -Id $player.Process.Id -Force }
+                elseif (-not $player.Process.HasExited -and -not (Stop-CapturePlayer $player)) { $problems += 'second open: player did not close on WM_CLOSE within 20 s' }
+            }
+        } catch {
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$OutDir\$name\*" } | Stop-Process -Force
+            $problems += "second open: $_"
         }
     }
     Report $name $problems
