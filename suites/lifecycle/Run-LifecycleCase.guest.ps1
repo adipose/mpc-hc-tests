@@ -14,6 +14,12 @@
 #             posted) and the confirmation answered Yes. Recorded: whether the first instance exited and
 #             with what code, whether a new one started, how many are running a few seconds later, and
 #             the ini afterwards. A guard that a settings reset still restarts the player, on any build.
+#   update    Help > Check for updates (ID_HELP_CHECKFORUPDATE posted). The dialog appears whatever the
+#             network does: a guest without one gets the error text after the timeouts. Recorded: whether
+#             the dialog runs on the frame's thread, whether the frame stays enabled, then the exit code
+#             after ID_FILE_EXIT is posted with the dialog still up. Before the fix the dialog ran modal
+#             on the check thread and opened during exit if the check finished late, reading settings
+#             ExitInstance had already released (#4257, DrDump 1082769).
 param([Parameter(Mandatory)] [string] $Job)
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +44,8 @@ public static class Life {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr p, EnumProc f, IntPtr l);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+    public static uint ThreadOf(IntPtr h) { uint p; return GetWindowThreadProcessId(h, out p); }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
@@ -114,6 +122,21 @@ try {
     $frame = Wait-For { [Life]::TopLevel($pid0, 'MediaPlayerClassicW') | Select-Object -First 1 } 15000
     if (-not $frame) { throw 'the player window did not appear' }
     Start-Sleep -Milliseconds 1500
+
+    if ($j.Case -eq 'update') {
+        [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.CheckForUpdate, [IntPtr]::Zero)
+        $dlg = Wait-For {
+            foreach ($w in [Life]::TopLevel($pid0, '#32770')) { if ([Life]::Child($w, [int]$j.Ids.UpdateText) -ne [IntPtr]::Zero) { return $w } }
+        } 60000
+        if (-not $dlg) { throw 'the update dialog did not appear' }
+        Start-Sleep -Milliseconds 500
+        $result.sameThread = ([Life]::ThreadOf($dlg) -eq [Life]::ThreadOf($frame))
+        $result.frameEnabled = [Life]::IsWindowEnabled($frame)
+        [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.FileExit, [IntPtr]::Zero)
+        $result.exited = $script:proc.WaitForExit(20000)
+        $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
+        return
+    }
 
     [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.ViewOptions, [IntPtr]::Zero)
     $sheet = Wait-For { [Life]::TopLevel($pid0, '#32770') | Select-Object -First 1 } 10000

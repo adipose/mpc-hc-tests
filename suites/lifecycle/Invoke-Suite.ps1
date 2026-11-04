@@ -18,6 +18,9 @@
       options-reset-relaunches   Reset settings from Options > Miscellaneous: the player exits, one
                                  new instance comes up, and the settings are gone. A guard, passing
                                  on builds before and after the fix alike
+      update-dialog-exit         Help > Check for updates, then ID_FILE_EXIT with the dialog up: the
+                                 dialog is on the frame's thread, the frame stays usable, exit is 0
+                                 (#4257, DrDump 1082769)
 
     Nothing here needs real input: these are posted commands and the evidence is a WinEvent hook, so
     the scheduled task is only there to put the player in the console session.
@@ -80,6 +83,8 @@ $ids = @{
     ViewOptions = Get-ResourceId 'ID_VIEW_OPTIONS' 815
     FileExit    = Get-ResourceId 'ID_FILE_EXIT' 816
     ResetButton = Get-ResourceId 'IDC_RESET_SETTINGS' 11133
+    CheckForUpdate = Get-ResourceId 'ID_HELP_CHECKFORUPDATE' 41321
+    UpdateText  = Get-ResourceId 'IDC_UPDATE_DLG_TEXT' 22051
 }
 $idMiscPage = Get-ResourceId 'IDD_PPAGEMISC' 10052
 
@@ -178,6 +183,19 @@ try {
             $run = Invoke-LifecycleJob -Name $x.Name -JobCase 'exit' -How $x.How -IniText $plainIni
             Complete-Case $x.Name (Test-ExitDeferred $run)
         }
+    }
+
+    # The update dialog belongs to the frame's thread, so nothing the check thread does can outlive the
+    # settings, and an exit with it open closes cleanly. Before the fix it ran modal on the check
+    # thread with the frame disabled.
+    if (Wanted 'update-dialog-exit') {
+        $run = Invoke-LifecycleJob -Name 'update-dialog-exit' -JobCase 'update' -How '' -IniText $plainIni
+        $p = @()
+        if (-not $run.sameThread) { $p += 'the update dialog runs on another thread than the frame' }
+        if (-not $run.frameEnabled) { $p += 'the frame was disabled while the update dialog was up' }
+        if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
+        elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        Complete-Case 'update-dialog-exit' $p
     }
 
     # The reset guard. Options opens at Miscellaneous; ResetMarker is a key only a reset removes.
