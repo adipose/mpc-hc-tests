@@ -14,6 +14,7 @@ Run-LifecycleCase.guest.ps1   target side: open Options, request the exit or the
 |---|---|---|
 | `options-exit-deferred` | Options open, `ID_FILE_EXIT` posted to the frame (web interface, exit after playback, `/close`) | the sheet is destroyed before the frame is hidden, and the player exits 0 (#4257) |
 | `options-sysclose-deferred` | the same with `WM_SYSCOMMAND SC_CLOSE` (the taskbar) | as above |
+| `update-dialog-exit` | Help > Check for updates (the dialog shows the error text on a guest without network), then `ID_FILE_EXIT` with it up | the dialog runs on the frame's thread, the frame stays enabled, and the player exits 0 (#4257, DrDump 1082769) |
 | `options-reset-relaunches` | Reset in Options > Miscellaneous, confirmed Yes | the player exits 0, one new instance is running, and the ini no longer has the marker key |
 
 ## Why the order and not the crash
