@@ -2580,6 +2580,31 @@ try {
         if ($s.Seconds -lt 8.5) { $problems += "$($s.Seconds) s of sound with the setting off: the minimize interrupted playback (about 10 s expected)" }
         Complete-Case 'pause-when-minimized-off' $problems
     }
+
+    # 64. Only the four fps items of Play > Playback rate set a rate from the video's fps: ledger 19 (patch819).
+    #    OnPlayChangeRate tested nID >= ID_PLAY_PLAYBACKRATE_FPS23 || nID <= ID_PLAY_PLAYBACKRATE_FPS59, true for
+    #    every id, so any id in the rate range that is not a standard rate (5015, which no menu item uses) fell
+    #    through to the fps branch and set 25 fps. On EVR-CP (m_pCAP, and a GetFPS of 24 for flat_sdr.mkv) the
+    #    posted FPS25 item (5021) at 5 s must give 25/24, the control that the fps path works and GetFPS is known
+    #    by then; 1.00x (5005) puts it back, and the unused 5015 at 8 s must leave it at 1 (unfixed develop
+    #    98ce8e37f3: 25/24 again). LastGPUCheck keeps the first-run GPU check from swapping EVR-CP for MPCVR. The
+    #    update handler's half of the fix, the fps items disabled without m_pCAP, needs the menu and is not here.
+    if (Test-CaseSelected 'fps-rate-ignores-unused-ids') {
+        $c = Invoke-PlayerCase -Name 'fps-rate-ignores-unused-ids' -Clip 'flat_sdr.mkv' -Switches '/play' `
+            -Settings ($web + @{ DSVidRen = 11; LastGPUCheck = 500000 }) -IniSections $rendererLav `
+            -PostCommands '5:5021,7:5005,8:5015' -HttpAt '6|GET|/status.json|', '9|GET|/status.json|' -CloseAtSec 11
+        $answers = @($c.Run.http)
+        $problems = @((Get-ProcessProblem $c.Run))
+        $want = @(@{ rate = 25.0 / 24.0; what = 'after the FPS25 item (5021)' }, @{ rate = 1.0; what = 'after 1.00x and then the unused id 5015' })
+        for ($i = 0; $i -lt 2; $i++) {
+            $status = $null
+            if ($answers.Count -gt $i -and $answers[$i].status -eq 200) { try { $status = $answers[$i].bodyText | ConvertFrom-Json } catch { } }
+            if (-not $status) { $problems += "the status request $($want[$i].what) got no JSON (status $(if ($answers.Count -gt $i) { $answers[$i].status } else { 'none' }))"; continue }
+            Note Gray "      rate $($want[$i].what): $($status.rate)"
+            if ([math]::Abs([double] $status.rate - $want[$i].rate) -gt 0.001) { $problems += "the rate $($want[$i].what) is $($status.rate), expected $([math]::Round($want[$i].rate, 5))" }
+        }
+        Complete-Case 'fps-rate-ignores-unused-ids' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
