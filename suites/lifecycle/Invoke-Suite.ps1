@@ -15,6 +15,9 @@
       options-exit-deferred      ID_FILE_EXIT posted with Options up, as the web interface, "exit
                                  after playback" and /close do
       options-sysclose-deferred  WM_SYSCOMMAND SC_CLOSE posted with Options up, as the taskbar does
+      options-reentry-single-sheet  ID_VIEW_OPTIONS posted again with Options up, as a global
+                                 hotkey, a remote or the web interface can: still one sheet, and
+                                 the same one (#4257, DrDump 147417607)
       options-reset-relaunches   Reset settings from Options > Miscellaneous: the player exits, one
                                  new instance comes up, and the settings are gone. A guard, passing
                                  on builds before and after the fix alike
@@ -183,6 +186,21 @@ try {
             $run = Invoke-LifecycleJob -Name $x.Name -JobCase 'exit' -How $x.How -IniText $plainIni
             Complete-Case $x.Name (Test-ExitDeferred $run)
         }
+    }
+
+    # A second Options command with the sheet up brings the open sheet forward instead of stacking
+    # another one inside its pump (#4257, DrDump 147417607).
+    if (Wanted 'options-reentry-single-sheet') {
+        $run = Invoke-LifecycleJob -Name 'options-reentry-single-sheet' -JobCase 'reentry' -How '' -IniText $plainIni
+        $p = @()
+        if ($run.crashed) { $p += ('the player died after the second Options command, exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        elseif ($run.sheets -ne 1) { $p += "$($run.sheets) Options sheets up after the second command, not 1" }
+        elseif (-not $run.sameSheet) { $p += 'the sheet up is not the one first opened' }
+        if (-not $run.crashed) {
+            if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
+            elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        }
+        Complete-Case 'options-reentry-single-sheet' $p
     }
 
     # The update dialog belongs to the frame's thread, so nothing the check thread does can outlive the

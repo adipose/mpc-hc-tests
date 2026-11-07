@@ -14,6 +14,10 @@
 #             posted) and the confirmation answered Yes. Recorded: whether the first instance exited and
 #             with what code, whether a new one started, how many are running a few seconds later, and
 #             the ini afterwards. A guard that a settings reset still restarts the player, on any build.
+#   reentry   The Options sheet is opened, then ID_VIEW_OPTIONS is posted again with it up. Recorded: how
+#             many sheets the player shows two and a half seconds later, whether the one there is the
+#             first, then the exit code after ID_FILE_EXIT. Before the fix ShowOptions ran again inside
+#             the first sheet's pump and stacked a second sheet on it (#4257, DrDump 147417607).
 #   update    Help > Check for updates (ID_HELP_CHECKFORUPDATE posted). The dialog appears whatever the
 #             network does: a guest without one gets the error text after the timeouts. Recorded: whether
 #             the dialog runs on the frame's thread, whether the frame stays enabled, then the exit code
@@ -153,6 +157,23 @@ try {
         [Life]::StopHook()
         $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
         $result.events = @([Life]::Events)
+    } elseif ($j.Case -eq 'reentry') {
+        # a second Options command while the sheet is up, the way a global hotkey, a remote or the web
+        # interface delivers one: the frame is disabled, but a message sent or posted to it still runs
+        [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.ViewOptions, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 2500
+        $sheets = @([Life]::TopLevel($pid0, '#32770'))
+        $result.sheets = $sheets.Count
+        $result.sameSheet = ($sheets.Count -eq 1 -and $sheets[0] -eq $sheet)
+        $result.crashed = $script:proc.HasExited
+        if (-not $result.crashed) {
+            [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.FileExit, [IntPtr]::Zero)
+            $result.exited = $script:proc.WaitForExit(20000)
+            $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
+        } else {
+            $result.exited = $true
+            $result.exitCode = $script:proc.ExitCode
+        }
     } elseif ($j.Case -eq 'reset') {
         $button = Wait-For { $b = [Life]::Child($sheet, [int]$j.Ids.ResetButton); if ($b -ne [IntPtr]::Zero) { $b } }
         if (-not $button) { throw 'no Reset button on the page Options opened at' }
