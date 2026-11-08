@@ -88,6 +88,9 @@ suites/
   web/                The web interface's JSON answers polled in tight loops
                       while files open and close under them: no fault, every
                       body parses, the sizes seen are real ones
+  ytdl/               yt-dlp JSON to playlist entries through a fake yt-dlp:
+                      each entry keeps only its own title, source and
+                      subtitles; runs the player on the host, no rig
 ```
 
 ## Unit tests
