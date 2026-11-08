@@ -466,6 +466,17 @@ TEST(Text, UrlEncodeDecodeRoundTrip)
     EXPECT_EQ(UrlDecode("%20%26%3D"), " &=");
 }
 
+// The OpenSubtitles.com search puts a UTF-8 file name through UrlEncode as a
+// single query value, so every byte that could end or change the value has to
+// come out escaped: space, '&', '#', '%', '+', '=' and anything above 0x7E.
+TEST(Text, UrlEncodeEscapesAQueryValue)
+{
+    EXPECT_EQ(UrlEncode("Am\xc3\xa9lie & Nino #1 (2001)"), "Am%c3%a9lie%20%26%20Nino%20%231%20(2001)");
+    EXPECT_EQ(UrlEncode("50%+1=2"), "50%25%2b1%3d2");
+    EXPECT_EQ(UrlEncode("plain.name-1_2"), "plain.name-1_2");
+    EXPECT_EQ(UrlEncode(""), "");
+}
+
 // #591: '+' means space, and the result is decoded as UTF-8
 TEST(Text, UrlDecodeWithUtf8)
 {
