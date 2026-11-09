@@ -34,6 +34,16 @@ From one fresh portable profile (`mpc-hc64.ini` beside the deployed exe):
    left on air for `-OnAirSec` seconds and asked to close. Asserts the player
    was still running when its time was up, closed when asked, and that the
    sound card received the channel's tone for a good part of the time on air.
+3. **change-channel** -- the first channel is tuned with `/device`, and 7 s
+   in the guest script posts `WM_COMMAND` 4300 + the last channel's index
+   (`ID_NAVIGATE_JUMPTO_SUBITEM_START`, the command Navigate > Jump To and
+   `/dvb/setchannel` send) to the running player. Asserts the window title
+   names the first channel before the post and the last one at the end, and
+   that the last audio stream the endpoint received is the last channel's
+   tone. The title is set from the channel-info update that a successful
+   `SetChannel` starts (`UpdateCurrentChannelInfo`, `WM_DVB_EIT_DATA_READY`,
+   `OnCurrentChannelInfoUpdated`), so it covers that path even though the
+   generated streams carry no EIT.
 
 Live television never ends, so unlike a file case the player is closed from
 outside; a player that has gone away by itself is the failure.
@@ -91,9 +101,8 @@ look at the capture over time before believing a single number about it.
 
 ## Not yet here
 
-Changing channel *while playing* -- the literal subject of #74 -- needs a way
-to drive a running player (`/slave`, or a channel command posted to its
-window); see `..\..\PLAN.md`. This suite re-tunes by restarting the player,
-which covers "does this channel render" and not "does audio survive a channel
-change". The picture is not asserted either; with the virtual monitor it
-could be, the channels' colour pairs being declared as well.
+`change-channel` makes one jump to another multiplex. A jump within one
+multiplex, repeated jumps, and next/previous channel (`ID_NAVIGATE_SKIPFORWARD`
+and `ID_NAVIGATE_SKIPBACK`) are not exercised. The picture is not asserted
+either; with the virtual monitor it could be, the channels' colour pairs being
+declared as well.

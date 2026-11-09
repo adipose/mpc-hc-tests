@@ -228,10 +228,10 @@ try {
     if ($stored.Channels.Count -gt 1) { $picks += $stored.Channels[1] }
     if ($stored.Channels.Count -gt 2) { $picks += $stored.Channels[-1] }
 
-    foreach ($ch in $picks) {
-        $case = 'tune-' + (($ch.Name -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant())
-
-        Invoke-Command -Session $session -ArgumentList $ch.Index {
+    # The channel /device tunes is the profile's LastChannel.
+    function Set-LastChannel {
+        param([int] $Index)
+        Invoke-Command -Session $session -ArgumentList $Index {
             param($index)
             $path = 'C:\mpc-test\player\mpc-hc64.ini'
             $lines = [System.Collections.Generic.List[string]](Get-Content $path)
@@ -241,6 +241,12 @@ try {
             $lines.Insert($at + 1, "LastChannel=$index")
             [IO.File]::WriteAllLines($path, $lines, [Text.Encoding]::Unicode)
         }
+    }
+
+    foreach ($ch in $picks) {
+        $case = 'tune-' + (($ch.Name -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant())
+
+        Set-LastChannel $ch.Index
 
         $run = Invoke-TunedRun -Tag "$case-$stamp" -ArgumentLine '/device' -Extra "-OnAirSec $OnAirSec"
 
@@ -273,6 +279,52 @@ try {
             elseif (-not $tone) { Note DarkGray "$($ch.Name): sound reached the endpoint; its pitch is not declared, so not asserted" }
         }
         Complete-Case "$case ($($ch.Name))" $problems
+    }
+
+    # --- 3. change channel while on air -------------------------------------------
+    #
+    # Tune the first channel, then jump to the last one (another multiplex) with the command that Navigate > Jump To
+    # and the web interface's /dvb/setchannel both send: WM_COMMAND ID_NAVIGATE_JUMPTO_SUBITEM_START (4300) plus the
+    # channel's pref number, which /dvbscansave stores as its scan index.
+    #
+    # The window title is how the change is seen. The frame retitles itself from the channel-info update that a
+    # successful SetChannel starts (UpdateCurrentChannelInfo, then WM_DVB_EIT_DATA_READY back to the frame, then
+    # OnCurrentChannelInfoUpdated), so a title naming the new channel proves that whole path ran, whether or not the
+    # stream carries EIT; the generated test streams carry none. Then the audio (#74, "audio is lost after changing
+    # a channel"): the stream the endpoint received last must be the new channel's tone.
+    if ($stored.Channels.Count -gt 1) {
+        $fromCh = $stored.Channels[0]; $toCh = $stored.Channels[-1]
+        $changeAtSec = 7
+        $onAir = [math]::Max($OnAirSec, $changeAtSec + 14)
+        Set-LastChannel $fromCh.Index
+        $run = Invoke-TunedRun -Tag "change-channel-$stamp" -ArgumentLine '/device' `
+            -Extra "-OnAirSec $onAir -PostCommandAtSec $changeAtSec -PostCommandId $(4300 + $toCh.Index)"
+
+        $problems = @()
+        if (-not $run.aliveAtEnd) { $problems += "the player went away by itself while on air (exit code $($run.exitCode))" }
+        elseif (-not $run.closedGracefully) { $problems += 'the player did not close when asked and had to be killed' }
+        if (-not $run.posted) { $problems += 'the channel command could not be posted to the player window' }
+        if ("$($run.titleBefore)" -notlike "*$($fromCh.Name)*") { $problems += "before the change the title was '$($run.titleBefore)', not naming $($fromCh.Name)" }
+        if ("$($run.titleAfter)" -notlike "*$($toCh.Name)*") { $problems += "after the change the title was '$($run.titleAfter)', not naming $($toCh.Name)" }
+
+        $from = [datetime]$run.started; $to = ([datetime]$run.finished).AddSeconds(1)
+        $last = Invoke-Command -Session $session -ArgumentList $from, $to {
+            param($from, $to)
+            Get-ChildItem 'C:\Windows\System32\drivers\DriverData\Audio_Samples\SimpleAudioSample' -Filter *.wav -ErrorAction SilentlyContinue |
+                Where-Object { $_.Length -gt 1000 -and $_.LastWriteTime -ge $from -and $_.LastWriteTime -le $to } |
+                Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
+        }
+        $tone = $channelTones[$toCh.Name]
+        if (-not $last) {
+            $problems += 'no audio reached the endpoint'
+        } elseif ($tone) {
+            $wav = Join-Path $OutDir 'change-channel.wav'
+            Copy-Item -FromSession $session $last $wav -Force
+            $checkArgs = @($wav, '--min-seconds', 5, '--skip-seconds', 3, '--expect', "$tone,$tone", '--tolerance', [math]::Max(5, [math]::Round($tone * 0.02)))
+            $output = & python (Join-Path $vaudio 'tests\wavcheck.py') @checkArgs 2>&1
+            if ($LASTEXITCODE -ne 0) { $problems += 'after the change: ' + (($output | Where-Object { "$_" -match '^FAIL|^silent' }) -join '; ') }
+        }
+        Complete-Case "change-channel ($($fromCh.Name) to $($toCh.Name))" $problems
     }
 }
 finally {

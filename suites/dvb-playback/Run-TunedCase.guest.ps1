@@ -10,8 +10,18 @@ param(
     [switch] $WaitForExit,
     [double] $CaptureAtSec = 0,
     [int] $CaptureConnector = 0,
-    [string] $CapturePath = ''
+    [string] $CapturePath = '',
+    # Drive the running player: post this WM_COMMAND id to its main window at PostCommandAtSec, reading the
+    # window title just before and again at the end of the time on air.
+    [double] $PostCommandAtSec = 0,
+    [int] $PostCommandId = 0
 )
+
+function Get-PlayerTitle {
+    param($Process)
+    $Process.Refresh()
+    [pscustomobject]@{ Hwnd = [int64]$Process.MainWindowHandle; Title = $Process.MainWindowTitle }
+}
 
 $ErrorActionPreference = 'Continue'
 $result = [ordered]@{ started = (Get-Date).ToString('o'); args = $ArgumentLine }
@@ -29,6 +39,18 @@ else {
         $result.aliveAtCapture = -not $p.HasExited
         $result.capture = (& 'C:\vdisplay\vdisplayctl.exe' capture $CaptureConnector $CapturePath | Out-String).Trim()
         Start-Sleep -Milliseconds ([int](($OnAirSec - $CaptureAtSec) * 1000))
+    } elseif ($PostCommandId -and $PostCommandAtSec -gt 0 -and $PostCommandAtSec -lt $OnAirSec) {
+        Add-Type -Namespace MpcTest -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+'@
+        Start-Sleep -Milliseconds ([int]($PostCommandAtSec * 1000))
+        $before = Get-PlayerTitle $p
+        $result.titleBefore = $before.Title
+        # 0x0111 = WM_COMMAND. A command whose ON_UPDATE_COMMAND_UI reports it disabled is dropped silently, so the
+        # caller judges the effect, not this return value.
+        $result.posted = [MpcTest.Win]::PostMessage([IntPtr]$before.Hwnd, 0x0111, [IntPtr]$PostCommandId, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds ([int](($OnAirSec - $PostCommandAtSec) * 1000))
+        $result.titleAfter = (Get-PlayerTitle $p).Title
     } else {
         Start-Sleep -Seconds $OnAirSec
     }
