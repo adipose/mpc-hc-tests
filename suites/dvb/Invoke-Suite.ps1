@@ -53,6 +53,101 @@ $ranges = Import-PowerShellDataFile $RangesPath
 $passed = 0; $failed = 0; $skipped = 0; $notes = [System.Collections.Generic.List[string]]::new()
 function Note { param([string] $Colour, [string] $Text) $notes.Add($Text); Write-Host "  $Text" -ForegroundColor $Colour }
 
+function Invoke-MatrixScan {
+    <#
+    .SYNOPSIS
+        Map the encoding-matrix streams onto free DVB-T frequencies, scan only
+        those, assert the result with Test-MpcDecode, then unmap them.
+    .OUTPUTS
+        State 'pass', 'fail' or 'skip', and a one-line Detail.
+    #>
+    param([string] $Guest, $Tuner, [string] $OutDir, [string] $PlayerBinary)
+
+    $streamDir = Join-Path $PSScriptRoot 'results\matrix-streams'
+    $matrixPath = Join-Path $PSScriptRoot '..\..\emulator\tools\encoding-matrix.psd1'
+    $want = @((Import-PowerShellDataFile $matrixPath).Entries | ForEach-Object { $_.File })
+    $have = @($want | Where-Object { Test-Path (Join-Path $streamDir $_) })
+    if ($have.Count -ne $want.Count) {
+        try {
+            & (Join-Path $PSScriptRoot '..\..\emulator\tools\New-MatrixStreams.ps1') -OutDir $streamDir *> (Join-Path $OutDir 'matrix-streams.log')
+        } catch {
+            return [pscustomobject]@{ State = 'skip'; Detail = "the matrix streams could not be built ($($_.Exception.Message.Split([char]10)[0])); emulator\tools\Install-TestBed.ps1 -Phase Tsduck,FFmpeg fetches what they need" }
+        }
+    }
+    $files = @($want | ForEach-Object { Get-Item (Join-Path $streamDir $_) })
+
+    # One stream per 8 MHz DVB-T channel, in a contiguous block nothing on the
+    # rig uses, so the scan covers exactly these and the rig's own muxes are
+    # left alone. An unmapped frequency inside the block would be served the
+    # driver's DefaultStreamLocation and add a channel nobody declared.
+    $instance = $Tuner.Instance -replace '\\', '_'
+    $session = Connect-TestGuest -Guest $Guest
+    try {
+        $mapped = @(Invoke-Command -Session $session -ArgumentList $instance -ScriptBlock {
+            param($instance)
+            Get-ChildItem "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters" -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.PSChildName }
+        })
+        $r = $ranges['DVBT']
+        $first = $null
+        for ($top = $r.FreqEnd - ($r.FreqEnd - $r.FreqStart) % 8000; $top - 8000 * ($files.Count - 1) -ge $r.FreqStart; $top -= 8000) {
+            $block = @(0..($files.Count - 1) | ForEach-Object { $top - 8000 * ($files.Count - 1) + 8000 * $_ })
+            if (-not @($block | Where-Object { $mapped -contains $_ }).Count) { $first = $block[0]; break }
+        }
+        if ($null -eq $first) {
+            return [pscustomobject]@{ State = 'skip'; Detail = "no block of $($files.Count) free DVB-T frequencies in $($r.FreqStart)-$($r.FreqEnd) kHz" }
+        }
+        $map = @{}
+        for ($i = 0; $i -lt $files.Count; $i++) { $map[[string]($first + 8000 * $i)] = $files[$i].Name }
+
+        Invoke-Command -Session $session { New-Item -ItemType Directory -Force C:\ts\matrix-scan | Out-Null }
+        foreach ($f in $files) { Copy-Item $f.FullName -Destination "C:\ts\matrix-scan\$($f.Name)" -ToSession $session -Force }
+        try {
+            Invoke-Command -Session $session -ArgumentList $instance, $map -ScriptBlock {
+                param($instance, $map)
+                foreach ($khz in $map.Keys) {
+                    $k = "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters\$khz"
+                    New-Item -Path $k | Out-Null
+                    Set-ItemProperty $k -Name StreamLocation -Value "\??\C:\ts\matrix-scan\$($map[$khz])" -Type String
+                    Set-ItemProperty $k -Name FriendlyName   -Value $map[$khz] -Type String
+                    Set-ItemProperty $k -Name SignalLocked   -Value 1   -Type DWord
+                    Set-ItemProperty $k -Name SignalPresent  -Value 1   -Type DWord
+                    Set-ItemProperty $k -Name SignalQuality  -Value 100 -Type DWord
+                    Set-ItemProperty $k -Name SignalStrength -Value 63  -Type DWord
+                }
+            }
+            $job = @{
+                label = 'headless-dvbt-matrix'; headless = $true; tuner = $Tuner.Moniker
+                freqStart = $first; freqEnd = $first + 8000 * ($files.Count - 1)
+                bandwidth = 8000; symbolRate = 0; ignoreEncrypted = 0; clearChannels = $true
+                timeoutSec = $r.TimeoutSec
+            }
+            $scanArgs = @{ Job = $job; VMName = $Guest; WaitSec = ($r.TimeoutSec + 300) }
+            if ($PlayerBinary) { $scanArgs.HostBinary = $PlayerBinary } else { $job.allowExistingBinary = $true }
+            $raw = & (Join-Path $PSScriptRoot 'Invoke-MpcScan.ps1') @scanArgs
+        } finally {
+            Invoke-Command -Session $session -ArgumentList $instance, $map -ScriptBlock {
+                param($instance, $map)
+                foreach ($khz in $map.Keys) { Remove-Item "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters\$khz" -ErrorAction SilentlyContinue }
+                Remove-Item C:\ts\matrix-scan -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } finally { Remove-PSSession $session }
+
+    $resultFile = Join-Path $OutDir 'headless-dvbt-matrix.json'
+    $raw | Set-Content $resultFile
+    $log = Join-Path $OutDir 'decode-assert.log'
+    # Test-MpcDecode exits 1 on a mismatch and throws on a precondition it
+    # will not guess past. Both are a failure here: the streams are the
+    # matrix's own, so neither can be blamed on how the rig is provisioned.
+    try {
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-MpcDecode.ps1') -JsonPath $resultFile *> $log
+        $code = $LASTEXITCODE
+    } catch { $code = -1; "$($_.Exception.Message)" | Add-Content $log }
+    $summary = @(Get-Content $log | Where-Object { $_ -match 'entries decoded as declared' }) | Select-Object -Last 1
+    if ($code -eq 0) { return [pscustomobject]@{ State = 'pass'; Detail = "$summary ($($first)-$($first + 8000 * ($files.Count - 1)) kHz)" } }
+    [pscustomobject]@{ State = 'fail'; Detail = "$(if ($summary) { $summary } else { 'the assertion did not run' }) -- see $log" }
+}
+
 # --- resolve the rig's tuners ----------------------------------------------
 
 $claim = Enter-RigClaim -VMName $VMName
@@ -158,34 +253,23 @@ try {
             Note DarkGray "      $(@($channels | Where-Object encrypted).Count) of $($channels.Count) ATSC channel(s) report access-controlled"
         }
 
-        if ($std -eq 'DVBT') {
-            # The matrix streams are provisioned on the DVB-T tuner; assert the
-            # channel records against the emulator's declarations. The assert
-            # can fail two ways -- exit 1 (a mismatch) or a throw (a precondition
-            # it refuses to guess past, e.g. non-unique service identifiers) --
-            # and both are a recorded failure of this suite, never a crash of
-            # the run.
-            $chFile = Join-Path $OutDir 'headless-dvbt.channels.json'
-            $result.channelsJson | Set-Content $chFile
-            $log = Join-Path $OutDir 'decode-assert.log'
-            $global:LASTEXITCODE = 0
-            try {
-                & (Join-Path $PSScriptRoot 'Test-MpcDecode.ps1') -JsonPath $chFile -AllowUncleared *> $log
-                if ($LASTEXITCODE -eq 0) { $passed++; Note Green 'DVBT: channel records match the encoding matrix' }
-                else { $failed++; Note Red "DVBT: matrix assertion failed -- see $log" }
-            } catch {
-                # A throw is a precondition the assertion refuses to guess past
-                # -- chiefly channels that do not identify uniquely, which means
-                # the DVB-T tuner is carrying the self-describing colour streams
-                # (they share tsid/onid by design) rather than the matrix
-                # streams this asserts against. That is the assertion being
-                # inapplicable to how the rig is provisioned, not a player
-                # fault: record it skipped, with the reason, not failed.
-                $skipped++
-                Note Yellow "DVBT: matrix assertion not applicable -- $($_.Exception.Message.Split([char]10)[0])"
-                Note DarkGray '      (provision the DVB-T tuner with New-MatrixStreams to run it)'
-                "assertion precondition not met: $($_.Exception.Message)" | Add-Content $log
-            }
+    }
+
+    # --- the encoding matrix on the DVB-T tuner -------------------------------
+    #
+    # The rig's own DVB-T streams are the colour test muxes and some off-air
+    # captures, which share service identifiers and declare nothing, so the
+    # matrix cannot be asserted against them. This used to be a skip on every
+    # rig, because nothing provisioned the matrix streams. The suite now does:
+    # it builds them (cached under results\), maps each onto a free DVB-T
+    # frequency for the length of one scan, asserts that scan, and removes the
+    # mapping and the files again whatever happens.
+    if ($byStandard.ContainsKey('DVBT')) {
+        $assert = Invoke-MatrixScan -Guest $guest -Tuner $byStandard['DVBT'] -OutDir $OutDir -PlayerBinary $PlayerBinary
+        switch ($assert.State) {
+            'pass'    { $passed++;  Note Green  "DVBT matrix: $($assert.Detail)" }
+            'fail'    { $failed++;  Note Red    "DVBT matrix: $($assert.Detail)" }
+            default   { $skipped++; Note Yellow "DVBT matrix: skipped -- $($assert.Detail)" }
         }
     }
 } finally {

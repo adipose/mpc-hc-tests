@@ -253,18 +253,25 @@ function Test-ChannelAgainstEntry {
                 continue
             }
 
+            # pes carries the PMT stream_type after any overriding descriptor,
+            # and is the only thing separating branches that share a BDA type.
+            # So it is compared with the declared Pes, the type ParsePMT
+            # resolves to, and with the wire StreamType only when an entry
+            # declares no Pes. Comparing with StreamType alone failed every
+            # descriptor-signalled stream: DVB AC-3 is 0x06 on the wire and
+            # 0x81 once the AC-3 descriptor has been read.
+            $wantPes = if ($w.ContainsKey('Pes')) { ConvertTo-PesValue -EnumName $w.Pes }
+                       elseif ($w.ContainsKey('StreamType')) { $w.StreamType }
+                       else { $null }
             $chosen = $null
-            if ($w.ContainsKey('StreamType')) {
-                $chosen = @($candidates | Where-Object { (Get-JsonField $_ 'pes') -eq $w.StreamType }) | Select-Object -First 1
+            if ($null -ne $wantPes) {
+                $chosen = @($candidates | Where-Object { (Get-JsonField $_ 'pes') -eq $wantPes }) | Select-Object -First 1
             }
             if (-not $chosen) {
                 $chosen = $candidates[0]
-                # pes carries the PMT stream_type after any overriding
-                # descriptor, and is the only thing separating branches that
-                # share a BDA type.
-                if ($w.ContainsKey('StreamType')) {
-                    $problems += ("$role '$wantType' decoded with pes {0}, declared stream_type 0x{1:X2} ({1}). " +
-                                  "A descriptor may have overridden it.") -f (Get-JsonField $chosen 'pes'), $w.StreamType
+                if ($null -ne $wantPes) {
+                    $problems += ("$role '$wantType' decoded with pes {0}, expected 0x{1:X2} ({1}) " +
+                                  "for wire stream_type 0x{2:X2}.") -f (Get-JsonField $chosen 'pes'), $wantPes, $w.StreamType
                 }
             }
             $pool.Remove($chosen)
@@ -299,7 +306,8 @@ if ($SelfTest) {
     $good = [pscustomobject]@{
         name  = $entry.ServiceName
         sid   = $entry.ServiceId
-        tsid  = $defaults.TransportStreamId
+        # This entry declares its own transport stream id.
+        tsid  = $(if ($entry.ContainsKey('TransportStreamId')) { $entry.TransportStreamId } else { $defaults.TransportStreamId })
         onid  = $defaults.OriginalNetworkId
         video = [pscustomobject]@{
             type = 'MPEG-Video'; width = 704; height = 576

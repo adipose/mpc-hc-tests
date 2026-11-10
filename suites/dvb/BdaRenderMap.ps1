@@ -74,6 +74,41 @@ $script:BdaAspectRatioName = @{
     'BDA_AR_1_2_21' = '2.21:1'
 }
 
+# DSUtil\Mpeg2Def.h, PES_STREAM_TYPE: the values a stream's "pes" can carry.
+# "pes" is the type after ParsePMT's descriptor overrides, so a DVB AC-3
+# stream sent as stream_type 0x06 with descriptor 0x6A reads 0x81 here, not 6.
+# Entries declare that resolved type as Pes beside the wire StreamType.
+$script:PesStreamType = @{
+    'VIDEO_STREAM_MPEG1'     = 0x01
+    'VIDEO_STREAM_MPEG2'     = 0x02
+    'AUDIO_STREAM_MPEG1'     = 0x03
+    'AUDIO_STREAM_MPEG2'     = 0x04
+    'AUDIO_STREAM_AAC'       = 0x0F
+    'AUDIO_STREAM_AAC_LATM'  = 0x11
+    'VIDEO_STREAM_H264'      = 0x1B
+    'VIDEO_STREAM_HEVC'      = 0x24
+    'AUDIO_STREAM_AC3'       = 0x81
+    'AUDIO_STREAM_AC3_PLUS'  = 0x84
+    'AUDIO_STREAM_EAC3_ATSC' = 0x87
+    'SUBTITLE_STREAM'        = 0x92
+}
+
+function ConvertTo-PesValue {
+    <#
+    .SYNOPSIS
+        The numeric "pes" MPC-HC reports for a PES_STREAM_TYPE name.
+    .DESCRIPTION
+        Throws on an unknown name, for the same reason ConvertTo-BdaWireValue
+        does: a guessed value turns a missing mapping into a wrong verdict.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $EnumName)
+    if (-not $script:PesStreamType.ContainsKey($EnumName)) {
+        throw "no value known for PES_STREAM_TYPE '$EnumName'; add it from DSUtil\Mpeg2Def.h"
+    }
+    $script:PesStreamType[$EnumName]
+}
+
 # Not a rendering: a sentinel for "this stream never reaches the JSON".
 # ParsePMT calls AddStreamInfo only when ConvertToDVBType returns something
 # other than BDA_UNKNOWN (Mpeg2SectionData.cpp:597-599), so such a stream is
@@ -157,6 +192,9 @@ function Test-BdaRenderMap {
                 if ($stream.Bda -eq $script:BdaAbsent) { continue }   # absence assertion, not a rendering
                 if (-not $script:BdaStreamTypeName.ContainsKey($stream.Bda)) {
                     $missing += "{0}: Streams[].Bda = '{1}'" -f $entry.Id, $stream.Bda
+                }
+                if ($stream.ContainsKey('Pes') -and -not $script:PesStreamType.ContainsKey($stream.Pes)) {
+                    $missing += "{0}: Streams[].Pes = '{1}'" -f $entry.Id, $stream.Pes
                 }
             }
         }

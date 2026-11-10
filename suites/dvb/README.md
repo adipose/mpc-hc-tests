@@ -16,6 +16,22 @@ against the encoding matrix. The scripts below are the deeper standalone
 layer: dialog-driven scans exercise the interactive path the headless
 switch bypasses, and the frame probes assert on rendered pixels.
 
+The encoding matrix is asserted on its own DVB-T scan. The rig's DVB-T muxes
+are the colour test streams and off-air captures, which share service ids and
+declare nothing, so the suite builds the matrix streams itself
+(`emulator\tools\New-MatrixStreams.ps1`, cached under `results\matrix-streams`),
+maps each onto a free DVB-T frequency for one headless scan of just those
+frequencies, and removes the mapping and the files afterwards. Building them
+needs ffmpeg and TSDuck (`emulator\tools\Install-TestBed.ps1 -Phase
+Tsduck,FFmpeg`); without them the check is skipped and says why. The first
+build regenerates `emulator\assets\flatcolour.dvbsub`, which rewrites its
+tracked `.meta.json` sidecar with the same values in a different key order,
+so expect that file to show as modified in the emulator checkout.
+
+`Test-MpcDecode.ps1` compares a stream's `pes` with the entry's declared `Pes`,
+the type `ParsePMT` resolves after descriptor overrides, not with the wire
+`StreamType`. DVB AC-3 is 0x06 on the wire and 0x81 in the channel record.
+
 On ATSC the headless scan also asserts that every service carries its VCT
 virtual channel number (`atscMajor`.`atscMinor`, with `originNumber` =
 major * 1000 + minor). No release has `/dvbscan` without that fix (#4136,
