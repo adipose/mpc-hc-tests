@@ -2605,6 +2605,41 @@ try {
         }
         Complete-Case 'fps-rate-ignores-unused-ids' $problems
     }
+
+    # 65. Favorites: the first file favorite plays from its menu id, and quick add records the playing file.
+    #    Written for the move of the favorites and recent files code into CFavoritesRecent (patch828), which
+    #    routes these commands through CMainFrame::OnCmdMsg. The profile holds one favorite, third.mkv with a
+    #    start of 1 s (10000000 in REFERENCE_TIME) under the name fav-third. ID_FAVORITES_FILE_START (2800) at
+    #    1.5 s replaces stereo.mkv with it: a second capture with third.mkv's 1600 Hz, about 3 s long because it
+    #    starts at 1 s. ID_FAVORITES_QUICKADDFAVORITE (975) at 4 s adds what is playing as Name1; its start is
+    #    the current position, so it cannot match Name0 and be dropped as a duplicate.
+    if (Test-CaseSelected 'favorites-play-and-quick-add') {
+        $c = Invoke-PlayerCase -Name 'favorites-play-and-quick-add' -Clip 'stereo.mkv' -Switches '/play' `
+            -IniSections @{ 'Favorites\Files' = @{ Name0 = 'fav-third;10000000;0;C:\mpc-test\media\third.mkv' } } `
+            -PostCommands '1.5:2800,4:975' -CloseAtSec 8
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (stereo.mkv, then the favorite)" }
+        else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'third.mkv'.audio[0].tones ($seconds - 1) 1.0) }
+        $added = Get-IniValue $c.Ini 'Favorites\Files' 'Name1'
+        Note Gray "      quick add wrote Name1=$added"
+        if ($null -eq $c.Ini) { $problems += 'no mpc-hc64.ini came back from the guest' }
+        elseif (-not $added) { $problems += 'quick add left no second entry in [Favorites\Files]' }
+        elseif ($added -notlike '*;C:\mpc-test\media\third.mkv') { $problems += "quick add wrote '$added', expected an entry for third.mkv" }
+        Complete-Case 'favorites-play-and-quick-add' $problems
+    }
+
+    # 66. Recent files: the first recent file entry (ID_RECENT_FILE_START, 34000) reopens what was opened last,
+    #    through OnRecentFile and OpenRecentFileEntry (also moved in patch828). With the history on, stereo.mkv
+    #    is that entry once it has opened; the command at 2 s replaces the current item and reopens it, so a
+    #    second capture of the whole clip follows the first.
+    if (Test-CaseSelected 'recent-file-reopens') {
+        $c = Invoke-PlayerCase -Name 'recent-file-reopens' -Clip 'stereo.mkv' -Switches '/play' -Settings @{ KeepHistory = 1 } `
+            -PostCommands '2:34000' -CloseAtSec 9
+        $problems = @((Get-ProcessProblem $c.Run))
+        if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (stereo.mkv, then its reopen from the recent files)" }
+        else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'stereo.mkv'.audio[0].tones $seconds 1.0) }
+        Complete-Case 'recent-file-reopens' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
