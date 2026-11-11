@@ -24,6 +24,14 @@
 #             after ID_FILE_EXIT is posted with the dialog still up. Before the fix the dialog ran modal
 #             on the check thread and opened during exit if the check finished late, reading settings
 #             ExitInstance had already released (#4257, DrDump 1082769).
+#   firstrun  The ini has no UpdaterAutoCheck, so InitInstance stops on the first-run "check for updates
+#             automatically?" prompt with the frame already shown. With the prompt up, the frame is
+#             closed (How: 'sysclose' posts WM_SYSCOMMAND SC_CLOSE as the taskbar does, 'exit' posts
+#             ID_FILE_EXIT as /close does). Recorded: that the prompt was up and owned by the frame, then
+#             whether and how the player exited. Before the fix MFC's ShowAppMessageBox wrote the frame's
+#             help prompt context back through a pointer into the deleted CMainFrame once the prompt
+#             returned (#4257, DrDump 147447113). The host turns on page heap for the exe so that write
+#             faults on every run rather than only when the heap happens to decommit the page.
 param([Parameter(Mandatory)] [string] $Job)
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +57,7 @@ public static class Life {
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr p, EnumProc f, IntPtr l);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
     public static uint ThreadOf(IntPtr h) { uint p; return GetWindowThreadProcessId(h, out p); }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
@@ -125,6 +134,22 @@ try {
     $pid0 = [uint32]$script:proc.Id
     $frame = Wait-For { [Life]::TopLevel($pid0, 'MediaPlayerClassicW') | Select-Object -First 1 } 15000
     if (-not $frame) { throw 'the player window did not appear' }
+    if ($j.Case -eq 'firstrun') {
+        # The frame is shown before InitInstance asks, so the prompt is the frame's owned #32770.
+        $prompt = Wait-For {
+            foreach ($w in [Life]::TopLevel($pid0, '#32770')) { if ([Life]::GetWindow($w, 4) -eq $frame) { return $w } } # GW_OWNER
+        } 15000
+        $result.promptUp = [bool]$prompt
+        if (-not $prompt) { throw 'the first-run update prompt did not appear over the frame' }
+        Start-Sleep -Milliseconds 800
+        $result.frameEnabled = [Life]::IsWindowEnabled($frame)
+        if ($j.How -eq 'sysclose') { [void][Life]::PostMessage($frame, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero) }
+        else { [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.FileExit, [IntPtr]::Zero) }
+        $result.exited = $script:proc.WaitForExit(20000)
+        $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
+        return
+    }
+
     Start-Sleep -Milliseconds 1500
 
     if ($j.Case -eq 'update') {

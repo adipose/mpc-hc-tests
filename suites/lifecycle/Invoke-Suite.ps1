@@ -24,6 +24,10 @@
       update-dialog-exit         Help > Check for updates, then ID_FILE_EXIT with the dialog up: the
                                  dialog is on the frame's thread, the frame stays usable, exit is 0
                                  (#4257, DrDump 1082769)
+      firstrun-prompt-*          the frame closed (SC_CLOSE or ID_FILE_EXIT) with the first-run update
+                                 prompt up, classic and themed: exit is 0. Runs under page heap so the
+                                 unfixed write into the deleted frame faults every time (#4257,
+                                 DrDump 147447113)
 
     Nothing here needs real input: these are posted commands and the evidence is a WinEvent hook, so
     the scheduled task is only there to put the player in the console session.
@@ -214,6 +218,47 @@ try {
         if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
         elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
         Complete-Case 'update-dialog-exit' $p
+    }
+
+    # The first-run update prompt is up when the frame is closed. On the classic path MFC's
+    # ShowAppMessageBox wrote the frame's help prompt context back through a pointer into the deleted
+    # CMainFrame once the prompt returned (#4257, DrDump 147447113). That write only faults when the
+    # heap has decommitted the page, so full page heap is on for the exe while these run: every freed
+    # block is then inaccessible, and an unfixed build dies with 0xC0000005 every time.
+    $firstRun = @(
+        @{ Name = 'firstrun-prompt-sysclose-classic'; How = 'sysclose'; Theme = "MPCTheme=0`r`n" },
+        @{ Name = 'firstrun-prompt-exit-classic';     How = 'exit';     Theme = "MPCTheme=0`r`n" },
+        @{ Name = 'firstrun-prompt-sysclose-themed';  How = 'sysclose'; Theme = "MPCTheme=1`r`nModernThemeMode=0`r`n" },
+        @{ Name = 'firstrun-prompt-exit-themed';      How = 'exit';     Theme = "MPCTheme=1`r`nModernThemeMode=0`r`n" }
+    ) | Where-Object { Wanted $_.Name }
+    if ($firstRun) {
+        $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\mpc-hc64.exe'
+        $hadIfeo = Invoke-Command -Session $session -ArgumentList $ifeo {
+            param($k)
+            $had = Test-Path $k
+            if (-not $had) { New-Item $k | Out-Null }
+            Set-ItemProperty $k GlobalFlag 0x02000000 -Type DWord    # FLG_HEAP_PAGE_ALLOCS
+            Set-ItemProperty $k PageHeapFlags 0x3 -Type DWord        # full page heap
+            $had
+        }
+        try {
+            foreach ($x in $firstRun) {
+                # no UpdaterAutoCheck: that is what raises the prompt
+                $ini = "[Settings]`r`nKeepHistory=0`r`n$($x.Theme)"
+                $run = Invoke-LifecycleJob -Name $x.Name -JobCase 'firstrun' -How $x.How -IniText $ini
+                $p = @()
+                if (-not $run.promptUp) { $p += 'the first-run prompt did not come up' }
+                if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
+                elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [int]$run.exitCode) } # an NTSTATUS arrives negative
+                Complete-Case $x.Name $p
+            }
+        } finally {
+            Invoke-Command -Session $session -ArgumentList $ifeo, $hadIfeo {
+                param($k, $had)
+                if ($had) { Remove-ItemProperty $k GlobalFlag, PageHeapFlags -ErrorAction SilentlyContinue }
+                else { Remove-Item $k -Recurse -ErrorAction SilentlyContinue }
+            }
+        }
     }
 
     # The reset guard. Options opens at Miscellaneous; ResetMarker is a key only a reset removes.

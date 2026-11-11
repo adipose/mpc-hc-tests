@@ -16,6 +16,7 @@ Run-LifecycleCase.guest.ps1   target side: open Options, request the exit or the
 | `options-sysclose-deferred` | the same with `WM_SYSCOMMAND SC_CLOSE` (the taskbar) | as above |
 | `options-reentry-single-sheet` | Options open, `ID_VIEW_OPTIONS` posted to the frame again (a global hotkey, a remote, the web interface) | one sheet is up, the one first opened, and the player exits 0 (#4257, DrDump 147417607) |
 | `update-dialog-exit` | Help > Check for updates (the dialog shows the error text on a guest without network), then `ID_FILE_EXIT` with it up | the dialog runs on the frame's thread, the frame stays enabled, and the player exits 0 (#4257, DrDump 1082769) |
+| `firstrun-prompt-{sysclose,exit}-{classic,themed}` | no `UpdaterAutoCheck` in the ini, so `InitInstance` stops on the first-run update prompt with the frame shown; the frame is then closed by `SC_CLOSE` or `ID_FILE_EXIT` | the player exits 0. On the classic path MFC's `ShowAppMessageBox` wrote the help prompt context back into the deleted `CMainFrame` (#4257, DrDump 147447113); the themed path never did and is a guard |
 | `options-reset-relaunches` | Reset in Options > Miscellaneous, confirmed Yes | the player exits 0, one new instance is running, and the ini no longer has the marker key |
 
 ## Why the order and not the crash
@@ -34,6 +35,15 @@ The sheet is destroyed before the frame in both orders, because Windows
 destroys owned windows before their owner. So "sheet gone before frame" alone
 proves nothing. What separates the builds is whether the frame was hidden, which
 `OnClose` does early, while the sheet was still up.
+
+## The first-run cases run under page heap
+
+The bad write in the first-run cases faults only when the heap has decommitted
+the freed frame's page, which the dump showed happening in the field but not
+every run. While those cases run, the suite sets `GlobalFlag=0x02000000` and
+`PageHeapFlags=3` under the guest's Image File Execution Options key for
+`mpc-hc64.exe`, which makes every freed block inaccessible, and removes them
+afterwards. Unfixed, both classic cases die with 0xC0000005 every time.
 
 ## Traps
 
