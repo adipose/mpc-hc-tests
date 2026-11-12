@@ -779,6 +779,32 @@ try {
         )
     }
 
+    # 4b. The flip and rotate commands reach the renderer: View > Pan&Scan, posted as WM_COMMAND once
+    #    the clip is loaded (the commands are disabled before that, and MFC drops a disabled command).
+    #    ID_PANSCAN_ROTATEXM (878) flips the picture top to bottom; ID_PANSCAN_ROTATEZ270 (881) turns
+    #    it a quarter turn counterclockwise (m_AngleZ 90), which also makes the fitted picture portrait.
+    #    Both go through CMainFrame::OnCmdMsg to the handlers in CVideoGeometry (step 6 of the
+    #    CMainFrame split), so a command map that stopped routing shows up here as an
+    #    unrotated frame.
+    $quad = $clips.clips.'long.mkv'.picture
+    $viewTurns = [ordered]@{
+        'view-flip-vertical' = @{ Command = 878; Picture = [ordered]@{ width = $quad.width; height = $quad.height
+            corners = [ordered]@{ topLeft = $quad.corners.bottomLeft; topRight = $quad.corners.bottomRight; bottomLeft = $quad.corners.topLeft; bottomRight = $quad.corners.topRight } } }
+        'view-rotate-quarter' = @{ Command = 881; Picture = [ordered]@{ width = $quad.height; height = $quad.width
+            corners = [ordered]@{ topLeft = $quad.corners.topRight; topRight = $quad.corners.bottomRight; bottomLeft = $quad.corners.topLeft; bottomRight = $quad.corners.bottomLeft } } }
+    }
+    foreach ($name in $viewTurns.Keys) {
+        if (-not (Test-CaseSelected $name)) { continue }
+        $t = $viewTurns[$name]
+        $c = Invoke-PlayerCase -Name $name -Clip 'long.mkv' -Switches '/play /fullscreen /monitor 2' -PlugModes '1920x1080@60' `
+            -PostCommands "3:$($t.Command)" -CaptureAtSec 5 -CloseAtSec 6.5
+        Complete-Case $name @(
+            (Get-ProcessProblem $c.Run),
+            $(if (-not @($c.Run.posts)[0].delivered) { 'the posted command did not reach a window' }),
+            (Test-Picture $c.Png $t.Picture)
+        )
+    }
+
     # 5. Remember file position, the most re-reported behaviour in the tracker (#1595, #1805, #2287, #2659,
     #    #3182, #3352, #3847). Three runs on one profile: play and close the window part-way, so the player's
     #    own shutdown writes the position; open again, which must resume there; open once more with the
