@@ -145,6 +145,16 @@ try {
     $d3dx = @((Join-Path $playerDir 'D3DX9_43.dll'), (Join-Path $playerDir '..\..\distrib\x64\D3DX9_43.dll')) | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($d3dx) { Copy-Item $d3dx (Join-Path $stage 'D3DX9_43.dll') }
     else { Note Yellow "no D3DX9_43.dll beside the player or in its distrib\x64; EVR-CP will fail to load on a clean guest" }
+    # One pixel shader in Shaders\ beside the exe, where the player resolves a relative shader path, for the
+    # shader cases: the complement of the frame, as the player's own Invert.hlsl does it.
+    New-Item -ItemType Directory -Force (Join-Path $stage 'Shaders') | Out-Null
+    $invert = "// `$MinimumShaderProfile: ps_2_0`r`nsampler s0 : register(s0);`r`n`r`nfloat4 main(float2 tex : TEXCOORD0) : COLOR`r`n{`r`n`treturn float4(1, 1, 1, 1) - tex2D(s0, tex);`r`n}`r`n"
+    [IO.File]::WriteAllText((Join-Path $stage 'Shaders\Invert.hlsl'), $invert)
+    # The D3D11 twin in Shaders11\, which the player substitutes for a Shaders\ file of the same name when
+    # the renderer (MPC Video Renderer on D3D11) wants shader model 4.
+    New-Item -ItemType Directory -Force (Join-Path $stage 'Shaders11') | Out-Null
+    $invert11 = "// `$MinimumShaderProfile: ps_4_0`r`nTexture2D tex : register(t0);`r`nSamplerState samp : register(s0);`r`n`r`nfloat4 main(float4 pos : SV_POSITION, float2 coord : TEXCOORD) : SV_Target`r`n{`r`n`treturn float4(1, 1, 1, 1) - tex.Sample(samp, coord);`r`n}`r`n"
+    [IO.File]::WriteAllText((Join-Path $stage 'Shaders11\Invert.hlsl'), $invert11)
     $zip = Join-Path $OutDir 'player.zip'
     if (Test-Path $zip) { [IO.File]::Delete($zip) }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
@@ -582,6 +592,7 @@ try {
         elseif ($c.B -gt 180 -and $c.R -lt 90 -and $c.G -lt 90) { 'blue' }
         elseif ($c.R -gt 180 -and $c.B -gt 180 -and $c.G -lt 90) { 'magenta' }
         elseif ($c.G -gt 180 -and $c.B -gt 180 -and $c.R -lt 90) { 'cyan' }
+        elseif ($c.R -gt 180 -and $c.G -gt 180 -and $c.B -lt 90) { 'yellow' }
         elseif ($c.R -lt 40 -and $c.G -lt 40 -and $c.B -lt 40) { 'black' }
         else { "($($c.R),$($c.G),$($c.B))" }
     }
@@ -803,6 +814,60 @@ try {
             $(if (-not @($c.Run.posts)[0].delivered) { 'the posted command did not reach a window' }),
             (Test-Picture $c.Png $t.Picture)
         )
+    }
+
+    # 4c. Pixel shaders on EVR-CP (DSVidRen 11): the staged Shaders\Invert.hlsl turns the quadrant picture into
+    #    its complement, so a shader that reached the renderer shows as cyan / magenta over yellow / black, and
+    #    one that did not as the plain picture. The ini selects it as the pre- or post-resize shader, or puts
+    #    it in one of two presets. The posted commands are the pre- and post-resize toggles (998, 999) and
+    #    next / previous preset (57382, 57384); a preset change applies through the shader-selection event,
+    #    not the command. All of it goes through CShaderController (step 9 of the CMainFrame split), so a
+    #    command map that stopped routing or a toggle state that stopped being read shows up as the wrong
+    #    picture.
+    $quad = $clips.clips.'long.mkv'.picture
+    $inverted = [ordered]@{ width = $quad.width; height = $quad.height
+        corners = [ordered]@{ topLeft = 'cyan'; topRight = 'magenta'; bottomLeft = 'yellow'; bottomRight = 'black' } }
+    $presets = @{ '0' = 'a-plain'; PreResize0 = ''; PostResize0 = ''; '1' = 'b-invert'; PreResize1 = 'Invert.hlsl'; PostResize1 = '' }
+    $shaderCases = [ordered]@{
+        'shader-preresize-applied'      = @{ Shaders = @{ PreResize = 'Invert.hlsl'; PostResize = '' }; Post = ''; Picture = $inverted }
+        'shader-preresize-toggled-off'  = @{ Shaders = @{ PreResize = 'Invert.hlsl'; PostResize = '' }; Post = '3:998'; Picture = $quad }
+        'shader-postresize-applied'     = @{ Shaders = @{ PreResize = ''; PostResize = 'Invert.hlsl' }; Post = ''; Picture = $inverted }
+        'shader-postresize-toggled-off' = @{ Shaders = @{ PreResize = ''; PostResize = 'Invert.hlsl' }; Post = '3:999'; Picture = $quad }
+        'shader-preset-next'            = @{ Shaders = @{ PreResize = ''; PostResize = ''; LastPreset = 'a-plain' }; Presets = $true; Post = '3:57382'; Picture = $inverted }
+        'shader-preset-prev'            = @{ Shaders = @{ PreResize = 'Invert.hlsl'; PostResize = ''; LastPreset = 'b-invert' }; Presets = $true; Post = '3:57384'; Picture = $quad }
+    }
+    #    Each case runs again as <name>-mpcvr on MPC Video Renderer (DSVidRen 14, D3D11), which takes the
+    #    other branch of SetShaders: the shader files are read and cached by the player itself and the
+    #    Shaders11\ twin is substituted. That renderer needs seconds to start on a guest without a GPU,
+    #    hence the later times; without an MPCVR\ folder beside the player those variants are skipped.
+    $shaderRenderers = [ordered]@{
+        ''       = @{ Settings = @{ DSVidRen = 11 }; Renderer = @{}; PostAt = 3; CaptureAt = 5; CloseAt = 6.5 }
+        '-mpcvr' = @{ Settings = @{ DSVidRen = 14; LastGPUCheck = 500000 }; Renderer = @{ UseD3D11 = 1 }; PostAt = 10; CaptureAt = 12; CloseAt = 13.5 }
+    }
+    $shaderMpcvrMissing = -not (Test-Path (Join-Path $playerDir 'MPCVR\MpcVideoRenderer64.ax'))
+    foreach ($suffix in $shaderRenderers.Keys) {
+        $r = $shaderRenderers[$suffix]
+        foreach ($base in $shaderCases.Keys) {
+            $name = "$base$suffix"
+            if (-not (Test-CaseSelected $name)) { continue }
+            if ($suffix -eq '-mpcvr' -and $shaderMpcvrMissing) {
+                $skipped++
+                Note Yellow "skipped ${name}: the player under test has no MPCVR\MpcVideoRenderer64.ax beside it ($playerDir)"
+                continue
+            }
+            $t = $shaderCases[$base]
+            $sections = @{ 'Shaders' = $t.Shaders }
+            if ($t.ContainsKey('Presets')) { $sections['Shaders\Presets'] = $presets }
+            $post = if ($t.Post) { "$($r.PostAt):$(($t.Post -split ':')[1])" } else { '' }
+            $c = Invoke-PlayerCase -Name $name -Clip 'long.mkv' -Switches '/play /fullscreen /monitor 2' -PlugModes '1920x1080@60' `
+                -Settings ($r.Settings + @{ PreSizeShadersEnabled = 1; PostSizeShadersEnabled = 1 }) -IniSections $sections -Renderer $r.Renderer `
+                -PostCommands $post -CaptureAtSec $r.CaptureAt -CloseAtSec $r.CloseAt
+            Complete-Case $name @(
+                (Get-ProcessProblem $c.Run),
+                $(if ($post -and -not @($c.Run.posts)[0].delivered) { 'the posted command did not reach a window' }),
+                (Test-Picture $c.Png $t.Picture)
+            )
+        }
     }
 
     # 5. Remember file position, the most re-reported behaviour in the tracker (#1595, #1805, #2287, #2659,
