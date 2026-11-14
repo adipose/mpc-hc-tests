@@ -18,7 +18,7 @@ $outDir = $j.OutDir
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory $outDir | Out-Null }
 $result = [ordered]@{
     case = $j.Case; error = $null; notes = @(); editFound = $false; editClass = ''; foreground = $false
-    clicks = 0; menusSeen = 0; menusClosed = 0; userBefore = $null; userAfter = $null; counts = @(); dialogOpen = $false
+    clicks = 0; retries = 0; menusSeen = 0; menusClosed = 0; userBefore = $null; userAfter = $null; counts = @(); dialogOpen = $false
 }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 function Note([string] $s) { $result.notes += ('{0,6} {1}' -f [int]$sw.ElapsedMilliseconds, $s) }
@@ -63,7 +63,18 @@ try {
         Start-Sleep -Milliseconds 80
         [void][MouseRig]::ClickRight()
         $result.clicks++
-        if (-not (Wait-Menu $true)) { return $false }
+        if (-not (Wait-Menu $true)) {
+            # On the guest most right-clicks that follow a closed menu open nothing, on fixed and unfixed builds
+            # alike, with the edit focused and the dialog in front; a second right-click 600 ms later always opens
+            # it. So one retry, noted, and only a click that never opens a menu fails the case.
+            Save-ScreenRegion (Join-Path $outDir "no-menu-$($result.clicks).png") 0 0 1024 768 | Out-Null
+            Note "click $($result.clicks): no menu, foreground $([MouseRig]::ClassOf([MouseRig]::GetForegroundWindow())), focus $([MouseRig]::ClassOf([MouseRig]::FocusOf($dlg)))"
+            Start-Sleep -Milliseconds 600
+            [void][MouseRig]::ClickRight()
+            $result.retries++
+            if (-not (Wait-Menu $true)) { Note "retry: still no menu"; return $false }
+            Note "retry: menu opened"
+        }
         $result.menusSeen++
         if ($result.menusSeen -eq 1) { Save-ScreenRegion (Join-Path $outDir 'menu-open.png') 0 0 1024 768 | Out-Null }
         Start-Sleep -Milliseconds 80
