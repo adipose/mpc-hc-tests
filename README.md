@@ -196,10 +196,11 @@ git -C tests submodule update --init --recursive
 .\tests\emulator\tools\Install-TestBed.ps1    # WDK ISO, TSDuck, ffmpeg, config
 ```
 
-`amd-driver` is not declared in `.gitmodules` yet: amd-driver-emulator is not
-published, so until it is, the `gpu-heap` suite resolves it from
-`$env:MPC_TEST_AMDPROBE`, `AmdProbeRoot` in `testbed.config.psd1`, or a
-sibling `C:\dev\amd-driver-emulator` checkout, in that order.
+The `gpu-heap` suite takes its probe from the `amd-driver` submodule, or from
+`$env:MPC_TEST_AMDPROBE` or `AmdProbeRoot` in `testbed.config.psd1` to work
+against a checkout of your own instead. It builds the probe on first use, and
+needs the driver binaries under test put in place by hand (that submodule's
+`drivers\README.md`); without them its driver cases report Skipped.
 
 The installer creates `tests\testbed.config.psd1` (gitignored); edit it to
 point at your target machine (emulator README, *Where it runs*). For a target
