@@ -14,6 +14,9 @@ Run-WebSplitHeaderCase.guest.ps1  target side: start the player with no file, se
 Run-WebMalformedCase.guest.ps1    target side: start the player with no file, send the malformed
                                   requests over raw sockets, record the header block each got
                                   (result.json)
+Run-WebCloseCase.guest.ps1        target side: launch the player repeatedly, close each one while
+                                  clients poll /variables.html, record exit code and close time
+                                  (result.json)
 ```
 
 ## Cases
@@ -22,7 +25,19 @@ Run-WebMalformedCase.guest.ps1    target side: start the player with no file, se
 |---|---|---|
 | `json-under-file-changes` | two clients poll both documents as fast as they can for 60 s while a WM_COPYDATA command line alternates a 150 entry playlist of `stereo.mkv` with `subs.mkv` alone (two embedded subtitle tracks) every 700 ms | the player survives and exits 0 on close; every 200 body parses; no failed request; the pollers saw both playlist sizes (1 and 150) and both subtitle track counts (0 and 3), so the opens really ran under the reads, and no size the player never had |
 | `header-split-across-reads` | five connections each write `GET /status.html HTTP/1.0\r\n\r\n` with the last 0 to 4 bytes held back, wait 200 ms so the server reads the first part alone, write the rest and read with a 3 s timeout. 1 to 3 split the `\r\n\r\n` across two reads; 0 and 4 are the controls | every connection gets `200`; the player survives and closes |
+| `close-under-requests` | `-CloseRounds` (30) launches on `stereo.mkv`; in each, four clients request `/variables.html` in tight loops for 1.5 s, then the player gets `WM_CLOSE` with them still running | every round exits 0 within 5 s, and the pollers got answers before the close |
 | `malformed-requests` | three raw requests: `GET /status.html` with an ordinary header line (control), the same with a header line that has no colon after it, and `GET /status.html?redir=%2F%0D%0AX-Injected%3A%20yes` | the control and the colonless request both get `200` and the player survives; the `302` has no `X-Injected` header line of its own |
+
+In `close-under-requests`, before the fix (#4257, drdump 147489303) the web
+server was stopped only by `CMainFrame`'s destructor. `m_api`, which owns it,
+is declared before `m_wndPlaylistBar`, so the playlist bar was destroyed first,
+and a request still in `OnVariables` (which reads the frame on the web thread)
+entered its freed lock in `GetFileName`. `OnClose` now stops the server while
+the frame is whole. The wait has to deliver sent messages: `OnVariables` reads
+the volume with a `TBM_GETPOS` sent to the toolbar's slider, so a plain
+`WaitForSingleObject` from `OnClose` held every close of this case for the 10 s
+before `TerminateThread` (exit 0, no crash, median close 10061 ms). That is
+why the close time is asserted, not just the exit code.
 
 Before the fix (ledger 30) `CWebClientSocket::OnReceive` started the next
 search for `\r\n\r\n` at the end of everything received so far, past the bytes

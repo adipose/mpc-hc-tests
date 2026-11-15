@@ -30,6 +30,15 @@
                                  pointer), and a redir parameter holding "\r\nX-Injected: yes" must not
                                  put a header line of its own into the 302 (response splitting)
                                  (Run-WebMalformedCase.guest.ps1)
+      close-under-requests       -CloseRounds launches, each closed with WM_CLOSE while four clients
+                                 request /variables.html in tight loops. Every round must exit 0 within
+                                 5 s. Before the fix the server was stopped only in CMainFrame's
+                                 destructor, after the playlist bar had been destroyed, and a request
+                                 still in OnVariables took its freed lock (drdump 147489303, #4257).
+                                 Stopping it from OnClose with a wait that does not deliver sent
+                                 messages instead hangs every close for the 10 s before TerminateThread:
+                                 OnVariables sends TBM_GETPOS to the volume slider
+                                 (Run-WebCloseCase.guest.ps1)
 
     A torn walk does not have to fault: in 120 s runs the unfixed build survived on the host and on a
     guest while reporting sizes it never had, so the sizes are what separates the builds. The 503 count
@@ -46,7 +55,8 @@ param(
     [int] $Seconds = 60,      # how long the pollers and the opener run
     [int] $Clients = 2,
     [int] $OpenEveryMs = 700,
-    [int] $PlaylistItems = 150
+    [int] $PlaylistItems = 150,
+    [int] $CloseRounds = 30   # player launches in close-under-requests
 )
 
 Set-StrictMode -Version Latest
@@ -120,7 +130,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\web', 'C:\mpc-test\web\media', 'C:\mpc-test\web\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\web\player.zip' -Force
-    foreach ($guestScript in 'Run-WebStressCase.guest.ps1', 'Run-WebSplitHeaderCase.guest.ps1', 'Run-WebMalformedCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $guestScript) 'C:\mpc-test\web\' -Force }
+    foreach ($guestScript in 'Run-WebStressCase.guest.ps1', 'Run-WebSplitHeaderCase.guest.ps1', 'Run-WebMalformedCase.guest.ps1', 'Run-WebCloseCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $guestScript) 'C:\mpc-test\web\' -Force }
     foreach ($clip in $clips) { Copy-Item -ToSession $session (Join-Path $media $clip) 'C:\mpc-test\web\media\' -Force }
     Invoke-Command -Session $session {
         if (Test-Path 'C:\mpc-test\web\player') { Remove-Item 'C:\mpc-test\web\player' -Recurse -Force }
@@ -254,6 +264,22 @@ try {
             Note Gray ("  {0}: {1}" -f $name, (("$($run.answers.$name)" -split "`r`n") -join ' | '))
         }
         Complete-Case 'malformed-requests' $p
+    }
+
+    if (Wanted 'close-under-requests') {
+        $job = @{ Clip = 'C:\mpc-test\web\media\stereo.mkv'; Port = $port; Rounds = $CloseRounds; Clients = 4; WarmMs = 1500 }
+        $run = Invoke-WebJob -Name 'close-under-requests' -Job $job -IniText ($ini + "`r`n") -TimeoutSec ($CloseRounds * 40 + 60) -Script 'Run-WebCloseCase.guest.ps1'
+        $p = @()
+        foreach ($r in @($run.rounds)) {
+            if (-not $r.closed) { $p += "round $($r.round): the player did not close within 20 s of WM_CLOSE" }
+            elseif ($r.exitCode -ne 0) { $p += ('round {0}: exit code 0x{1:X8}' -f $r.round, [int]$r.exitCode) }
+            elseif ($r.closeMs -gt 5000) { $p += "round $($r.round): the close took $($r.closeMs) ms" }
+            if ($r.answers -lt 1) { $p += "round $($r.round): the pollers got no answer before the close" }
+        }
+        if (@($run.rounds).Count -ne $CloseRounds) { $p += "only $(@($run.rounds).Count) of $CloseRounds rounds ran" }
+        $times = @($run.rounds | ForEach-Object { $_.closeMs } | Sort-Object)
+        if ($times.Count) { Note Gray ("  {0} rounds, close ms min {1} median {2} max {3}, answers per round ~{4}" -f $times.Count, $times[0], $times[[int]($times.Count / 2)], $times[-1], [int](($run.rounds | Measure-Object answers -Average).Average)) }
+        Complete-Case 'close-under-requests' $p
     }
 }
 finally {
