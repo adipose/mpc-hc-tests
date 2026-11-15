@@ -91,6 +91,10 @@ suites/
   ytdl/               yt-dlp JSON to playlist entries through a fake yt-dlp:
                       each entry keeps only its own title, source and
                       subtitles; runs the player on the host, no rig
+  display/            Windows on monitors at different scaling: a themed
+                      popup menu must scale with the dialog that tracks it;
+                      host only, no rig, skips without two monitors at
+                      different DPIs
 ```
 
 ## Unit tests
