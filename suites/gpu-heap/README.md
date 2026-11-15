@@ -23,6 +23,24 @@ which the 152-byte heap buffer of a `std::vector<MenuObject*>` has had bytes
 and no machine available for testing has such a card. The `lifecycle` suite
 covers a different part of that report, the modal-up exit path.
 
+## What this adds to the instrumentation that already exists
+
+The investigation's quarantine build detours `ntdll!RtlFreeHeap`, so every
+free in the process is caught whatever the caller and whatever the heap, and a
+block of 137..152 bytes is poisoned instead of freed. That covers use after
+free on a block of the victim's size, including one a driver frees itself.
+Page heap faults on a write past the end of an allocation. Neither sees a
+write into a block that is still live, and that is where this report's damage
+sits.
+
+This suite comes at that from the driver's side: guard zones on the driver's
+own allocations catch it writing outside them, and the measured distance from
+its blocks to blocks of the victim's shape says whether it is positioned to
+hit one. It is also the only way to put the 2015 driver's own code in the
+player's process on a machine without its hardware, which matters because the
+quarantine's clean runs were made against the modern driver on the host, not
+that one.
+
 ## What it needs
 
 A built probe, or Visual Studio 2022 with the C++ toolset to build it (the
@@ -54,14 +72,27 @@ the probe stops before loading any driver if it fails.
 `heap-stride`: measure the distance the 152-byte class puts between
 consecutive blocks, from the addresses of blocks the probe allocated itself,
 and compare it with `-ExpectedStride` (default 160). Measured 160 (`0xA0`) on
-Windows 10 22H2 (19045) in three unrelated host processes, and confirmed
-independently from the field dumps on 10.0.17763, 10.0.22621 and 10.0.26300,
-where the gaps between two capacity-19 buffers in one 64 KB region were
-`0x140`, `0x14A0` and `0x1400`, all exact multiples of `0xA0`. The arithmetic
-figure for a 16-byte header would be `0xB0`; the x64 LFH entry header is 8
-bytes, so 152 + 8 is already 16-aligned. This is a property of the running
-Windows build, and neighbour analysis of a damaged block depends on it, so a
-mismatch fails rather than being accepted.
+Windows 10 22H2 (19045), in 240 of 255 gaps between 256 blocks, and repeated
+in three unrelated host processes. The arithmetic figure for a 16-byte header
+would be `0xB0`; the x64 LFH entry header is 8 bytes, so 152 + 8 is already
+16-aligned. This is a property of the running Windows build, and neighbour
+analysis of a damaged block depends on it, so a mismatch fails rather than
+being accepted.
+
+The field dumps do not contradict it on three builds that cannot be run here,
+but they constrain it rather than measure it. The gap between two capacity-19
+buffers in one 64 KB region, which the stride must divide, was:
+
+| OS build | gap | over `0xA0` | over `0xB0` |
+|---|---|---|---|
+| 10.0.17763 | `0x140` | 2 | not a multiple |
+| 10.0.22621 | `0x14A0` | 33 | 30 |
+| 10.0.26300 | `0x1400` | 32 | not a multiple |
+
+So `0xB0` is excluded on two of the three, and the `0x140` is the tightest,
+being two strides. These are gap constraints from a buffer's own
+`first`/`last`/`end` bounds, not three independent readings of a stride; the
+live measurement is what the case asserts on.
 
 `legacy-umd-shared-heap`: inject the probe into a running player and open and
 close the legacy driver's adapter twelve times. The driver must open, must

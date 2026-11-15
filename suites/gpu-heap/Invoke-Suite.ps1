@@ -39,6 +39,11 @@
     at rather than quietly accepted -- the figure that neighbour analysis of a
     damaged block depends on must not be taken on trust.
 
+    The suite asserts on its own live measurement. The field dumps constrain
+    the figure rather than measure it (the stride must divide the gap between
+    two capacity-19 buffers in one region), and the README records those
+    constraints as what they are.
+
 .EXAMPLE
     .\Invoke-MpcTests.ps1 -Suite gpu-heap
     & .\suites\gpu-heap\Invoke-Suite.ps1 -Case damage-detector,heap-stride
