@@ -34,6 +34,9 @@
     Two cases (Run-MenuReloadCase.guest.ps1) rebuild the menus through a system metrics change, one with
     a menu open and one with it closed (#4257): the player must survive both and close normally.
 
+    One case (Run-EditMenuLeakCase.guest.ps1) right-clicks a themed edit box thirty times and closes its
+    menu each time: the player's USER object count must not climb with the clicks.
+
     Two control cases run first, against combocase.exe, a small program with no player code in it:
 
       control-plain-windows-combo    a plain comctl32 combo never shows the hovered item, which is what
@@ -107,6 +110,7 @@ $idThemePage    = Get-ResourceId 'IDD_PPAGETHEME' 10038
 $idKeysPage     = Get-ResourceId 'IDD_PPAGEACCELTBL' 10032
 $idKeysList     = Get-ResourceId 'IDC_LIST1' 11160               # the keys list on the Keys page
 $idWinHotkey    = Get-ResourceId 'IDC_WINHOTKEY1' 11070          # the in-place hotkey editor
+$idKeysFilter   = Get-ResourceId 'IDC_EDIT3' 11061               # the filter box above the keys list
 $idFontCombo    = Get-ResourceId 'IDC_COMBO5' 11004           # OSD font: over a hundred items
 $idSeekbarCombo = Get-ResourceId 'IDC_TIMEONSEEKBAR' 22100    # three items
 
@@ -236,7 +240,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -1468,6 +1472,65 @@ try {
     } else {
         $skipped += $mcCases.Count
         Note Yellow "menu content cases not run: needs media\pw clips and LAVFilters64 beside the player"
+    }
+
+    # The themed edit's right-click menu, opened and closed over and over; Run-EditMenuLeakCase.guest.ps1's
+    # header says what the unfixed build left behind. It plays nothing, so it needs no media.
+    $emName = 'edit-context-menu-no-leak'
+    if (Wanted $emName) {
+        $emRounds = 30
+        $guestOut = "C:\mpc-test\mouse\out\$emName"
+        $emIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=1`r`nModernThemeMode=0`r`nLastUsedPage=$idKeysPage`r`n"
+        $job = @{
+            Case = $emName; Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; OutDir = $guestOut
+            PostCommand = $idOptions; DialogTitle = 'Options'; EditId = $idKeysFilter; WarmUp = 5; Rounds = $emRounds
+        } | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $emIni, $consoleUser {
+            param($job, $out, $iniText, $user)
+            $ErrorActionPreference = 'Continue'
+            Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+            New-Item -ItemType Directory $out | Out-Null
+            & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+            Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+            Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+            [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-EditMenuLeakCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+            Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'MpcMouseCase'
+            $deadline = (Get-Date).AddSeconds(180)
+            while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            Start-Sleep -Seconds 1
+            Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+            Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+        }
+        if (-not $json) { Complete-Case $emName 'the case produced no result on the guest' }
+        else {
+            $local = Join-Path $OutDir $emName
+            if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+            New-Item -ItemType Directory -Force $local | Out-Null
+            Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+            $r = $json | ConvertFrom-Json
+            $problems = @()
+            if ($r.error) { $problems += "guest: $($r.error)" }
+            elseif (-not $r.foreground) { $problems += 'the Options dialog was not the foreground window when input started' }
+            # Only a run in which every right-click opened a menu and every Escape closed it counted anything.
+            elseif ($r.menusSeen -lt $r.clicks -or $r.menusClosed -lt $r.menusSeen) { $problems += "of $($r.clicks) right-clicks $($r.menusSeen) opened a menu and $($r.menusClosed) closed again: $(@($r.notes) -join '; ')" }
+            elseif ($r.clicks -lt $emRounds + 5 -or $null -eq $r.userAfter) { $problems += "only $($r.clicks) right-clicks were made, so nothing was counted" }
+            else {
+                # The unfixed build left three behind per right-click. Less than one in two leaves room for
+                # whatever else the dialog creates once while the pointer is over it.
+                $grew = $r.userAfter - $r.userBefore
+                Note Gray "${emName}: USER objects $($r.userBefore) -> $($r.userAfter) over $emRounds right-clicks ($(@($r.counts) -join ', '))"
+                if ($grew -ge $emRounds / 2) { $problems += "the player's USER objects went from $($r.userBefore) to $($r.userAfter) over $emRounds right-clicks: the edit's menu is left behind each time" }
+                if (-not $r.dialogOpen) { $problems += 'the Options dialog was gone at the end, so an Escape went to it and not to a menu' }
+            }
+            Complete-Case $emName $problems
+        }
     }
 
     # The contrast theme job (#4375): Run-HighContrastCase launches the player once per variant, each from
