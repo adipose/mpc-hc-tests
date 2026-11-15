@@ -57,7 +57,11 @@ param(
     [string]   $PlayerBinary,
     [string[]] $Case,
     [int]      $ExpectedStride = 160,
-    [int]      $Rounds = 12
+    [int]      $Rounds = 12,
+    # What the device phase needs invented about hardware nobody here has: the record fields the driver
+    # validates, the flag that selects the WDDM 2 memory model, and a GPU address base it will accept. The
+    # probe's README explains each one. Update these as more of the record is worked out.
+    [string]   $DeviceProbeArgs = '--device --gpu-va-base 0x10000 --qai-set 0=0x260,0xc=0,0x3c=8,0x30=0x5a,0x34=0x3c,0x1f4=0x80'
 )
 
 Set-StrictMode -Version Latest
@@ -67,7 +71,7 @@ $description = 'What a graphics user-mode driver does to the heap it shares with
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot  = Split-Path $testsRoot -Parent
 
-$allCases = 'damage-detector', 'heap-stride', 'legacy-umd-shared-heap', 'legacy-umd-guard-zones'
+$allCases = 'damage-detector', 'heap-stride', 'legacy-umd-shared-heap', 'legacy-umd-guard-zones', 'legacy-umd-device'
 
 # --- where the probe is ------------------------------------------------------
 
@@ -133,7 +137,15 @@ function Skip { param([string] $Case, [string] $Text) $script:skipped++; Note Ye
 
 # --- build the probe if it is not built --------------------------------------
 
-if (-not (Test-Path $probeExe) -or -not (Test-Path $hookDll)) {
+# Rebuilt when the binaries are missing OR older than the sources. Building only when missing meant that after
+# the submodule was bumped the suite silently ran the previous build, which did not have the options the newer
+# cases pass, and reported the resulting silence as the case's own failure.
+$built = @($probeExe, $hookDll) | Where-Object { Test-Path $_ } |
+         ForEach-Object { (Get-Item $_).LastWriteTime } | Sort-Object | Select-Object -First 1
+$newestSource = Get-ChildItem (Join-Path $probeRoot 'src') -File -Filter *.cpp -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.LastWriteTime } | Sort-Object -Descending | Select-Object -First 1
+if (-not (Test-Path $probeExe) -or -not (Test-Path $hookDll) -or
+    ($built -and $newestSource -and $newestSource -gt $built)) {
     Note Cyan "building the probe in $probeRoot"
     $buildLog = Join-Path $OutDir 'probe-build.log'
     & (Join-Path $probeRoot 'build.ps1') *>&1 | Tee-Object -FilePath $buildLog | Out-Null
@@ -235,6 +247,33 @@ if ($driverCases) {
                 Fail $c ("the driver wrote outside its own allocations: {0} guard-zone hits in {1} checks" -f $r.guardZoneHits, $r.guardZoneChecks)
             } else {
                 Pass $c ("no write outside the driver's own allocations in {0} guard-zone checks over {1} rounds" -f $r.guardZoneChecks, $r.roundsDone)
+            }
+        }
+
+        # The window the field dumps actually point at: the driver had been through CreateDevice and teardown by
+        # the time every damaged dump was written. The probe can reach into CreateDevice but cannot yet complete
+        # it, because that needs a plausible description of hardware nobody here has. Until it can, this case
+        # reports Skipped with how far the driver got: that is a limitation of the harness, not a finding about
+        # the player, and must not read as a pass.
+        if ('legacy-umd-device' -in $Case) {
+            $c = 'legacy-umd-device'
+            $r = Invoke-InPlayer -Name $c -ExtraProbeArgs $DeviceProbeArgs
+            $deviceLog = Join-Path $OutDir "$c.log"
+            $fault = if (Test-Path $deviceLog) { (Get-Content $deviceLog | Select-String '!! exception' | Select-Object -First 1).Line } else { $null }
+            if (-not $r) {
+                if ($fault) {
+                    Skip $c "the driver faulted inside the player under the invented adapter record ($($fault -replace '!! ','')); that is the harness's hardware, not the player"
+                } else {
+                    Fail $c "the probe produced no result inside the player; see $OutDir\$c-inject.log"
+                }
+            } elseif (-not $r.PSObject.Properties['lastCreateDeviceHr']) {
+                Skip $c 'this build of the probe does not report the device phase'
+            } elseif ($r.lastCreateDeviceHr -ne 0) {
+                Skip $c ("CreateDevice does not succeed yet (0x{0:x8} after {1} kernel callbacks of the fake kernel), so the window after it is not covered" -f $r.lastCreateDeviceHr, $r.fakeKernelSubmissions + $r.victimClassAllocs)
+            } elseif ($r.signatureHits -gt 0 -or $r.decoyHits -gt 0 -or $r.guardZoneHits -gt 0) {
+                Fail $c ("damage during the device phase: {0} blocks matching the 0x64..0x6B pattern, {1} decoys changed, {2} guard-zone hits" -f $r.signatureHits, $r.decoyHits, $r.guardZoneHits)
+            } else {
+                Pass $c ("the device phase ran clean: {0} process-heap allocations, {1} in the 152-byte class, no damage" -f $r.processHeapAllocs, $r.victimClassAllocs)
             }
         }
     }
