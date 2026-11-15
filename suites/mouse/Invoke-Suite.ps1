@@ -236,7 +236,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-HighContrastCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -1402,6 +1402,72 @@ try {
         if (-not $havePwMedia) { $why += 'no media\pw-long.mkv' }
         if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }
         Note Yellow "menu reload cases not run: $($why -join '; ')"
+    }
+
+    # The submenus the player fills when they open: Favorites from the profile's favorites, File > Recent
+    # Files from the media history. Run-MenuContentCase.guest.ps1 opens them with real keys and reads the
+    # popup's items; the classic theme keeps the item strings readable from outside the player.
+    $mcCases = [ordered]@{ 'favorites-menu-lists-favorites' = 'favorites'; 'recent-menu-lists-history' = 'recent' }
+    if (-not (Wanted @($mcCases.Keys))) {
+    } elseif ($havePwMedia -and $haveLav) {
+        $mcClip = 'C:\mpc-test\mouse\media\pw\bravo.mkv'
+        $mcIni = (PwIni @{ MPCTheme = 0; KeepHistory = 1 }) +
+            "[Favorites\Files]`r`nName0=fav alpha;0;0;C:\mpc-test\mouse\media\pw\alpha.mkv`r`nName1=fav beta;0;0;$mcClip`r`n" +
+            "[Favorites\DVDs]`r`nName0=dvd gamma;0;C:\mpc-test\no-such-disc\VIDEO_TS`r`n"
+        foreach ($name in @($mcCases.Keys)) {
+            if (-not (Wanted $name)) { $skipped++; continue }
+            $guestOut = "C:\mpc-test\mouse\out\$name"
+            $job = @{ Case = $name; Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; Clip = $mcClip; OutDir = $guestOut; Menu = $mcCases[$name] } | ConvertTo-Json
+            $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $mcIni, $consoleUser {
+                param($job, $out, $iniText, $user)
+                $ErrorActionPreference = 'Continue'
+                Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
+                if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+                New-Item -ItemType Directory $out | Out-Null
+                & icacls $out /grant 'Users:(OI)(CI)M' | Out-Null
+                Get-ChildItem 'C:\mpc-test\mouse\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+                Remove-Item 'C:\mpc-test\mouse\player\default.mpcpl' -Force -ErrorAction SilentlyContinue
+                [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
+                [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
+                $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-MenuContentCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+                $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+                $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
+                Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
+                Start-ScheduledTask -TaskName 'MpcMouseCase'
+                $deadline = (Get-Date).AddSeconds(90)
+                while (-not (Test-Path "$out\result.json") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+                Start-Sleep -Seconds 1
+                Unregister-ScheduledTask -TaskName 'MpcMouseCase' -Confirm:$false
+                Get-Process mpc-hc64 -ErrorAction SilentlyContinue | Stop-Process -Force
+                if (Test-Path "$out\result.json") { Get-Content "$out\result.json" -Raw } else { $null }
+            }
+            if (-not $json) { Complete-Case $name "the case produced no result on the guest"; continue }
+            $local = Join-Path $OutDir $name
+            if (Test-Path $local) { Get-ChildItem $local -File | ForEach-Object { [IO.File]::Delete($_.FullName) } }
+            New-Item -ItemType Directory -Force $local | Out-Null
+            Copy-Item -FromSession $session "$guestOut\*" -Destination $local -Force
+            $r = $json | ConvertFrom-Json
+            $items = @($r.items)
+            Note DarkGray "  $name items: $($items -join ' | ')"
+            $problems = @()
+            if ($r.error) { $problems += "guest: $($r.error)" }
+            elseif (-not $r.exited -or $r.exitCode -ne 0) { $problems += "the player did not exit cleanly (exited $($r.exited), code $($r.exitCode))" }
+            if ($mcCases[$name] -eq 'favorites') {
+                # each favorite once, in the profile's order, files before DVDs
+                $at = foreach ($want in 'fav alpha', 'fav beta', 'dvd gamma') { [Array]::IndexOf([string[]]$items, $want) }
+                if ($at -contains -1) { $problems += "missing favorites: wanted fav alpha, fav beta, dvd gamma" }
+                elseif (-not ($at[0] -lt $at[1] -and $at[1] -lt $at[2])) { $problems += "favorites out of order (at $($at -join ', '))" }
+                foreach ($want in 'fav alpha', 'fav beta', 'dvd gamma') {
+                    if (@($items | Where-Object { $_ -eq $want }).Count -gt 1) { $problems += "$want listed more than once" }
+                }
+            } else {
+                if (-not @($items | Where-Object { $_ -like '*bravo.mkv*' })) { $problems += 'the clip just opened is not in Recent Files' }
+            }
+            Complete-Case $name $problems
+        }
+    } else {
+        $skipped += $mcCases.Count
+        Note Yellow "menu content cases not run: needs media\pw clips and LAVFilters64 beside the player"
     }
 
     # The contrast theme job (#4375): Run-HighContrastCase launches the player once per variant, each from
