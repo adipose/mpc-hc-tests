@@ -149,6 +149,26 @@ public class MouseRig {
     r.L = a.X; r.T = a.Y; r.R = b.X; r.B = b.Y;
     return r;
   }
+  // A RECT another process's control fills in for a message that takes a pointer to one in lParam, such
+  // as TBM_GETTHUMBRECT (0x0419) or TBM_GETCHANNELRECT (0x041A). In the control's client coordinates, as
+  // the message returns it; an empty rect when the process cannot be opened.
+  public static RECT RemoteRect(IntPtr h, uint msg, IntPtr wParam) {
+    RECT r = new RECT();
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    IntPtr hp = OpenProcess(0x0008 | 0x0010 | 0x0020 | 0x0400, false, pid);   // VM_OPERATION|VM_READ|VM_WRITE|QUERY_INFORMATION
+    if (hp == IntPtr.Zero) return r;
+    IntPtr mem = VirtualAllocEx(hp, IntPtr.Zero, (IntPtr)16, 0x3000, 4);      // MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE
+    int[] buf = new int[4]; IntPtr n;
+    if (mem != IntPtr.Zero) {
+      WriteProcessMemory(hp, mem, buf, (IntPtr)16, out n);
+      SendMessage(h, msg, wParam, mem);
+      ReadProcessMemory(hp, mem, buf, (IntPtr)16, out n);
+      VirtualFreeEx(hp, mem, IntPtr.Zero, 0x8000);
+    }
+    CloseHandle(hp);
+    r.L = buf[0]; r.T = buf[1]; r.R = buf[2]; r.B = buf[3];
+    return r;
+  }
   // Which window holds the mouse capture on the thread that owns h.
   public static IntPtr CaptureOf(IntPtr h) {
     uint pid; uint tid = GetWindowThreadProcessId(h, out pid);

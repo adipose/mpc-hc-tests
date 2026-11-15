@@ -23,6 +23,17 @@
 #              "Rounded corners" (IDC_CHECK_ROUNDEDBOX) is only enabled with Opaque box selected, keeps
 #              its state while disabled, and a click on it alone turns Apply on. Real clicks throughout,
 #              since a click on a disabled control is the point of the last step.
+#
+#   alphathumb options-alpha-slider-thumb-on-reopen  #4384. Options at the Default Style page, opened
+#              and closed several times in one player. The ini gives the shadow an alpha of 0xad, so its
+#              transparency slider sits at 82 of 0..255. The unfixed page set the slider positions once
+#              against the trackbar's default 0..100 range (from an uninitialised member, which on a
+#              reopen holds the previous page's value, 82), then changed the range without a redraw, so
+#              the later TBM_SETPOS of the same 82 never moved the thumb: it stayed at 82% of the channel
+#              until hovered. The first open is right; every reopen showed it. Each round records every
+#              alpha slider's position, range, channel and thumb rect (TBM_GETPOS 0x0400, TBM_GETRANGEMIN
+#              0x0401, TBM_GETRANGEMAX 0x0402, TBM_GETTHUMBRECT 0x0419, TBM_GETCHANNELRECT 0x041A); the
+#              host checks the thumb centre against the position.
 param([Parameter(Mandatory)] [string] $Job)
 
 $ErrorActionPreference = 'Stop'
@@ -205,9 +216,52 @@ try {
         Close-OptionsDialog $root
     }
 
+    function Invoke-AlphaThumbCase {
+        $t = Open-Options
+        $root = $t.Root            # the Options dialog, at the Default Style page (the job's ini set LastUsedPage)
+        $result.optionsForeground = $t.Foreground
+        $procId = [uint32]$script:proc.Id
+        $rounds = [System.Collections.Generic.List[object]]::new()
+        for ($round = 1; $round -le [int]$j.Ids.Rounds; $round++) {
+            if ($round -gt 1) {
+                $main = [MouseRig]::FindTop($procId, 'MediaPlayerClassicW', '')
+                [void][MouseRig]::PostMessage($main, 0x0111, [IntPtr][int]$j.PostCommand, [IntPtr]::Zero)   # WM_COMMAND, ID_VIEW_OPTIONS
+                $root = [IntPtr]::Zero
+                $deadline = (Get-Date).AddSeconds(15)
+                while ($root -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) {
+                    Start-Sleep -Milliseconds 250
+                    $root = [MouseRig]::FindTop($procId, '', $j.DialogTitle)
+                }
+                if ($root -eq [IntPtr]::Zero) { throw "round ${round}: Options did not reopen" }
+                Start-Sleep -Milliseconds 800
+            }
+            $sliders = [System.Collections.Generic.List[object]]::new()
+            foreach ($id in $j.Ids.Sliders) {
+                $s = [MouseRig]::FindDescendant($root, [int]$id)
+                if ($s -eq [IntPtr]::Zero) { throw "round ${round}: slider $id not found; not on the Default Style page?" }
+                $ch = [MouseRig]::RemoteRect($s, 0x041A, [IntPtr]::Zero)   # TBM_GETCHANNELRECT
+                $th = [MouseRig]::RemoteRect($s, 0x0419, [IntPtr]::Zero)   # TBM_GETTHUMBRECT
+                $sliders.Add([ordered]@{
+                        id      = [int]$id
+                        pos     = Send-Int $s 0x0400 ([IntPtr]::Zero) ([IntPtr]::Zero)   # TBM_GETPOS
+                        min     = Send-Int $s 0x0401 ([IntPtr]::Zero) ([IntPtr]::Zero)   # TBM_GETRANGEMIN
+                        max     = Send-Int $s 0x0402 ([IntPtr]::Zero) ([IntPtr]::Zero)   # TBM_GETRANGEMAX
+                        channel = @{ L = $ch.L; R = $ch.R }
+                        thumb   = @{ L = $th.L; R = $th.R }
+                    })
+            }
+            $entry = [ordered]@{ round = $round; sliders = $sliders }
+            if ($round -le 2) { $entry.shot = (Save-WindowShot "round-$round" $root).png }
+            $rounds.Add($entry)
+            Close-OptionsDialog $root
+        }
+        $result.rounds = $rounds
+    }
+
     switch ($j.Case) {
         'd3d9'        { Invoke-D3D9Case }
         'substyle'    { Invoke-SubStyleCase }
+        'alphathumb'  { Invoke-AlphaThumbCase }
         default       { throw "unknown case '$($j.Case)'" }
     }
 } catch {
