@@ -2731,6 +2731,33 @@ try {
         else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'stereo.mkv'.audio[0].tones $seconds 1.0) }
         Complete-Case 'recent-file-reopens' $problems
     }
+
+    # 67. The information bar shown while paused has the current chapter: #4385. The bar refreshes its lines
+    #    from TIMER_STATS only while it is visible, and pause kills that timer, so a bar hidden while playback
+    #    crossed a chapter mark showed the chapter it had at open until playback resumed. chapters.mkv has
+    #    marks at 4 and 8 s. The bar starts hidden (ControlState without CS_INFOBAR), the clip is paused at
+    #    7 s, the View > Information command shows the bar at 8 s, and at 9.5 s its Chapter line must name
+    #    the chapter of the paused position, read from the time label rather than assumed, since a guest
+    #    can start playback late. A position before the first mark proves nothing and fails the case.
+    if (Test-CaseSelected 'info-bar-chapter-after-hidden-pause') {
+        $c = Invoke-PlayerCase -Name 'info-bar-chapter-after-hidden-pause' -Clip 'chapters.mkv' -Switches '/play' `
+            -Settings @{ ControlState = 19 } -PostCommands '7:888,8:820' -ControlAt '9.5:ibar:10020,9.6:fprobe:12027' -CloseAtSec 11
+        $problems = @((Get-ProcessProblem $c.Run))
+        $bar = @($c.Run.controls) | Where-Object { $_.op -eq 'ibar' } | Select-Object -First 1
+        $time = @($c.Run.controls) | Where-Object { $_.op -eq 'fprobe' } | Select-Object -First 1
+        if (-not $bar -or -not $bar.found) { $problems += 'the information bar was not found visible after View > Information' }
+        elseif (-not $time -or -not $time.found -or $time.text -notmatch '^(?:(\d+):)?(\d+):(\d+)') { $problems += "the time label was not read (text '$($time.text)')" }
+        else {
+            $pos = 3600 * [int] ('0' + $Matches[1]) + 60 * [int] $Matches[2] + [int] $Matches[3]
+            $chapter = @($bar.lines) | Where-Object { $_.label -eq 'Chapter' } | Select-Object -First 1
+            Note Gray "      paused at '$($time.text)'; Chapter '$($chapter.info)'"
+            $want = @('one (1/3)', 'two (2/3)', 'three (3/3)')[[math]::Min(2, [math]::Floor($pos / 4))]
+            if ($pos -lt 4 -or $pos % 4 -eq 0) { $problems += "paused at $pos s, which is not past a chapter mark (or is on one), so the case proves nothing" }
+            elseif (-not $chapter) { $problems += 'the information bar has no Chapter line' }
+            elseif ($chapter.info -ne $want) { $problems += "the Chapter line says '$($chapter.info)' at $pos s, expected '$want'" }
+        }
+        Complete-Case 'info-bar-chapter-after-hidden-pause' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

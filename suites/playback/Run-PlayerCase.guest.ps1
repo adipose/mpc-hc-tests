@@ -71,6 +71,8 @@ param(
                                          # the control's and its dialog's screen rects. <sec>:fprobe:<ctrl>
                                          # probes a control of the player's frame instead (status bar,
                                          # toolbars): its screen rect and window text.
+                                         # <sec>:ibar:10020 reads the information bar's lines as
+                                         # {label, info} pairs.
                                          # <sec>:sbar:<ctrl> captures the frame bar holding that control
                                          # (the status bar, for 12027) from the screen as a png;
                                          # <sec>:redraw:<ctrl> invalidates that bar, children too.
@@ -581,7 +583,7 @@ function Invoke-ControlStep {
     }
     # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
     # sbar captures the bar such a control sits in, redraw repaints it.
-    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch') { 'MediaPlayerClassicW' } else { '#32770' }
+    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch', 'ibar') { 'MediaPlayerClassicW' } else { '#32770' }
     $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl -TopClass $topClass
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
@@ -594,6 +596,22 @@ function Invoke-ControlStep {
         [void] [MpcTest.User32]::GetWindowTextW($ctrl, $text, $text.Capacity)
         $record.text = $text.ToString()
         $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+    } elseif ($Step.op -eq 'ibar') {
+        # <sec>:ibar:10020: the information bar's lines. Its labels have no ids of their own: SetLine creates a
+        # caption static and a value static per line, in that order, so the children in z-order pair up.
+        # Recorded as "lines", a list of {label, info}.
+        $texts = [System.Collections.Generic.List[string]]::new()
+        $kids = [MpcTest.User32+EnumWindowsProc] {
+            param($hWnd, $lParam)
+            if ([MpcTest.User32]::GetParent($hWnd) -eq $ctrl) {
+                $t = [Text.StringBuilder]::new(1024); [void] [MpcTest.User32]::GetWindowTextW($hWnd, $t, $t.Capacity); $texts.Add($t.ToString())
+            }
+            return $true
+        }
+        [void] [MpcTest.User32]::EnumChildWindows($ctrl, $kids, [IntPtr]::Zero)
+        $lines = @()
+        for ($i = 0; $i + 1 -lt $texts.Count; $i += 2) { $lines += [ordered]@{ label = $texts[$i]; info = $texts[$i + 1] } }
+        $record.lines = $lines
     } elseif ($Step.op -eq 'probe') {
         $record.icon = ([MpcTest.User32]::SendMessageW($ctrl, 0x0171, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)   # STM_GETICON
         # Screen rects (left, top, right, bottom) of the control and of its top-level dialog.
