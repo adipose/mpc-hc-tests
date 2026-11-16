@@ -36,6 +36,10 @@ param(
     [string] $OutDir = (Join-Path $PSScriptRoot 'results'),
     [string] $PlayerBinary,
     [switch] $InstallDrivers,
+    # A small authored DVD (a folder holding VIDEO_TS) for the DVD cases; ffmpeg cannot write IFOs, so the clip
+    # script cannot make one. C:\dev\sample-dvd builds this one with dvdauthor: a root menu set as first play
+    # into a 30 s title with chapters at 0, 10 and 20 s. Without it the DVD cases are skipped.
+    [string] $SampleDvd = 'C:\dev\sample-dvd\DVD',
     # Run only the cases whose name matches one of these -like patterns; empty runs everything, which is how the
     # orchestrator calls the suite.
     [string[]] $Case = @()
@@ -167,6 +171,11 @@ try {
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-PlayerCase.guest.ps1') 'C:\mpc-test\' -Force
     Copy-Item -ToSession $session (Join-Path $PSScriptRoot 'Run-ApiCase.guest.ps1') 'C:\mpc-test\' -Force
     Get-ChildItem $media -File | Where-Object { $_.Extension -in '.mkv', '.mp4', '.ass', '.wav', '.png', '.flac', '.rar', '.dsm' } | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\' -Force }
+    $haveDvd = Test-Path (Join-Path $SampleDvd 'VIDEO_TS\VIDEO_TS.IFO')
+    if ($haveDvd) {
+        Invoke-Command -Session $session { if (-not (Test-Path 'C:\mpc-test\media\dvd\VIDEO_TS')) { New-Item -ItemType Directory 'C:\mpc-test\media\dvd\VIDEO_TS' | Out-Null } }
+        Get-ChildItem (Join-Path $SampleDvd 'VIDEO_TS') -File | ForEach-Object { Copy-Item -ToSession $session $_.FullName 'C:\mpc-test\media\dvd\VIDEO_TS\' -Force }
+    }
     Invoke-Command -Session $session {
         Expand-Archive 'C:\mpc-test\player.zip' 'C:\mpc-test\player' -Force
         # A folder of two clips with different tones, for "next file in folder": a.mkv is stereo.mkv, b.mkv is
@@ -2757,6 +2766,31 @@ try {
             elseif ($chapter.info -ne $want) { $problems += "the Chapter line says '$($chapter.info)' at $pos s, expected '$want'" }
         }
         Complete-Case 'info-bar-chapter-after-hidden-pause' $problems
+    }
+
+    # 68. The same for a DVD (#4385): the DVD lines (Location, Video, Audio) are also set only by TIMER_STATS
+    #    while the bar is visible, so a bar hidden since the open came back showing "-" for all three. The
+    #    sample DVD's first play goes straight into the title. Plain EVR (DSVidRen=10): on a guest without
+    #    D3DX9 the default EVR-CP left the DVD graph stuck at "Opening..." with a frozen frame on both builds. Next chapter at 4 s and pause at 6 s with the
+    #    bar hidden, View > Information at 7 s, and at 8.5 s the Location line must name chapter 2 of 3.
+    if (Test-CaseSelected 'info-bar-dvd-after-hidden-pause') {
+        if (-not $haveDvd) {
+            $skipped++
+            Note Yellow "skipped info-bar-dvd-after-hidden-pause: no VIDEO_TS under -SampleDvd ($SampleDvd)"
+        } else {
+            $c = Invoke-PlayerCase -Name 'info-bar-dvd-after-hidden-pause' -Clip 'dvd\VIDEO_TS\VIDEO_TS.IFO' -Switches '/play' `
+                -Settings @{ ControlState = 19; RememberDVDPos = 0; DSVidRen = 10 } -PostCommands '4:922,6:888,7:820' -ControlAt '8.5:ibar:10020' -CloseAtSec 10
+            $problems = @((Get-ProcessProblem $c.Run))
+            $bar = @($c.Run.controls) | Where-Object { $_.op -eq 'ibar' } | Select-Object -First 1
+            if (-not $bar -or -not $bar.found) { $problems += 'the information bar was not found visible after View > Information' }
+            else {
+                $location = @($bar.lines) | Where-Object { $_.label -eq 'Location' } | Select-Object -First 1
+                Note Gray "      Location '$($location.info)'"
+                if (-not $location) { $problems += 'the information bar has no Location line: not playing the DVD?' }
+                elseif ($location.info -notmatch 'Chapter: 02/03') { $problems += "the Location line says '$($location.info)', expected chapter 02/03 after one Next chapter" }
+            }
+            Complete-Case 'info-bar-dvd-after-hidden-pause' $problems
+        }
     }
 }
 finally {
