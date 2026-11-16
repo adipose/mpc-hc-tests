@@ -2770,11 +2770,10 @@ try {
 
     # 68. The same for a DVD (#4385): the DVD lines (Location, Video, Audio) are also set only by TIMER_STATS
     #    while the bar is visible, so a bar hidden since the open came back showing "-" for all three. The
-    #    sample DVD's first play goes straight into the title. Plain EVR (DSVidRen=10): on win10-parity-2 the
-    #    default EVR-CP left this DVD stuck at "Opening..." with a frozen frame and the player deaf to WM_CLOSE,
-    #    on both builds and with D3DX9_43.dll deployed beside it, while audio played. EVR-CP played the same
-    #    disc on the host; why it hangs on the guest was not looked into. MPCVR (DSVidRen=14) also plays it on
-    #    the guest, with the same fail/pass, but needs the MPCVR folder a source build lacks. Next chapter at 4 s and pause at 6 s with the
+    #    sample DVD's first play goes straight into the title. Plain EVR (DSVidRen=10): before patch841 the
+    #    default EVR-CP deadlocked opening this DVD (case 69), every time on win10-parity-2 and in about half
+    #    the opens on the host. MPCVR (DSVidRen=14) also plays it on the guest, with the same fail/pass, but
+    #    needs the MPCVR folder a source build lacks. Next chapter at 4 s and pause at 6 s with the
     #    bar hidden, View > Information at 7 s, and at 8.5 s the Location line must name chapter 2 of 3.
     if (Test-CaseSelected 'info-bar-dvd-after-hidden-pause') {
         if (-not $haveDvd) {
@@ -2793,6 +2792,24 @@ try {
                 elseif ($location.info -notmatch 'Chapter: 02/03') { $problems += "the Location line says '$($location.info)', expected chapter 02/03 after one Next chapter" }
             }
             Complete-Case 'info-bar-dvd-after-hidden-pause' $problems
+        }
+    }
+
+    # 69. EVR-CP opens a DVD without deadlocking (patch841). The DVD's in-band format changes reach the
+    #    presenter's ProcessMessage(INVALIDATEMEDIATYPE) with the EVR's filter lock held, and it waits for the
+    #    render thread to renegotiate; the render thread was reading the input pin for HLG, which takes that
+    #    same lock, and the UI thread then blocked on it in GetState. The player sat at "Opening..." on a
+    #    frozen frame, deaf to WM_CLOSE: every time on win10-parity-2, about half the opens on the host. A
+    #    close at 8 s must end the player. EVR Sync had the same pin check but never hung on this disc, here
+    #    or on the host, so it has no case.
+    if (Test-CaseSelected 'dvd-opens-evr-cp') {
+        if (-not $haveDvd) {
+            $skipped++
+            Note Yellow "skipped dvd-opens-evr-cp: no VIDEO_TS under -SampleDvd ($SampleDvd)"
+        } else {
+            $c = Invoke-PlayerCase -Name 'dvd-opens-evr-cp' -Clip 'dvd\VIDEO_TS\VIDEO_TS.IFO' -Switches '/play' `
+                -Settings @{ RememberDVDPos = 0; DSVidRen = 11 } -CloseAtSec 8
+            Complete-Case 'dvd-opens-evr-cp' @((Get-ProcessProblem $c.Run))
         }
     }
 }
