@@ -2773,7 +2773,8 @@ try {
     #    sample DVD's first play goes straight into the title. Plain EVR (DSVidRen=10): on win10-parity-2 the
     #    default EVR-CP left this DVD stuck at "Opening..." with a frozen frame and the player deaf to WM_CLOSE,
     #    on both builds and with D3DX9_43.dll deployed beside it, while audio played. EVR-CP played the same
-    #    disc on the host; why it hangs on the guest was not looked into. Next chapter at 4 s and pause at 6 s with the
+    #    disc on the host; why it hangs on the guest was not looked into. MPCVR (DSVidRen=14) also plays it on
+    #    the guest, with the same fail/pass, but needs the MPCVR folder a source build lacks. Next chapter at 4 s and pause at 6 s with the
     #    bar hidden, View > Information at 7 s, and at 8.5 s the Location line must name chapter 2 of 3.
     if (Test-CaseSelected 'info-bar-dvd-after-hidden-pause') {
         if (-not $haveDvd) {
