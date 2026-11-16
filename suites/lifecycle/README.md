@@ -16,6 +16,7 @@ Run-LifecycleCase.guest.ps1   target side: open Options, request the exit or the
 | `options-sysclose-deferred` | the same with `WM_SYSCOMMAND SC_CLOSE` (the taskbar) | as above |
 | `options-reentry-single-sheet` | Options open, `ID_VIEW_OPTIONS` posted to the frame again (a global hotkey, a remote, the web interface) | one sheet is up, the one first opened, and the player exits 0 (#4257, DrDump 147417607) |
 | `update-dialog-exit` | Help > Check for updates (the dialog shows the error text on a guest without network), then `ID_FILE_EXIT` with it up | the dialog runs on the frame's thread, the frame stays enabled, and the player exits 0 (#4257, DrDump 1082769) |
+| `update-dialog-centered` | Help > Check for updates, the frame's and the dialog's window rects read | the dialog's centre is within 2 px of the frame's. Modeless with an enabled owner, MFC no longer centred it and it opened at the frame's top left corner (#4400) |
 | `firstrun-prompt-{sysclose,exit}-{classic,themed}` | no `UpdaterAutoCheck` in the ini, so `InitInstance` stops on the first-run update prompt with the frame shown; the frame is then closed by `SC_CLOSE` or `ID_FILE_EXIT` | the player exits 0. On the classic path MFC's `ShowAppMessageBox` wrote the help prompt context back into the deleted `CMainFrame` (#4257, DrDump 147447113); the themed path never did and is a guard |
 | `options-reset-relaunches` | Reset in Options > Miscellaneous, confirmed Yes | the player exits 0, one new instance is running, and the ini no longer has the marker key |
 
