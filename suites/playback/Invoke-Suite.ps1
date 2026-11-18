@@ -419,7 +419,7 @@ try {
         # Files the control steps saved beside the result (the grip and status bar crops, desktop shots), named after it on the guest.
         foreach ($step in @($(if ($run.PSObject.Properties['controls']) { $run.controls }))) {
             if ($step.PSObject.Properties['file'] -and $step.file) {
-                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-(grip|sbar|shot)-', "$Name-`$1-")) -Force
+                Copy-Item -FromSession $session (Join-Path 'C:\mpc-test\out' $step.file) (Join-Path $OutDir ($step.file -replace '^.*-(grip|sbar|shot|vrows)-', "$Name-`$1-")) -Force
             }
         }
 
@@ -2730,6 +2730,43 @@ try {
         if ($c.Wavs.Count -ne 2) { $problems += "$($c.Wavs.Count) audio stream(s) reached the endpoint, expected 2 (stereo.mkv, then its reopen from the recent files)" }
         else { $problems += (Test-Audio $c.Wavs[1] $clips.clips.'stereo.mkv'.audio[0].tones $seconds 1.0) }
         Complete-Case 'recent-file-reopens' $problems
+    }
+
+    # 67. Options > Playback > Vertical alignment takes effect when the sheet is OKed, not at the next resize: #4440.
+    #    long.mkv (16:9, every quadrant brighter than the bars, 20 s) playing in a seeded tall window (480x710,
+    #    AutoZoom off), so the picture is letterboxed above and below. The pane's picture rows are read before
+    #    Options opens (centred, the control that the window is tall enough to tell), after the alignment combo
+    #    (IDC_COMBO4 11003, items Middle, Top, Bottom) is set to Top and the sheet OKed, and again after Bottom.
+    #    The sheet's OK only closes it; nothing after it lays the video out again, so unfixed patch845^ (develop
+    #    cd72cbace3) leaves the picture centred both times. Measured on the host first: Top 0, Bottom 506 of a
+    #    1014 px client against 253 unfixed. The reads are from the screen, so each comes after the sheet closed.
+    if (Test-CaseSelected 'vertical-align-applies-at-once') {
+        $seed = Get-RectIniBinary 60 10 540 720
+        $c = Invoke-PlayerCase -Name 'vertical-align-applies-at-once' -Clip 'long.mkv' -Switches '/play' `
+            -Settings @{ DSVidRen = 11; LastGPUCheck = 500000; RememberWindowPos = 1; RememberWindowSize = 1; AutoZoom = 0; LastWindowRect = $seed; VerticalAlignVideo = 0; LastUsedPage = 10023 } `
+            -IniSections $rendererLav -PostCommands '3:815,10:815' `
+            -ControlAt '2:vrows:59648,6:cbindex:11003:1,7:cmd:11003:1,9:vrows:59648,13:cbindex:11003:2,14:cmd:11003:1,16:vrows:59648' -CloseAtSec 18
+        $problems = @(Get-ProcessProblem $c.Run)
+        $combos = @($c.Run.controls) | Where-Object { $_.op -eq 'cbindex' }
+        $rows = @($c.Run.controls) | Where-Object { $_.op -eq 'vrows' }
+        if (@($combos | Where-Object { $_.found -and $_.index -ge 1 }).Count -ne 2) { $problems += 'the alignment combo was not found on the Options page both times' }
+        elseif ($rows.Count -ne 3 -or @($rows | Where-Object { -not $_.found -or $_.top -lt 0 }).Count) { $problems += 'the video pane or its picture was not found at every read' }
+        else {
+            foreach ($r in $rows) { Note Gray ("      at {0} s: picture rows {1}..{2} of {3}" -f $r.at, $r.top, $r.bottom, $r.height) }
+            $m = $rows[0]; $t = $rows[1]; $b = $rows[2]
+            $gapM = $m.height - 1 - $m.bottom
+            if ($m.top -lt 40 -or [math]::Abs($m.top - $gapM) -gt 4) { $problems += "before the change the picture is not centred with bars to spare (bars $($m.top) above, $gapM below), so the case cannot tell the alignments apart" }
+            else {
+                $hM = $m.bottom - $m.top
+                foreach ($x in @(@{ r = $t; what = 'Top' }, @{ r = $b; what = 'Bottom' })) {
+                    if ([math]::Abs(($x.r.bottom - $x.r.top) - $hM) -gt 4) { $problems += "the picture is $($x.r.bottom - $x.r.top) rows high after $($x.what), $hM before: it was resized, not moved" }
+                }
+                if ($t.top -gt 4) { $problems += "after Top was applied the picture starts $($t.top) rows down (centred: $($m.top)): the alignment did not take effect" }
+                $gapB = $b.height - 1 - $b.bottom
+                if ($gapB -gt 4) { $problems += "after Bottom was applied the picture ends $gapB rows above the pane's bottom (centred: $gapM): the alignment did not take effect" }
+            }
+        }
+        Complete-Case 'vertical-align-applies-at-once' $problems
     }
 }
 finally {

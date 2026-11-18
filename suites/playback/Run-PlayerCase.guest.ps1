@@ -81,6 +81,9 @@ param(
                                          # frame and reads the video pane's centre colour as fast as
                                          # PrintWindow allows for 700 ms ("sequence", a letter per read);
                                          # command 0 only reads.
+                                         # <sec>:vrows:59648 records which rows of the video pane hold
+                                         # picture (first and last non-black row a quarter of the way in),
+                                         # read from the screen, so nothing may cover the pane.
                                          # Decimal. Recorded under "controls".
     [int] $PluggedScale = 0              # non-zero: before the player starts, set the display scale of the one
                                          # monitor that is not the primary (the plugged virtual one) to this
@@ -581,7 +584,7 @@ function Invoke-ControlStep {
     }
     # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
     # sbar captures the bar such a control sits in, redraw repaints it.
-    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch') { 'MediaPlayerClassicW' } else { '#32770' }
+    $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch', 'vrows') { 'MediaPlayerClassicW' } else { '#32770' }
     $ctrl = Find-DialogControl -ProcessId $ProcessId -ControlId $Step.ctrl -TopClass $topClass
     $record = [ordered]@{ at = $Step.at; op = $Step.op; ctrl = $Step.ctrl; found = ($ctrl -ne [IntPtr]::Zero) }
     if ($ctrl -eq [IntPtr]::Zero) { return $record }
@@ -743,6 +746,38 @@ function Invoke-ControlStep {
         }
         $pxg.Dispose(); $px.Dispose()
         $record.sequence = $seq.ToString()
+    } elseif ($Step.op -eq 'vrows') {
+        # <sec>:vrows:59648: where the picture sits vertically in the video pane (AFX_IDW_PANE_FIRST). The pane is
+        # read from the screen, so nothing may cover it (close dialogs first). PrintWindow of the pane itself is
+        # all black on the guests' EVR-CP, so where the screen cannot be read the whole frame is printed and the
+        # pane cut from it. The column a quarter of the way in is scanned for the first and last row brighter
+        # than the black bars (any channel above 60). Recorded pane-relative: top, bottom, the pane's height.
+        Add-Type -AssemblyName System.Drawing
+        $rect = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($ctrl, $rect); $record.rect = $rect
+        $w = $rect[2] - $rect[0]; $h = $rect[3] - $rect[1]
+        $record.height = $h; $record.top = -1; $record.bottom = -1
+        if ($w -gt 0 -and $h -gt 0) {
+            $bmp = [System.Drawing.Bitmap]::new($w, $h)
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            try { $gfx.CopyFromScreen($rect[0], $rect[1], 0, 0, $bmp.Size); $record.method = 'screen' }
+            catch {
+                $record.method = 'PrintWindow'
+                $f = [int[]]::new(4); [void] [MpcTest.User32]::GetWindowRect($root, $f)
+                $whole = [System.Drawing.Bitmap]::new($f[2] - $f[0], $f[3] - $f[1])
+                $wg = [System.Drawing.Graphics]::FromImage($whole)
+                $dc = $wg.GetHdc(); [void] [MpcTest.User32]::PrintWindow($root, $dc, 2); $wg.ReleaseHdc($dc); $wg.Dispose()
+                $gfx.DrawImage($whole, -($rect[0] - $f[0]), -($rect[1] - $f[1])); $whole.Dispose()
+            }
+            $x = [int]($w / 4)
+            for ($y = 0; $y -lt $h; $y++) {
+                $c = $bmp.GetPixel($x, $y)
+                if ([math]::Max($c.R, [math]::Max($c.G, $c.B)) -gt 60) { if ($record.top -lt 0) { $record.top = $y }; $record.bottom = $y }
+            }
+            $file = Join-Path (Split-Path $Out) ('{0}-vrows-{1}.png' -f [IO.Path]::GetFileNameWithoutExtension($Out), $Step.at)
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $record.file = Split-Path $file -Leaf
+            $gfx.Dispose(); $bmp.Dispose()
+        }
     } elseif ($Step.op -eq 'size') {
         # Grow the top-level dialog by <value> px each way, as a user dragging its corner: the player
         # gets WM_SIZE from its own thread's SetWindowPos handling. Asynchronous, because a synchronous
