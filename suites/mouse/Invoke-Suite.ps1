@@ -23,7 +23,8 @@
 
     Run-OptionsThemeCase.guest.ps1 sits in the Options dialog: the D3D9 render device selection must
     be hidden on a one-adapter guest (#4033), and the default style's "Rounded corners" must follow the
-    Border Style radios and turn Apply on, in each theme (#4361).
+    Border Style radios and turn Apply on, in each theme (#4361), and the alpha sliders on that page must
+    draw their thumbs at their positions when the page is reopened (#4384).
 
     Eight cases (Run-PlayerWindowCase.guest.ps1) drive the main window, its docked panels and the
     playlist's inline edit (#4279): the edit must survive auto-hide, a drag out of it and the mouse wheel;
@@ -60,7 +61,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853, and Esc in its text cells; D3D9 device selection on a one-adapter guest, #4033; rounded corners checkbox, #4361; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
+$description = 'Real mouse input in the console session; asserts on what the screen showed (combo box hover, #4276; playlist input, #3844 #3885; Keys page editing, #3853, and Esc in its text cells; D3D9 device selection on a one-adapter guest, #4033; rounded corners checkbox, #4361; alpha slider thumbs on reopen, #4384; controls injected into the dark file dialog, #4281; playlist inline edit, docked panels and window sizing, #4279; no basic frame across fullscreen toggles, #4330)'
 $testsRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repoRoot = Split-Path $testsRoot -Parent
 $transport = Join-Path $testsRoot 'emulator\tools\GuestTransport.ps1'
@@ -743,6 +744,27 @@ try {
         $problems
     }
 
+    # Every alpha slider's thumb must sit where its position puts it, on every open of the page (#4384).
+    # The thumb centre's share of the channel is compared with the position's share of the range; the
+    # unfixed build drew 82 of 0..255 at 82% of the channel on a reopen, where 32% is right.
+    function Test-AlphaSliderThumbs {
+        param($Job)
+        $run = $Job.Run
+        if (-not $run.rounds -or @($run.rounds).Count -lt 2) { return @('the guest run ended before the page was reopened') }
+        $problems = @()
+        foreach ($r in $run.rounds) {
+            foreach ($s in $r.sliders) {
+                if ($s.max -le $s.min -or $s.channel.R -le $s.channel.L) { $problems += "round $($r.round) slider $($s.id): no usable range or channel"; continue }
+                $at = (($s.thumb.L + $s.thumb.R) / 2.0 - $s.channel.L) / ($s.channel.R - $s.channel.L)
+                $want = ($s.pos - $s.min) / [double]($s.max - $s.min)
+                if ([Math]::Abs($at - $want) -gt 0.05) {
+                    $problems += 'round {0} slider {1}: position {2} of {3}..{4} is {5:P0}, thumb drawn at {6:P0}' -f $r.round, $s.id, $s.pos, $s.min, $s.max, $want, $at
+                }
+            }
+        }
+        $problems
+    }
+
     function Test-OptionsD3D9Hidden {
         param($Job)
         $run = $Job.Run
@@ -1150,6 +1172,19 @@ try {
             $ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`n$($v.Theme)`r`nLastUsedPage=$idSubStylePage`r`n"
             Complete-Case $name (Test-RoundedBoxCheckbox (Invoke-OptionsThemeJob -Name $name -Case 'substyle' -ArgumentLine '' -IniText $ini -Ids $subStyleIds))
         }
+    }
+
+    # 6c. The default style's alpha sliders draw their thumb at their position on every open of the page,
+    #     not only the first (#4384). The shadow alpha 0xad puts that slider at 82 of 0..255, a value at or
+    #     under 100 being what the unfixed build drew in the wrong place. Modern Dark, as the report was.
+    if (Wanted 'options-alpha-slider-thumb-on-reopen') {
+        $style = '20;20;10;18;2;1;2.000000;2.000000;4.000000;4.000000;0xffffff;0x00ffff;0x000000;0x000000;0x00;0x00;0x80;0xad;1;Arial;18.000000;100.000000;100.000000;0.000000;700;0;0;0;0;0.000000;0.000000;0.000000;0.000000;0'
+        $ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nMPCTheme=1`r`nModernThemeMode=0`r`nLastUsedPage=$idSubStylePage`r`nSPDefaultStyle=$style`r`n"
+        $alphaIds = @{
+            Sliders = @((Get-ResourceId 'IDC_SLIDER1' 11020), (Get-ResourceId 'IDC_SLIDER2' 11021), (Get-ResourceId 'IDC_SLIDER3' 11022), (Get-ResourceId 'IDC_SLIDER4' 11023))
+            Rounds  = 5
+        }
+        Complete-Case 'options-alpha-slider-thumb-on-reopen' (Test-AlphaSliderThumbs (Invoke-OptionsThemeJob -Name 'options-alpha-thumb' -Case 'alphathumb' -ArgumentLine '' -IniText $ini -Ids $alphaIds))
     }
 
     # 7. The controls the player injects into the Windows file dialogs, under Windows dark mode (#4281,
