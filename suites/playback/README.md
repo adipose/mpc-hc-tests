@@ -169,6 +169,8 @@ centre the box there. The band cases only ask which colour is present.
 | `pause-when-minimized-user-pause-wins` | the same, with Play posted at 4 s and Pause at 6 while minimized: the restore must not resume the user's pause, 3-5.5 s of sound (about 4) | patch789 |
 | `pause-when-minimized-off` | the setting off (the default), minimized 3-7 s: playback is not interrupted, at least 8.5 s of sound | patch789 |
 | `fps-rate-ignores-unused-ids` | EVR-CP, `flat_sdr.mkv` (24 fps): a posted FPS25 item (5021) makes `/status.json`'s `rate` 25/24, and after 1.00x the unused rate id 5015 leaves it at 1 (unfixed develop 98ce8e37f3: an `\|\|` that is always true sends 5015 down the fps path, 25/24 again) | ledger 19 (patch819) |
+| `info-bar-chapter-after-hidden-pause` | `chapters.mkv` with the information bar hidden, paused at 7 s and the bar shown with View > Information at 8 s: its Chapter line names the chapter of the paused position, read from the time label (unfixed develop ce7d91a750: `one (1/3)`, the chapter it had at open) | #4385 (patch840) |
+| `info-bar-dvd-after-hidden-pause` | the sample DVD (`-SampleDvd`, a dvdauthor build with chapters at 0, 10 and 20 s; skipped without one), the information bar hidden, Next chapter at 4 s, paused at 6 s, shown with View > Information at 7 s: the Location line names chapter 02/03 (unfixed develop ce7d91a750: `-`, as set at open) | #4385 (patch840) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or

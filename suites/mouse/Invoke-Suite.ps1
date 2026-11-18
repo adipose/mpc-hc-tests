@@ -125,6 +125,8 @@ $idButton1      = Get-ResourceId 'IDC_BUTTON1' 11120          # Output page gear
 $idResetButton  = Get-ResourceId 'IDC_RESET' 22004            # Reset in the renderer settings popup
 $idOpenDir      = Get-ResourceId 'ID_FILE_OPENDIRECTORY' 33208   # the folder picker, which carries an injected check box
 $idPlayerTime   = Get-ResourceId 'IDC_PLAYERTIME' 12027       # the status bar's time label, whose parent is the bar
+$idInfoBar      = Get-ResourceId 'IDD_PLAYERINFOBAR' 10020    # the information bar (View > Information)
+$idPlayPause    = Get-ResourceId 'ID_PLAY_PAUSE' 888
 $idSubStylePage = Get-ResourceId 'IDD_PPAGESUBSTYLE' 10033
 $idRadio1       = Get-ResourceId 'IDC_RADIO1' 11040           # Border Style: Outline
 $idRadio2       = Get-ResourceId 'IDC_RADIO2' 11041           # Border Style: Opaque box
@@ -190,6 +192,24 @@ foreach ($n in 1, 2, 6) {
 }
 $haveAudioClips = -not ($audioClips.Values | Where-Object { -not (Test-Path (Join-Path $PSScriptRoot "media\$_")) })
 
+# A 16 s clip with chapters one, two and three at 0, 5 and 10 s, for the information bar case (#4385).
+$chapterClip = Join-Path $PSScriptRoot 'media\chapters.mkv'
+if (-not (Test-Path $chapterClip)) {
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if ($ffmpeg) {
+        New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot 'media') | Out-Null
+        $meta = Join-Path $PSScriptRoot 'media\chapters.ffmetadata'
+        [IO.File]::WriteAllLines($meta, @(';FFMETADATA1',
+            '[CHAPTER]', 'TIMEBASE=1/1000', 'START=0', 'END=5000', 'title=one',
+            '[CHAPTER]', 'TIMEBASE=1/1000', 'START=5000', 'END=10000', 'title=two',
+            '[CHAPTER]', 'TIMEBASE=1/1000', 'START=10000', 'END=16000', 'title=three'), [Text.UTF8Encoding]::new($false))
+        & $ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=blue:s=640x360:r=30:d=16' -f lavfi -i 'sine=f=440:d=16' `
+            -f ffmetadata -i $meta -map 0:v -map 1:a -map_chapters 2 -c:v libx264 -pix_fmt yuv420p -preset veryfast -c:a aac $chapterClip
+        if ($LASTEXITCODE -ne 0) { Remove-Item $chapterClip -Force -ErrorAction SilentlyContinue }
+    }
+}
+$haveChapterClip = Test-Path $chapterClip
+
 # Two clips for the player window cases: a 15 s one that ends while the playlist is being renamed, and a
 # 60 s one that outlasts every case. Video-only, small and flat, so a guest's WARP renderer has little to do.
 $pwClips = @{ 'pw-short.mkv' = 15; 'pw-long.mkv' = 60 }
@@ -241,7 +261,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-InfoBarHoverCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -265,6 +285,10 @@ try {
     if ($haveAudioClips) {
         Invoke-Command -Session $session { if (-not (Test-Path 'C:\mpc-test\mouse\media')) { New-Item -ItemType Directory 'C:\mpc-test\mouse\media' | Out-Null } }
         foreach ($f in $audioClips.Values) { Copy-Item -ToSession $session (Join-Path $PSScriptRoot "media\$f") "C:\mpc-test\mouse\media\$f" -Force }
+    }
+    if ($haveChapterClip) {
+        Invoke-Command -Session $session { if (-not (Test-Path 'C:\mpc-test\mouse\media')) { New-Item -ItemType Directory 'C:\mpc-test\mouse\media' | Out-Null } }
+        Copy-Item -ToSession $session $chapterClip 'C:\mpc-test\mouse\media\chapters.mkv' -Force
     }
     if ($havePwMedia) {
         # alpha is the short clip, bravo and charlie the long one: the names are what the cases wait for
@@ -669,15 +693,16 @@ try {
 
     # The status bar job: one launch of the player per clip, Run-StatusTipCase hovering the audio channel
     # icon with real input. Same scheduled-task shape as the Keys job.
+    # -Script and -Extra let another one-launch case reuse it (the information bar case).
     function Invoke-StatusTipJob {
-        param([string] $Name, [string] $Clip, [string] $IniText)
+        param([string] $Name, [string] $Clip, [string] $IniText, [string] $Script = 'Run-StatusTipCase.guest.ps1', [hashtable] $Extra = @{})
         $guestOut = "C:\mpc-test\mouse\out\$Name"
-        $job = @{
+        $job = (@{
             Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = "`"C:\mpc-test\mouse\media\$Clip`" /play"; OutDir = $guestOut
             TimeId = $idPlayerTime; HoverFromRight = 20
-        } | ConvertTo-Json
-        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
-            param($job, $out, $iniText, $user)
+        } + $Extra) | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser, $Script {
+            param($job, $out, $iniText, $user, $script)
             $ErrorActionPreference = 'Continue'
             Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
             if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -688,7 +713,7 @@ try {
             [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
             [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
 
-            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-StatusTipCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\$script -Job C:\mpc-test\mouse\job.json"
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
@@ -1728,6 +1753,37 @@ try {
     } else {
         $skipped += $hcVariants.Count
         Note Yellow 'high contrast cases not run: they need the pw clips and LAV Filters beside the player'
+    }
+
+    # 12. The information bar brought back by windowed auto-hide while paused has the current chapter (#4385).
+    #     The bar refreshed its lines from TIMER_STATS only while visible, and pause kills that timer, so a
+    #     bar hidden while playback crossed a chapter mark came back showing the chapter it had at open.
+    #     ControlState 23 is the default bars plus the information bar. Run-InfoBarHoverCase.guest.ps1 pauses
+    #     once the time label reads 6 s, past the mark at 5; the paused position is read, not assumed.
+    if (Wanted 'info-bar-chapter-after-autohide') {
+        if (-not ($haveChapterClip -and $haveLav)) {
+            $skipped++
+            Note Yellow 'info-bar-chapter-after-autohide not run: it needs chapters.mkv (ffmpeg) and LAV Filters beside the player'
+        } else {
+            $ini = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nShowOSD=0`r`nHideWindowedControls=1`r`nControlState=23`r`n"
+            $c = Invoke-StatusTipJob -Name 'info-bar-chapter-after-autohide' -Clip 'chapters.mkv' -IniText $ini `
+                -Script 'Run-InfoBarHoverCase.guest.ps1' -Extra @{ InfoBarId = $idInfoBar; PauseId = $idPlayPause; PauseAfterSec = 6 }
+            $r = $c.Run
+            $p = @()
+            if (-not $r.hiddenWhilePlaying) { $p += 'the information bar was not hidden while the clip played: auto-hide never hid the controls, so the case proves nothing' }
+            if (-not $r.shown.barVisible) { $p += 'moving the pointer to the bottom of the window did not bring the information bar back' }
+            if ("$($r.shown.time)" -notmatch '^(?:(\d+):)?(\d+):(\d+)') { $p += "the time label was not read (text '$($r.shown.time)')" }
+            elseif ($p.Count -eq 0) {
+                $pos = 3600 * [int]('0' + $Matches[1]) + 60 * [int]$Matches[2] + [int]$Matches[3]
+                $chapter = @($r.shown.lines) | Where-Object { $_.label -eq 'Chapter' } | Select-Object -First 1
+                Note Gray "      paused at '$($r.shown.time)'; Chapter '$($chapter.info)' (at open '$((@($r.atOpen.lines) | Where-Object { $_.label -eq 'Chapter' } | Select-Object -First 1).info)')"
+                $want = if ($pos -lt 5) { $null } elseif ($pos -lt 10) { 'two (2/3)' } else { 'three (3/3)' }
+                if (-not $want -or $pos -eq 10) { $p += "paused at $pos s, not clear of a chapter mark, so the case proves nothing" }
+                elseif (-not $chapter) { $p += 'the information bar has no Chapter line' }
+                elseif ($chapter.info -ne $want) { $p += "the Chapter line says '$($chapter.info)' at $pos s, expected '$want'" }
+            }
+            Complete-Case 'info-bar-chapter-after-autohide' $p
+        }
     }
 }
 finally {
