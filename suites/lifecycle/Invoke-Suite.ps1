@@ -24,6 +24,8 @@
       update-dialog-exit         Help > Check for updates, then ID_FILE_EXIT with the dialog up: the
                                  dialog is on the frame's thread, the frame stays usable, exit is 0
                                  (#4257, DrDump 1082769)
+      update-dialog-centered     Help > Check for updates: the dialog opens centred on the frame
+                                 (#4400)
       firstrun-prompt-*          the frame closed (SC_CLOSE or ID_FILE_EXIT) with the first-run update
                                  prompt up, classic and themed: exit is 0. Runs under page heap so the
                                  unfixed write into the deleted frame faults every time (#4257,
@@ -218,6 +220,19 @@ try {
         if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
         elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
         Complete-Case 'update-dialog-exit' $p
+    }
+
+    # MFC only centres a dialog that is unowned or whose owner is disabled, so the modeless update
+    # dialog opened at the frame's top left corner until it centred itself (#4400). The two centres
+    # may differ by a pixel of rounding, or more only where the frame runs off the work area.
+    if (Wanted 'update-dialog-centered') {
+        $run = Invoke-LifecycleJob -Name 'update-dialog-centered' -JobCase 'update' -How '' -IniText $plainIni
+        $f = @($run.frameRect); $d = @($run.dialogRect)
+        $dx = [math]::Abs(($f[0] + $f[2]) - ($d[0] + $d[2])) / 2
+        $dy = [math]::Abs(($f[1] + $f[3]) - ($d[1] + $d[3])) / 2
+        $p = @()
+        if ($dx -gt 2 -or $dy -gt 2) { $p += "the dialog ($($d -join ',')) is not centred on the frame ($($f -join ',')): off by $dx, $dy" }
+        Complete-Case 'update-dialog-centered' $p
     }
 
     # The first-run update prompt is up when the frame is closed. On the classic path MFC's

@@ -23,7 +23,9 @@
 #             the dialog runs on the frame's thread, whether the frame stays enabled, then the exit code
 #             after ID_FILE_EXIT is posted with the dialog still up. Before the fix the dialog ran modal
 #             on the check thread and opened during exit if the check finished late, reading settings
-#             ExitInstance had already released (#4257, DrDump 1082769).
+#             ExitInstance had already released (#4257, DrDump 1082769). The frame's and the dialog's
+#             window rects are recorded too: once modeless with an enabled owner, MFC stopped centring
+#             it and it opened at the frame's top left corner (#4400).
 #   firstrun  The ini has no UpdaterAutoCheck, so InitInstance stops on the first-run "check for updates
 #             automatically?" prompt with the frame already shown. With the prompt up, the frame is
 #             closed (How: 'sysclose' posts WM_SYSCOMMAND SC_CLOSE as the taskbar does, 'exit' posts
@@ -58,6 +60,9 @@ public static class Life {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new int[] { r.Left, r.Top, r.Right, r.Bottom }; }
     public static uint ThreadOf(IntPtr h) { uint p; return GetWindowThreadProcessId(h, out p); }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
@@ -161,6 +166,8 @@ try {
         Start-Sleep -Milliseconds 500
         $result.sameThread = ([Life]::ThreadOf($dlg) -eq [Life]::ThreadOf($frame))
         $result.frameEnabled = [Life]::IsWindowEnabled($frame)
+        $result.frameRect = [Life]::Rect($frame)
+        $result.dialogRect = [Life]::Rect($dlg)
         [void][Life]::PostMessage($frame, 0x0111, [IntPtr][int]$j.Ids.FileExit, [IntPtr]::Zero)
         $result.exited = $script:proc.WaitForExit(20000)
         $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
