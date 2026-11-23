@@ -44,6 +44,15 @@ From one fresh portable profile (`mpc-hc64.ini` beside the deployed exe):
    `SetChannel` starts (`UpdateCurrentChannelInfo`, `WM_DVB_EIT_DATA_READY`,
    `OnCurrentChannelInfoUpdated`), so it covers that path even though the
    generated streams carry no EIT.
+4. **aac-descriptor** -- ADTS AAC signalled as stream_type 0x0F plus the DVB
+   AAC descriptor 0x7C (clsid2/mpc-hc#4443). Uses the DVB-T tuner whatever
+   `-Standard` says: the encoding matrix's `h264-aac-descriptor` stream is
+   built into `<OutDir>\matrix-streams` if absent (needs TSDuck and ffmpeg,
+   as the dvb suite's matrix does), mapped onto the highest free DVB-T
+   frequency for the run, scanned and stored on its own, then tuned. Asserts
+   the matrix's 440 Hz tone reaches the endpoint, and names the stored audio
+   type (ADTS `16|15` or LATM `17|17`) in a failure. Before the fix the track
+   was stored as LATM and no audio arrived at all.
 
 Live television never ends, so unlike a file case the player is closed from
 outside; a player that has gone away by itself is the failure.

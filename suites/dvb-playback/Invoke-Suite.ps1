@@ -326,6 +326,129 @@ try {
         }
         Complete-Case "change-channel ($($fromCh.Name) to $($toCh.Name))" $problems
     }
+
+    # --- 4. ADTS AAC with a DVB AAC descriptor (clsid2/mpc-hc#4443) ---------------
+    #
+    # stream_type 0x0F plus the AAC descriptor 0x7C, as Spanish DTT sends it. Before the fix the scan stored the
+    # track as LATM (17|17), the demux pin was typed LATM, and LAV Audio produced nothing from the ADTS payload. The
+    # dvb suite asserts the stored type; this asserts the sound. It needs the DVB-T tuner whatever -Standard says,
+    # because the matrix streams are DVB-T services, and it maps one matrix stream onto a free DVB-T frequency for
+    # the run. The stream's audio is the matrix default, a 440 Hz sine.
+    $aacEntry = 'h264-aac-descriptor'
+    $aacTone = 440
+    $streamDir = Join-Path $OutDir 'matrix-streams'
+    $aacFile = Join-Path $streamDir "$aacEntry.ts"
+    if (-not (Test-Path $aacFile)) {
+        try { & (Join-Path $testsRoot 'emulator\tools\New-MatrixStreams.ps1') -EntryId $aacEntry -OutDir $streamDir *> (Join-Path $OutDir 'matrix-streams.log') } catch { }
+    }
+    $dvbt = Invoke-Command -Session $session {
+        $cat = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\{71985f48-1ca1-11d3-9cc8-00c04f7971e0}'
+        if (Test-Path -LiteralPath $cat) {
+            foreach ($ifaceName in (Get-ChildItem -LiteralPath $cat -Name | Where-Object { $_ -match '#ROOT#MEDIA#' })) {
+                foreach ($refName in (Get-ChildItem -LiteralPath "$cat\$ifaceName" -Name | Where-Object { $_ -match '^#\{' })) {
+                    $friendly = (Get-ItemProperty -LiteralPath "$cat\$ifaceName\$refName\Device Parameters" -Name FriendlyName -ErrorAction SilentlyContinue).FriendlyName
+                    if ($friendly -and (($friendly -replace '[- ]', '') -match 'DVBT')) {
+                        return [pscustomobject]@{
+                            Moniker  = ('@device:pnp:\\?\' + ($ifaceName -replace '^##\?#', '') + '\' + $refName.TrimStart('#')).ToLowerInvariant()
+                            Instance = (($ifaceName -split '#')[3..5] -join '_')
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (-not (Test-Path $aacFile)) {
+        $script:skipped++; Note Yellow "aac-descriptor not run: $aacEntry.ts could not be built (see matrix-streams.log; emulator\tools\Install-TestBed.ps1 -Phase Tsduck,FFmpeg)"
+    } elseif (-not $dvbt) {
+        $script:skipped++; Note Yellow 'aac-descriptor not run: no virtual DVB-T tuner on this guest'
+    } else {
+        $t = (Import-PowerShellDataFile $ranges)['DVBT']
+        $khz = Invoke-Command -Session $session -ArgumentList $dvbt.Instance, $t.FreqStart, $t.FreqEnd {
+            param($instance, $start, $end)
+            $used = @(Get-ChildItem "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters" -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.PSChildName })
+            for ($f = $end - ($end - $start) % 8000; $f -ge $start; $f -= 8000) { if ($used -notcontains $f) { return $f } }
+        }
+        if (-not $khz) {
+            $script:skipped++; Note Yellow 'aac-descriptor not run: no free DVB-T frequency to map the stream onto'
+        } else {
+            Invoke-Command -Session $session { New-Item -ItemType Directory -Force C:\ts\aac-descriptor | Out-Null }
+            Copy-Item $aacFile -Destination "C:\ts\aac-descriptor\$aacEntry.ts" -ToSession $session -Force
+            try {
+                Invoke-Command -Session $session -ArgumentList $dvbt.Instance, $khz, $aacEntry {
+                    param($instance, $khz, $entry)
+                    $k = "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters\$khz"
+                    New-Item -Path $k | Out-Null
+                    Set-ItemProperty $k -Name StreamLocation -Value "\??\C:\ts\aac-descriptor\$entry.ts" -Type String
+                    Set-ItemProperty $k -Name FriendlyName   -Value "$entry.ts" -Type String
+                    Set-ItemProperty $k -Name SignalLocked   -Value 1   -Type DWord
+                    Set-ItemProperty $k -Name SignalPresent  -Value 1   -Type DWord
+                    Set-ItemProperty $k -Name SignalQuality  -Value 100 -Type DWord
+                    Set-ItemProperty $k -Name SignalStrength -Value 63  -Type DWord
+                }
+                $aacIni = @(
+                    '[Settings]', 'UpdaterAutoCheck=0', 'KeepHistory=0', 'DefaultCapture=1', 'LogoFile=', 'ShowOSD=0',
+                    '[DVBConfiguration2]', "BDATuner=$($dvbt.Moniker)", 'BDASymbolRate=0',
+                    'BDABandWidth=8', "BDAScanFreqStart=$khz", "BDAScanFreqEnd=$khz",
+                    'BDAIgnoreEncryptedChannels=0', 'BDAUseOffset=0'
+                ) -join "`r`n"
+                Invoke-Command -Session $session -ArgumentList ($aacIni + "`r`n") {
+                    param($ini)
+                    Get-ChildItem 'C:\mpc-test\player' -Filter '*.ini' | ForEach-Object { [IO.File]::Delete($_.FullName) }
+                    [IO.File]::WriteAllText('C:\mpc-test\player\mpc-hc64.ini', $ini, [Text.Encoding]::Unicode)
+                }
+                $aacScanOut = "C:\mpc-test\out\aac-descriptor-scan-$stamp.channels.json"
+                $scan = Invoke-TunedRun -Tag "aac-descriptor-scan-$stamp" `
+                    -ArgumentLine "/dvbscan $khz-$khz /dvbscanout `"$aacScanOut`" /dvbbandwidth 8000 /dvbscansave" `
+                    -Extra "-WaitForExit -ExitTimeoutSec $($t.TimeoutSec)"
+                $found = Invoke-Command -Session $session -ArgumentList $aacScanOut {
+                    param($scanOut)
+                    # @() around the whole if: an if statement unrolls its array, and one channel then comes back as
+                    # a bare PSCustomObject, which has no Count in the guest's Windows PowerShell 5.1.
+                    $channels = @(if (Test-Path $scanOut) { (Get-Content $scanOut -Raw | ConvertFrom-Json).channels })
+                    [pscustomobject]@{
+                        Index  = if ($channels.Count) { $channels[0].index } else { $null }
+                        Count  = $channels.Count
+                        Stored = @(Get-Content 'C:\mpc-test\player\mpc-hc64.ini' | Where-Object { $_ -match '^\d+=' }) -join "`n"
+                    }
+                }
+                $problems = @()
+                # The stored audio track is PID|BDA type|PES type|language; ADTS is 16|15, LATM 17|17. Reported, not
+                # asserted on its own: what the user loses is the sound, and that is what is judged below.
+                $storedType = if ($found.Stored -match '\|16\|15\|') { 'ADTS (16|15)' } elseif ($found.Stored -match '\|17\|17\|') { 'LATM (17|17)' } else { 'neither ADTS nor LATM' }
+                if ($scan.timedOut -or $scan.exitCode -ne 0 -or $found.Count -ne 1) {
+                    $problems += "the scan of $khz kHz did not store the one service (exit $($scan.exitCode), $($found.Count) found)"
+                } else {
+                    Set-LastChannel $found.Index
+                    $run = Invoke-TunedRun -Tag "aac-descriptor-$stamp" -ArgumentLine '/device' -Extra "-OnAirSec $OnAirSec"
+                    if (-not $run.aliveAtEnd) { $problems += "the player went away by itself while on air (exit code $($run.exitCode))" }
+                    elseif (-not $run.closedGracefully) { $problems += 'the player did not close when asked and had to be killed' }
+                    $from = [datetime]$run.started; $to = ([datetime]$run.finished).AddSeconds(1)
+                    $hit = Invoke-Command -Session $session -ArgumentList $from, $to {
+                        param($from, $to)
+                        Get-ChildItem 'C:\Windows\System32\drivers\DriverData\Audio_Samples\SimpleAudioSample' -Filter *.wav -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Length -gt 1000 -and $_.LastWriteTime -ge $from -and $_.LastWriteTime -le $to } |
+                            Sort-Object Length | Select-Object -Last 1 -ExpandProperty FullName
+                    }
+                    if (-not $hit) {
+                        $problems += "no audio reached the endpoint (track stored as $storedType)"
+                    } else {
+                        $wav = Join-Path $OutDir 'aac-descriptor.wav'
+                        Copy-Item -FromSession $session $hit $wav -Force
+                        $checkArgs = @($wav, '--min-seconds', [math]::Max(3, $OnAirSec - 9), '--skip-seconds', 3, '--expect', "$aacTone,$aacTone", '--tolerance', [math]::Max(5, [math]::Round($aacTone * 0.02)))
+                        $output = & python (Join-Path $vaudio 'tests\wavcheck.py') @checkArgs 2>&1
+                        if ($LASTEXITCODE -ne 0) { $problems += ((($output | Where-Object { "$_" -match '^FAIL|^silent' }) -join '; ') + " (track stored as $storedType)") }
+                    }
+                }
+                Complete-Case 'aac-descriptor (ADTS AAC, stream_type 0x0F + descriptor 0x7C, #4443)' $problems
+            } finally {
+                Invoke-Command -Session $session -ArgumentList $dvbt.Instance, $khz {
+                    param($instance, $khz)
+                    Remove-Item "HKLM:\SYSTEM\PSWTuner\$instance\Device Parameters\$khz" -ErrorAction SilentlyContinue
+                    Remove-Item C:\ts\aac-descriptor -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
