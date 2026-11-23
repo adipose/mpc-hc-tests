@@ -308,7 +308,7 @@ if ($driverCases) {
 
 # --- what this run did not cover ---------------------------------------------
 
-if ($failed -eq 0 -and ('legacy-umd-shared-heap' -in $Case) -and $legacyDll -and $PlayerBinary) {
+if ($failed -eq 0 -and ('legacy-umd-shared-heap' -in $Case) -and ('legacy-umd-device' -notin $Case) -and $legacyDll -and $PlayerBinary) {
     Note DarkGray 'bound: the driver was taken through OpenAdapter, GetCaps and CloseAdapter only. CreateDevice and everything after it is where the driver does its work, and is not covered.'
 }
 
