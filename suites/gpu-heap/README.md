@@ -109,13 +109,19 @@ damage.
 write outside the driver's own allocations in 982 checks. Zero hits out of
 zero checks is not a result, so a run that checked nothing fails.
 
+`legacy-umd-device`: the same as `legacy-umd-shared-heap`, but each round also
+creates a device, one `CreateResource` texture and destroys them, with the
+record fields `CreateDevice` needs (`-DeviceProbeArgs`). Two rounds in the
+patch846 player, 2026-11-22: 1546 process-heap allocations, 26 in the 152-byte
+class, no damage.
+
 `legacy-umd-710465`: drdump ProblemID 710465, an EVR crash in
 `atiumd6a.dll+0x3758A`. That is the cleanup slot (vtable `+0x40`) of a 152-byte
 driver object with its vtable at `atiumd6a+0x2CEB90`, reading `[obj+0x68]`
 after a pointer was stored at `+0x64`. Runs the standalone probe, no player:
 it takes the driver through `CreateDevice` with the full invented record,
 issues one `CreateResource`, then plants the misaligned store itself and tears
-the device down. Passes when the `0x2CEB90` object is created and its teardown
+the device down (`--plant-710465`; no other case passes it). Passes when the `0x2CEB90` object is created and its teardown
 faults at `atiumd6a+0x3758A`. The store is planted by the probe, so this proves
 the harness reaches the crashing object and its teardown path, not what writes
 `+0x64` in the field. Needs only the driver binaries.
@@ -146,9 +152,10 @@ output there.
 - **The covered window is the adapter phase only**: `OpenAdapter`, `GetCaps`,
   `CloseAdapter`. In every damaged field dump the driver had already been
   unloaded by the time the dump was written, which puts the interesting window
-  at `CreateDevice` through graph teardown. Only `legacy-umd-710465` gets past
-  `CreateDevice`, and only standalone; the in-player cases say nothing about
-  it.
+  at `CreateDevice` through graph teardown. `legacy-umd-device` covers
+  `CreateDevice`, one `CreateResource` and `DestroyDevice` inside the player,
+  but no draws or state changes, so the device work the field crash follows is
+  only partly covered.
 - The probe's 152-byte driver object (`atiumd6a.dll+0x19442`, a vtable at `+0`
   and 3 at `+0x48`) being a bucket neighbour of the menu vectors is evidence
   for the heap-layout reading of #4257, not for the driver writing the bytes

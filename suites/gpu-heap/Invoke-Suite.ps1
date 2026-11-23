@@ -61,7 +61,7 @@ param(
     # What the device phase needs invented about hardware nobody here has: the record fields the driver
     # validates, the flag that selects the WDDM 2 memory model, and a GPU address base it will accept. The
     # probe's README explains each one. Update these as more of the record is worked out.
-    [string]   $DeviceProbeArgs = '--device --gpu-va-base 0x10000 --qai-set 0=0x260,0xc=0,0x3c=8,0x30=0x5a,0x34=0x3c,0x1f4=0x80'
+    [string]   $DeviceProbeArgs = '--device --gpu-va-base 0x20000 --qai-set 0x1f4=0x480,0xd4=2 --qai-set2 0x2a00=1,0x2a04=1,0x2c2c=1,0x2c30=1'
 )
 
 Set-StrictMode -Version Latest
@@ -221,7 +221,7 @@ if ('legacy-umd-710465' -in $Case) {
         & $probeExe --log $log --decoys 128 --dll $legacyDll `
             --qai-set '0=0x260,0x3c=8,0x30=0x5a,0x34=0x3c,0x1f4=0x480,0xd4=2' `
             --qai-set2 '0x2a00=1,0x2a04=1,0x2c2c=1,0x2c30=1' `
-            --gpu-va-base 0x20000 --rounds 1 --device --bp --bp-clear *> $null
+            --gpu-va-base 0x20000 --rounds 1 --device --bp --bp-clear --plant-710465 *> $null
         $code = $LASTEXITCODE
         $text = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
         $vtable = $text -match 'mmobj\.init: init returned 1 .*atiumd6a\.dll\+0x2ceb90'
@@ -279,15 +279,14 @@ if ($driverCases) {
         }
 
         # The window the field dumps actually point at: the driver had been through CreateDevice and teardown by
-        # the time every damaged dump was written. The probe can reach into CreateDevice but cannot yet complete
-        # it, because that needs a plausible description of hardware nobody here has. Until it can, this case
-        # reports Skipped with how far the driver got: that is a limitation of the harness, not a finding about
-        # the player, and must not read as a pass.
+        # the time every damaged dump was written. If CreateDevice stops succeeding under the invented record,
+        # this case reports Skipped with how far the driver got: that is a limitation of the harness, not a
+        # finding about the player, and must not read as a pass.
         if ('legacy-umd-device' -in $Case) {
             $c = 'legacy-umd-device'
             $r = Invoke-InPlayer -Name $c -ExtraProbeArgs $DeviceProbeArgs
             $deviceLog = Join-Path $OutDir "$c.log"
-            $fault = if (Test-Path $deviceLog) { (Get-Content $deviceLog | Select-String '!! exception' | Select-Object -First 1).Line } else { $null }
+            $fault = if (Test-Path $deviceLog) { Get-Content $deviceLog | Select-String '!! exception' | Select-Object -First 1 | ForEach-Object Line } else { $null }
             if (-not $r) {
                 if ($fault) {
                     Skip $c "the driver faulted inside the player under the invented adapter record ($($fault -replace '!! ','')); that is the harness's hardware, not the player"
