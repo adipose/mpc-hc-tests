@@ -21,3 +21,7 @@
 	path = vcamera
 	url = https://github.com/adipose/avs-vcamera.git
 	branch = main
+[submodule "amd-driver"]
+	path = amd-driver
+	url = https://github.com/adipose/amd-driver-emulator.git
+	branch = main
