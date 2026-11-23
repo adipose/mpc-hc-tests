@@ -3,8 +3,8 @@
 Integration tests for MPC-HC, run against the build of whichever branch this
 repository is mounted in. It is mounted as the `tests\` submodule of an MPC-HC
 checkout; nothing under `src/` depends on it, and a branch that never
-initialises it is unaffected. Five submodules of its own carry the test
-devices and the mock Cast receiver. The player-side additions the suites
+initialises it is unaffected. Six submodules of its own carry the test
+devices, the mock Cast receiver and the driver-side runtime stand-in. The player-side additions the suites
 drive are in upstream develop; `hooks\` carries them for older branches.
 
 Where MPC-HC already declares it (clsid2/mpc-hc#4316), the submodule is
@@ -49,6 +49,12 @@ vdisplay/             idd-vdisplay (submodule): virtual monitor that can be
                       Windows 11
 vcamera/              avs-vcamera (submodule): virtual camera with its own
                       audio pin; each frame carries its frame number
+amd-driver/           amd-driver-emulator (submodule): plays the Direct3D
+                      runtime's side of the user-mode display driver
+                      interface, so a real graphics driver can be loaded,
+                      called and bounds-checked inside a chosen process --
+                      including the player's own -- on a machine without its
+                      hardware
 testbed/              build a Hyper-V test guest from a Windows ISO unattended,
                       and prepare any guest (test signing, settings, the
                       virtual devices, a verified checkpoint)
@@ -95,6 +101,13 @@ suites/
                       popup menu must scale with the dialog that tracks it;
                       host only, no rig, skips without two monitors at
                       different DPIs
+  gpu-heap/           What a graphics user-mode driver does to the heap it
+                      shares with the player: the measured stride of a size
+                      class, and the legacy AMD D3D9 driver hosted inside a
+                      running player with guard zones on its allocations
+                      (#4257), and the drdump 710465 teardown crash
+                      reproduced standalone; host only, no rig, skips the driver cases
+                      without the driver binaries
 ```
 
 ## Unit tests
@@ -184,6 +197,12 @@ git -C tests submodule update --init --recursive
 .\tests\emulator\tools\Install-TestBed.ps1    # WDK ISO, TSDuck, ffmpeg, config
 ```
 
+The `gpu-heap` suite takes its probe from the `amd-driver` submodule, or from
+`$env:MPC_TEST_AMDPROBE` or `AmdProbeRoot` in `testbed.config.psd1` to work
+against a checkout of your own instead. It builds the probe on first use, and
+needs the driver binaries under test put in place by hand (that submodule's
+`drivers\README.md`); without them its driver cases report Skipped.
+
 The installer creates `tests\testbed.config.psd1` (gitignored); edit it to
 point at your target machine (emulator README, *Where it runs*). For a target
 with the virtual audio, display and camera devices, `testbed\` builds and
@@ -201,9 +220,9 @@ provisioning. Build MPC-HC per this repository's own docs, and:
 The player under test is the checkout this repository is mounted in --
 there is no player pin. The branch's submodule commit pins the tests, and
 this repository's own submodules pin the devices: `emulator` tracks
-`master` of bda-vtuner, `cast-mock`, `vaudio`, `vdisplay` and `vcamera`
-track `main` of castv2-mock-device, vaudio-endpoint, idd-vdisplay and
-avs-vcamera. A bump commit is
+`master` of bda-vtuner, `cast-mock`, `vaudio`, `vdisplay`, `vcamera` and
+`amd-driver` track `main` of castv2-mock-device, vaudio-endpoint,
+idd-vdisplay, avs-vcamera and amd-driver-emulator. A bump commit is
 the record of the tested pairing.
 `suites/dvb/BdaRenderMap.ps1` documents which channel-record spellings the
 player emits; revisit it when the JSON format changes.
