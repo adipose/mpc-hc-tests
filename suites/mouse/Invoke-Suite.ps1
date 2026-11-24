@@ -112,6 +112,10 @@ $idKeysPage     = Get-ResourceId 'IDD_PPAGEACCELTBL' 10032
 $idKeysList     = Get-ResourceId 'IDC_LIST1' 11160               # the keys list on the Keys page
 $idWinHotkey    = Get-ResourceId 'IDC_WINHOTKEY1' 11070          # the in-place hotkey editor
 $idKeysFilter   = Get-ResourceId 'IDC_EDIT3' 11061               # the filter box above the keys list
+$idShadersPage  = Get-ResourceId 'IDD_PPAGESHADERS' 10031
+$idPresetCombo  = Get-ResourceId 'IDC_COMBO1' 11000              # the Shaders page's presets combo (CBS_DROPDOWN)
+$idPresetSave   = Get-ResourceId 'IDC_BUTTON4' 11123             # Save preset
+$idPresetDelete = Get-ResourceId 'IDC_BUTTON5' 11124             # Delete preset
 $idFontCombo    = Get-ResourceId 'IDC_COMBO5' 11004           # OSD font: over a hundred items
 $idSeekbarCombo = Get-ResourceId 'IDC_TIMEONSEEKBAR' 22100    # three items
 
@@ -261,7 +265,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-InfoBarHoverCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-ShaderPresetCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-InfoBarHoverCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -404,15 +408,18 @@ try {
     # The Keys job: one launch of the player with no media, Options opened at the Keys page,
     # Run-KeysEditCase driving a real double-click at the keys list. Same scheduled-task shape as the
     # playlist job.
+    # -Script and -Extra let another Options page case reuse it (the shader presets case).
     function Invoke-KeysJob {
-        param([string] $Name, [string] $IniText)
+        param([string] $Name, [string] $IniText, [string] $Script = 'Run-KeysEditCase.guest.ps1', [hashtable] $Extra = @{ ListId = $idKeysList })
         $guestOut = "C:\mpc-test\mouse\out\$Name"
-        $job = @{
+        $jt = @{
             Exe = 'C:\mpc-test\mouse\player\mpc-hc64.exe'; ArgumentLine = ''; OutDir = $guestOut
-            PostCommand = $idOptions; DialogTitle = 'Options'; ListId = $idKeysList
-        } | ConvertTo-Json
-        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser {
-            param($job, $out, $iniText, $user)
+            PostCommand = $idOptions; DialogTitle = 'Options'
+        }
+        foreach ($k in $Extra.Keys) { $jt[$k] = $Extra[$k] }
+        $job = $jt | ConvertTo-Json
+        $json = Invoke-Command -Session $session -ArgumentList $job, $guestOut, $IniText, $consoleUser, $Script {
+            param($job, $out, $iniText, $user, $script)
             $ErrorActionPreference = 'Continue'
             Get-Process mpc-hc64, combocase -ErrorAction SilentlyContinue | Stop-Process -Force
             if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -424,7 +431,7 @@ try {
             [IO.File]::WriteAllText('C:\mpc-test\mouse\player\mpc-hc64.ini', $iniText, [Text.Encoding]::Unicode)
             [IO.File]::WriteAllText('C:\mpc-test\mouse\job.json', $job)
 
-            $taskArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\Run-KeysEditCase.guest.ps1 -Job C:\mpc-test\mouse\job.json'
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\mpc-test\mouse\$script -Job C:\mpc-test\mouse\job.json"
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcMouseCase' -Action $action -Principal $principal -Force | Out-Null
@@ -443,6 +450,51 @@ try {
         $run = $json | ConvertFrom-Json
         if ($run.error) { throw "job $Name failed on the guest: $($run.error)" }
         [pscustomobject]@{ Run = $run; Dir = $local }
+    }
+
+    # The shader presets case (ledger 129): alpha retyped over in the presets combo, then Save or
+    # Delete. Each step is judged on the list the combo holds afterwards. Only deldrop fails on
+    # develop; the guest script's header says why typing with the list closed does not.
+    function Test-ShaderPresets {
+        param($Job)
+        $run = $Job.Run
+        $start = @($run.presetsAtStart)
+        if (($start -join ',') -ne 'alpha,bravo,delta') { return @("the presets combo started with '$($start -join ',')', expected alpha,bravo,delta from the ini") }
+        $problems = @()
+        $expect = @{ save = 'charlie'; delnew = 'zulu'; deldrop = 'b'; delexist = 'delta' }
+        foreach ($name in 'save', 'delnew', 'deldrop', 'delexist') {
+            $s = $run.$name
+            if (-not $s.alphaAtStart) { $problems += "$name`: alpha was already gone before the step"; continue }
+            if (-not $s.focusIsEdit) { $problems += "$name`: the click did not put the focus in the combo's edit"; continue }
+            if ("$($s.typed)" -ne $expect[$name]) { $problems += "$name`: the edit held '$($s.typed)' after typing, expected '$($expect[$name])'"; continue }
+            if (-not $s.dialogOpen) { $problems += "$name`: the Options dialog closed"; continue }
+            $after = @($s.presetsAfter)
+            switch ($name) {
+                'save' {
+                    if ($after -notcontains 'charlie') { $problems += "save: Save after retyping alpha as charlie did not add charlie to the list (now '$($after -join ',')')" }
+                    if ($after -notcontains 'alpha') { $problems += "save: alpha left the list" }
+                }
+                'delexist' {
+                    # An exact match selects delta on any build.
+                    if ($after -contains 'delta') { $problems += "delexist: Delete with delta typed left delta in the list" }
+                    if ($after -notcontains 'alpha') { $problems += "delexist: Delete with delta typed removed alpha" }
+                }
+                'deldrop' {
+                    if (-not $s.dropped -or -not $s.droppedAfterTyping) { $problems += "deldrop: the list was not dropped while typing, so nothing was tested"; break }
+                    if ($s.curSelAfterClose -ne 0 -or "$($s.textAfterClose)" -eq 'alpha') {
+                        $problems += "deldrop: closing the list left selection $($s.curSelAfterClose) and text '$($s.textAfterClose)', not the old selection under a different name, so nothing was tested"; break
+                    }
+                    $shown = "$($s.textAfterClose)"
+                    if ($after -notcontains 'alpha') { $problems += "deldrop: Delete with '$shown' showing removed alpha, the preset selected before the list dropped (now '$($after -join ',')')" }
+                    if ($after -contains $shown) { $problems += "deldrop: Delete with '$shown' showing left '$shown' in the list" }
+                }
+                'delnew' {
+                    if ($after -notcontains 'alpha') { $problems += "delnew: Delete with zulu typed removed alpha, the preset selected before retyping (now '$($after -join ',')')" }
+                    if ($s.buttonEnabled) { $problems += "delnew: Delete was enabled with a name typed that matches no preset" }
+                }
+            }
+        }
+        $problems
     }
 
     # The Options/theme job: one launch of the player, Run-OptionsThemeCase driving the case the job
@@ -1161,6 +1213,16 @@ try {
         $c = Invoke-KeysJob -Name 'keys-edit' -IniText $keysIni
         if (Wanted 'keys-double-click-edits') { Complete-Case 'keys-double-click-edits' (Test-KeysEdit $c) }
         if (Wanted 'keys-esc-cancels-text-edit') { Complete-Case 'keys-esc-cancels-text-edit' (Test-KeysEsc $c) }
+    }
+
+    # 5b. The Shaders page of Options: Save and Delete after the selected preset's name is typed over
+    #     (ledger 129). Plays nothing; its own player instance through the Keys job's shape.
+    if (Wanted 'shader-preset-retype-save-delete') {
+        $spIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idShadersPage`r`n`r`n" +
+                 "[Dialogs\DebugShaders]`r`nFirstRun=0`r`n`r`n" +
+                 "[Shaders\Presets]`r`n0=alpha`r`nPreResize0=`r`nPostResize0=`r`n1=bravo`r`nPreResize1=`r`nPostResize1=`r`n2=delta`r`nPreResize2=`r`nPostResize2=`r`n"
+        $c = Invoke-KeysJob -Name 'shader-presets' -IniText $spIni -Script 'Run-ShaderPresetCase.guest.ps1' -Extra @{ ComboId = $idPresetCombo; SaveId = $idPresetSave; DeleteId = $idPresetDelete }
+        Complete-Case 'shader-preset-retype-save-delete' (Test-ShaderPresets $c)
     }
 
     # The Options/theme case (theme 14b), one guest script driven through Invoke-OptionsThemeJob;
