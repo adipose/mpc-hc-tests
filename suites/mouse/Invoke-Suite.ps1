@@ -116,6 +116,10 @@ $idShadersPage  = Get-ResourceId 'IDD_PPAGESHADERS' 10031
 $idPresetCombo  = Get-ResourceId 'IDC_COMBO1' 11000              # the Shaders page's presets combo (CBS_DROPDOWN)
 $idPresetSave   = Get-ResourceId 'IDC_BUTTON4' 11123             # Save preset
 $idPresetDelete = Get-ResourceId 'IDC_BUTTON5' 11124             # Delete preset
+$idExtFiltPage  = Get-ResourceId 'IDD_PPAGEEXTERNALFILTERS' 10030
+$idExtFiltList  = Get-ResourceId 'IDC_LIST1' 11160               # the External Filters page's filter list
+$idAddMajorType = Get-ResourceId 'IDC_BUTTON5' 11124             # Add Media Type...
+$idMediaTypeCb  = Get-ResourceId 'IDC_COMBO1' 11000              # Select Media Type's combo (CBS_DROPDOWN)
 $idFontCombo    = Get-ResourceId 'IDC_COMBO5' 11004           # OSD font: over a hundred items
 $idSeekbarCombo = Get-ResourceId 'IDC_TIMEONSEEKBAR' 22100    # three items
 
@@ -265,7 +269,7 @@ try {
         foreach ($d in 'C:\mpc-test', 'C:\mpc-test\mouse', 'C:\mpc-test\mouse\out') { if (-not (Test-Path $d)) { New-Item -ItemType Directory $d | Out-Null } }
     }
     Copy-Item -ToSession $session $zip 'C:\mpc-test\mouse\player.zip' -Force
-    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-ShaderPresetCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-InfoBarHoverCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
+    foreach ($f in 'MouseInput.guest.ps1', 'Run-ComboHoverCase.guest.ps1', 'Run-PlaylistInputCase.guest.ps1', 'Run-KeysEditCase.guest.ps1', 'Run-ShaderPresetCase.guest.ps1', 'Run-MediaTypeCase.guest.ps1', 'Run-OptionsThemeCase.guest.ps1', 'Run-FileDialogThemeCase.guest.ps1', 'Run-StatusTipCase.guest.ps1', 'Run-InfoBarHoverCase.guest.ps1', 'Run-PlayerWindowCase.guest.ps1', 'Run-FullscreenFrameCase.guest.ps1', 'Run-MenuReloadCase.guest.ps1', 'Run-EditMenuLeakCase.guest.ps1', 'Run-HighContrastCase.guest.ps1', 'Run-MenuContentCase.guest.ps1') { Copy-Item -ToSession $session (Join-Path $PSScriptRoot $f) 'C:\mpc-test\mouse\' -Force }
     # The fullscreen frame cases record the screen on the guest with the host's ffmpeg.
     $ffmpegExe = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegExe) { Copy-Item -ToSession $session $ffmpegExe 'C:\mpc-test\mouse\ffmpeg.exe' -Force }
@@ -492,6 +496,60 @@ try {
                     if ($after -notcontains 'alpha') { $problems += "delnew: Delete with zulu typed removed alpha, the preset selected before retyping (now '$($after -join ',')')" }
                     if ($s.buttonEnabled) { $problems += "delnew: Delete was enabled with a name typed that matches no preset" }
                 }
+            }
+        }
+        $problems
+    }
+
+    # The Select Media Type case (ledger 132): three types added to the seeded filter, then read back
+    # from the ini the player wrote on Options OK. Only the dropped step fails on develop; the guest
+    # script's header says why typing with the list closed does not.
+    $mtVideo = '{73646976-0000-0010-8000-00AA00389B71}'   # MEDIATYPE_Video, entry 1
+    $mtText  = '{73747874-0000-0010-8000-00AA00389B71}'   # MEDIATYPE_Text, entry 3
+    $mtClosedGuid  = '{e436eb7d-524f-11ce-9f53-0020af0ba770}'
+    $mtDroppedGuid = '{e436eb7e-524f-11ce-9f53-0020af0ba770}'
+    function Test-MediaTypes {
+        param($Job)
+        $run = $Job.Run
+        if ($run.filterCount -lt 1) { return @('the seeded filter is not in the External Filters list') }
+        if (-not $run.addEnabled) { return @('Add Media Type stayed disabled after a click on the seeded filter') }
+        $problems = @()
+        foreach ($name in 'pick', 'closed', 'dropped') {
+            $s = $run.$name
+            if (-not $s.dialogOpened) { $problems += "$name`: Add Media Type did not open Select Media Type"; continue }
+            if ($s.PSObject.Properties['dialogStuck']) { $problems += "$name`: the dialog did not close on OK" }
+            if ($s.PSObject.Properties['messageBox']) { $problems += "$name`: a message box '$($s.messageBox)' came up" }
+        }
+        $want = @{ closed = $mtClosedGuid; dropped = $mtDroppedGuid }
+        foreach ($name in 'closed', 'dropped') {
+            $s = $run.$name
+            if (-not $s.dialogOpened) { continue }
+            if (-not $s.focusIsEdit) { $problems += "$name`: the click did not put the focus in the combo's edit"; continue }
+            if ("$($s.typed)" -ne $want[$name]) { $problems += "$name`: the edit held '$($s.typed)' after typing, expected $($want[$name])" }
+        }
+        $d = $run.dropped
+        if ($d.dialogOpened) {
+            if (-not $d.dropped -or -not $d.droppedAfterTyping) { $problems += 'dropped: the list was not dropped while typing, so nothing was tested' }
+            elseif ($d.droppedAfterClose) { $problems += 'dropped: the click on the caption did not close the list, so nothing was tested' }
+            elseif ($d.curSelAfterClose -ne 3 -or "$($d.textAfterClose)" -ne $mtDroppedGuid) {
+                $problems += "dropped: closing the list left selection $($d.curSelAfterClose) and text '$($d.textAfterClose)', not the old selection under the typed GUID, so nothing was tested"
+            }
+        }
+        $ini = Join-Path $Job.Dir 'mpc-hc64.ini'
+        if (-not (Test-Path $ini)) { return $problems + 'the player left no ini to read the stored types from' }
+        $section = $null; $mods = @{}
+        foreach ($line in Get-Content $ini) {
+            if ($line -match '^\[(.*)\]$') { $section = $Matches[1]; continue }
+            if ($section -eq 'Filters\x64\0000' -and $line -match '^(mod\d{4})=(.*)$') { $mods[$Matches[1]] = $Matches[2] }
+        }
+        # Each major type is stored with a NULL subtype after it.
+        $expect = [ordered]@{ pick = @('mod0000', $mtVideo); closed = @('mod0002', $mtClosedGuid); dropped = @('mod0004', $mtDroppedGuid) }
+        foreach ($name in $expect.Keys) {
+            $key, $guid = $expect[$name]
+            $got = "$($mods[$key])"
+            if ($got -ne $guid) {
+                $what = if ($got -eq $mtText) { ' (MEDIATYPE_Text, the entry selected before the list dropped)' } elseif (-not $got) { ' (nothing)' } else { '' }
+                $problems += "$name`: $key stored $got$what, expected $guid"
             }
         }
         $problems
@@ -1223,6 +1281,18 @@ try {
                  "[Shaders\Presets]`r`n0=alpha`r`nPreResize0=`r`nPostResize0=`r`n1=bravo`r`nPreResize1=`r`nPostResize1=`r`n2=delta`r`nPreResize2=`r`nPostResize2=`r`n"
         $c = Invoke-KeysJob -Name 'shader-presets' -IniText $spIni -Script 'Run-ShaderPresetCase.guest.ps1' -Extra @{ ComboId = $idPresetCombo; SaveId = $idPresetSave; DeleteId = $idPresetDelete }
         Complete-Case 'shader-preset-retype-save-delete' (Test-ShaderPresets $c)
+    }
+
+    # 5c. Options > External Filters > Add Media Type: the Select Media Type dialog must store the type
+    #     its box shows, after a typed GUID replaces a picked entry (ledger 132). Plays nothing; its own
+    #     player instance through the Keys job's shape. AVI Splitter is in quartz.dll on every guest.
+    if (Wanted 'media-type-typed-guid-stored') {
+        $avi = '{1B544C20-FD0B-11CE-8C63-00AA0044B51E}'
+        $mtIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idExtFiltPage`r`n`r`n" +
+                 "[Filters\x64\0000]`r`nSourceType=0`r`nEnabled=1`r`nName=AVI Splitter`r`nCLSID=$avi`r`n" +
+                 "DisplayName=@device:sw:{083863F1-70DE-11D0-BD40-00A0C911CE86}\$avi`r`nLoadType=0`r`nMerit=6291456`r`n"
+        $c = Invoke-KeysJob -Name 'media-type' -IniText $mtIni -Script 'Run-MediaTypeCase.guest.ps1' -Extra @{ ListId = $idExtFiltList; AddTypeId = $idAddMajorType; ComboId = $idMediaTypeCb; ClosedGuid = $mtClosedGuid; DroppedGuid = $mtDroppedGuid }
+        Complete-Case 'media-type-typed-guid-stored' (Test-MediaTypes $c)
     }
 
     # The Options/theme case (theme 14b), one guest script driven through Invoke-OptionsThemeJob;

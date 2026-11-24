@@ -213,6 +213,19 @@ public class MouseRig {
     KEYINPUT[] a = new KEYINPUT[] { d, u };
     return SendInput(2, a, Marshal.SizeOf(typeof(KEYINPUT)));
   }
+  // Text typed as real key presses, one character at a time with KEYEVENTF_UNICODE, so punctuation such as
+  // braces and dashes needs no layout or shift state. The focused window gets WM_KEYDOWN VK_PACKET and the
+  // WM_CHAR from the input queue, as it would from an IME.
+  public static uint KeyText(string s) {
+    uint sent = 0;
+    foreach (char c in s) {
+      KEYINPUT d = new KEYINPUT(); d.type = 1; d.ki.wVk = 0; d.ki.wScan = c; d.ki.dwFlags = 0x0004;   // KEYEVENTF_UNICODE
+      KEYINPUT u = d; u.ki.dwFlags = 0x0004 | 0x0002;                                                   // | KEYEVENTF_KEYUP
+      sent += SendInput(2, new KEYINPUT[] { d, u }, Marshal.SizeOf(typeof(KEYINPUT)));
+      System.Threading.Thread.Sleep(30);
+    }
+    return sent;
+  }
   // The click and the move after it injected in one call, so nothing can run in between.
   public static uint ClickThenMove(int x, int y) {
     List<INPUT> l = new List<INPUT>(); l.Add(Ev(LDOWN, 0, 0)); l.Add(Ev(LUP, 0, 0)); l.Add(Ev(MOVE | ABSOLUTE, x, y)); return Send(l);
