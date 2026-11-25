@@ -2,7 +2,7 @@
 # input (SendInput) and records what happened; the host does the asserting. One JSON object goes to
 # <OutDir>\result.json, with screen captures of the player window beside it.
 #
-# Two behaviours, from the playlist becoming a virtual list (c3f74b6) and its follow-up fixes:
+# Three behaviours, from the playlist becoming a virtual list (c3f74b6) and its follow-up fixes:
 #
 #   a. playlist-type-to-find         54b5aaa66b restored type-ahead search on the virtual list via
 #      LVN_ODFINDITEM, and c215310313 (#3844) changed its `idx > startidx` to `idx >= startidx`: the
@@ -19,6 +19,11 @@
 #      watches for an Edit child of the list holding the time. (The issue's item 2, a right-click below
 #      the last item opening an editor, was dropped: it passes on 2.7.1.16, a build without the fix, so
 #      it cannot fail.)
+#
+#   c. playlist-type-to-find-uppercase   ledger 144: LVN_ODFINDITEM carries the typed text in the case it
+#      was typed, and the handler lowercased only the labels, so a capital (Shift or Caps Lock) never
+#      matched anything. Shift+C, a plain `c` as the control, and `hArL` for the 3+ character substring
+#      path. Fixed, all three land on charlie; unfixed, only the plain `c` does.
 #
 # The list is another process's window: rows and cells are read with LVM_GETITEMRECT/LVM_GETITEMTEXTW
 # through memory allocated in the player (VirtualAllocEx), and selection with LVM_GETNEXTITEM, as the
@@ -346,6 +351,45 @@ public static extern System.IntPtr SendMessageTimeoutW(System.IntPtr hWnd, uint 
         nameRow1         = (Read-ListItemText $list 1 0)
     }
     Save-PlayerShot 'b-after-escape'
+
+    # --- case c: playlist-type-to-find-uppercase -------------------------------------------------
+    # Each step clicks a row that is not already selected (a second click on the selected row would start
+    # a rename), waits out the type-ahead timeout first, and types with real keys.
+    # c1: alpha selected, Shift+C. The capital reaches the handler as typed; fixed, it lands on charlie (2).
+    # c2: bravo selected, a plain `c`: the control, charlie under both builds.
+    # c3: alpha selected, `hArL` (h, Shift+A, r, Shift+L): three or more characters search the whole
+    #     label, so this is the substring path. Fixed, charlie; unfixed, nothing matches past `h`.
+    function Invoke-TypeStep {
+        param([int] $Row, [scriptblock] $Type, [string] $Shot)
+        Start-Sleep -Milliseconds ([Math]::Max(2000, 3 * [int][MpcPlWin]::GetDoubleClickTime()))
+        $p = NamePoint $Row
+        Move-PointerGlide $p.X $p.Y
+        [void][MouseRig]::Click()
+        Start-Sleep -Milliseconds 400
+        $before = Get-ListSelection $list
+        & $Type
+        $after = $before
+        $t0 = Get-Date
+        while (((Get-Date) - $t0).TotalSeconds -lt 1.5 -and $after -eq $before) {
+            Start-Sleep -Milliseconds 100
+            $after = Get-ListSelection $list
+        }
+        # Let a later keystroke of a multi-character search move it on, then read the final answer.
+        Start-Sleep -Milliseconds 300
+        $after = Get-ListSelection $list
+        Save-PlayerShot $Shot
+        [ordered]@{ before = $before; after = $after }
+    }
+    $result.caseC = [ordered]@{
+        shiftC = (Invoke-TypeStep 0 { [void][MouseRig]::KeyPressWith(0x10, 0x43) } 'c1-shift-c')
+        lowerC = (Invoke-TypeStep 1 { [void][MouseRig]::KeyPress(0x43) } 'c2-lower-c')
+        mixedHarl = (Invoke-TypeStep 0 {
+            [void][MouseRig]::KeyPress(0x48); Start-Sleep -Milliseconds 80          # h
+            [void][MouseRig]::KeyPressWith(0x10, 0x41); Start-Sleep -Milliseconds 80  # A
+            [void][MouseRig]::KeyPress(0x52); Start-Sleep -Milliseconds 80          # r
+            [void][MouseRig]::KeyPressWith(0x10, 0x4C)                              # L
+        } 'c3-mixed-harl')
+    }
 } catch {
     $result.error = $_.Exception.Message + ' @ ' + $_.InvocationInfo.PositionMessage
 } finally {

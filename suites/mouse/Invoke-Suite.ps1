@@ -740,6 +740,26 @@ try {
         $problems
     }
 
+    # Ledger 144: type-to-find with capitals. Each step must start on the row it clicked, or the keys
+    # were typed from somewhere else and the answer means nothing.
+    function Test-PlaylistTypeToFindUppercase {
+        param($Job)
+        $problems = @(Test-PlaylistBase $Job)
+        if ($problems.Count) { return $problems }
+        $c = $Job.Run.caseC
+        if (-not $c) { return $problems + 'the guest run ended before the uppercase type-to-find steps' }
+        foreach ($s in @(
+                @{ Key = 'shiftC'; From = 0; Typed = "Shift+C with alpha selected" },
+                @{ Key = 'lowerC'; From = 1; Typed = "'c' with bravo selected" },
+                @{ Key = 'mixedHarl'; From = 0; Typed = "'hArL' with alpha selected" })) {
+            $r = $c.($s.Key)
+            if (-not $r) { $problems += "no record for $($s.Typed)"; continue }
+            if ($r.before -ne $s.From) { $problems += "the click before $($s.Typed) left entry $($r.before) selected, expected $($s.From)"; continue }
+            if ($r.after -ne 2) { $problems += "typing $($s.Typed) left entry $($r.after) selected, expected 2 (charlie)" }
+        }
+        $problems
+    }
+
     function Test-PlaylistTimeColumn {
         param($Job)
         $problems = @(Test-PlaylistBase $Job)
@@ -1247,15 +1267,16 @@ try {
     #    (54b5aaa66b, c215310313; #3844) and a click on the time column that must not open an in-place
     #    editor holding the time (419dadc920; #3885 item 1). LoopMode=0 and AfterPlayback=0 so nothing
     #    advances by itself. The guest script's header has the reasoning for each assertion.
-    if (-not (Wanted 'playlist-type-to-find', 'playlist-click-time-column-no-edit')) {
+    if (-not (Wanted 'playlist-type-to-find', 'playlist-click-time-column-no-edit', 'playlist-type-to-find-uppercase')) {
     } elseif ($havePlaylistMedia -and $haveLav) {
         $plIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nAllowMultipleInstances=0`r`nLoop=0`r`nLoopMode=0`r`nAfterPlayback=0`r`nShowOSD=0`r`n`r`n[ToolBars\Playlist]`r`nVisible=1`r`n"
         $argLine = (@('alpha', 'bravo', 'charlie', 'delta', 'doge', 'echo') | ForEach-Object { '"C:\mpc-test\mouse\media\pl\{0}.mkv"' -f $_ }) -join ' '
         $c = Invoke-PlaylistJob -Name 'playlist-input' -ArgumentLine "$argLine /play" -IniText $plIni
         Complete-Case 'playlist-type-to-find' (Test-PlaylistTypeToFind $c)
         Complete-Case 'playlist-click-time-column-no-edit' (Test-PlaylistTimeColumn $c)
+        Complete-Case 'playlist-type-to-find-uppercase' (Test-PlaylistTypeToFindUppercase $c)
     } else {
-        $skipped += 2
+        $skipped += 3
         $why = @()
         if (-not $havePlaylistMedia) { $why += 'no media\pl-clip.mkv and no ffmpeg on PATH to make one' }
         if (-not $haveLav) { $why += "no LAVFilters64 beside the player ($playerDir)" }

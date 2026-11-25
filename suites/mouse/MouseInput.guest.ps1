@@ -213,6 +213,17 @@ public class MouseRig {
     KEYINPUT[] a = new KEYINPUT[] { d, u };
     return SendInput(2, a, Marshal.SizeOf(typeof(KEYINPUT)));
   }
+  // A key pressed with a modifier held (0x10 Shift, 0x11 Ctrl, 0x12 Alt), all four halves in one call so
+  // nothing runs between them: Shift+C gives the focused window WM_KEYDOWN VK_SHIFT, then 'C' and WM_CHAR 'C',
+  // as a hand typing a capital does. KeyText sends VK_PACKET instead and never touches the shift state.
+  public static uint KeyPressWith(ushort modVk, ushort vk) {
+    KEYINPUT md = new KEYINPUT(); md.type = 1; md.ki.wVk = modVk; md.ki.wScan = (ushort)MapVirtualKey(modVk, 0);
+    KEYINPUT mu = md; mu.ki.dwFlags = 0x0002;
+    KEYINPUT d = new KEYINPUT(); d.type = 1; d.ki.wVk = vk; d.ki.wScan = (ushort)MapVirtualKey(vk, 0);
+    KEYINPUT u = d; u.ki.dwFlags = 0x0002;
+    KEYINPUT[] a = new KEYINPUT[] { md, d, u, mu };
+    return SendInput(4, a, Marshal.SizeOf(typeof(KEYINPUT)));
+  }
   // Text typed as real key presses, one character at a time with KEYEVENTF_UNICODE, so punctuation such as
   // braces and dashes needs no layout or shift state. The focused window gets WM_KEYDOWN VK_PACKET and the
   // WM_CHAR from the input queue, as it would from an IME.

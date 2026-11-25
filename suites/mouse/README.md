@@ -52,6 +52,7 @@ a window, and `GetCursorPos` fails inside the process under test.
 | `combo-hover-keeps-selected-item-<theme>` | the OSD font and "Time on seekbar" combos on the Theme options page | as the first control; and closing without a pick leaves the selection alone |
 | `combo-click-selects-item-<theme>` | the same two combos | clicking a list item selects that item |
 | `playlist-type-to-find` | typing a name's first letter with the selection just before two entries that match it | the selection lands on the entry the search starts from, not past it (#3844) |
+| `playlist-type-to-find-uppercase` | Shift+C with alpha selected, a plain `c` with bravo selected, then `hArL` (Shift for the capitals) with alpha selected | each lands on charlie: the typed text is compared case-insensitively, for the one-letter prefix and the 3+ character substring alike (ledger 144; develop stays put on both capitals) |
 | `playlist-click-time-column-no-edit` | a click on an entry's time column | the editor that may open holds the entry's name, never the time cell's text (#3885 item 1) |
 | `keys-double-click-edits` | a real double-click on a key entry's hotkey cell in Options > Player > Keys | the in-place hotkey editor opens within 1 s (#3853) |
 | `keys-esc-cancels-text-edit` | same run: a click into the RemoteCmd and then the RepCnt cell of a selected key entry, real keys typed, then Esc | each cell keeps its old value (RepCnt stays 5) and Apply stays disabled |
@@ -208,8 +209,8 @@ takes a job file, and writes `result.json` and its captures to the job's
 `OutDir`; then a job function and an assertion in `Invoke-Suite.ps1` beside
 the combo ones. `Start-TargetWindow` starts the program and hands back the
 window to work in; `Move-PointerGlide`, `[MouseRig]::Click()`,
-`[MouseRig]::ClickThenMove()`, `ButtonDown()`/`ButtonUp()`, `Wheel()` and
-`KeyPress()` are the input; `[MouseRig]::ListItemRect()` aims at a list view
+`[MouseRig]::ClickThenMove()`, `ButtonDown()`/`ButtonUp()`, `Wheel()`,
+`KeyPress()`, `KeyPressWith()` (a key with Shift, Ctrl or Alt held) and `KeyText()` are the input; `[MouseRig]::ListItemRect()` aims at a list view
 row of another process (`LVM_GETITEMRECT` through memory allocated in it, in
 screen coordinates); `Save-ScreenRegion` and `Save-WindowShot` (a window's part
 of the screen, or the whole screen when the window is mostly off it) are the
