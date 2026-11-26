@@ -30,6 +30,8 @@
                                  prompt up, classic and themed: exit is 0. Runs under page heap so the
                                  unfixed write into the deleted frame faults every time (#4257,
                                  DrDump 147447113)
+      libass-keeps-subpic-queue-size  libass on and SPCSize2=10 in the ini, Options opened at
+                                 Subtitles and cancelled, then WM_CLOSE: the ini still says 10
 
     Nothing here needs real input: these are posted commands and the evidence is a WinEvent hook, so
     the scheduled task is only there to put the player in the console session.
@@ -96,6 +98,7 @@ $ids = @{
     UpdateText  = Get-ResourceId 'IDC_UPDATE_DLG_TEXT' 22051
 }
 $idMiscPage = Get-ResourceId 'IDD_PPAGEMISC' 10052
+$idSubtitlesPage = Get-ResourceId 'IDD_PPAGESUBTITLES' 10026
 
 $playerDir = if ($PlayerBinary) { Split-Path (Resolve-Path $PlayerBinary).Path -Parent }
              elseif (Test-Path (Join-Path $repoRoot 'bin\mpc-hc_x64\mpc-hc64.exe')) { Join-Path $repoRoot 'bin\mpc-hc_x64' }
@@ -274,6 +277,22 @@ try {
                 else { Remove-Item $k -Recurse -ErrorAction SilentlyContinue }
             }
         }
+    }
+
+    # With libass on, GetRenderersSettings() turned the subtitle queue off by writing 0 into the same
+    # field SaveSettings stores as SPCSize2, so one launch lost the user's buffer size for good. libass
+    # still means no queue; the stored size must survive it. Nothing calls GetRenderersSettings() on
+    # an idle player, so Options is opened at the Subtitles page, which does, and cancelled.
+    if (Wanted 'libass-keeps-subpic-queue-size') {
+        $libassIni = "[Settings]`r`nUpdaterAutoCheck=0`r`nKeepHistory=0`r`nLastUsedPage=$idSubtitlesPage`r`nRenderSSAUsingLibass=1`r`nSPCSize2=10`r`n"
+        $run = Invoke-LifecycleJob -Name 'libass-keeps-subpic-queue-size' -JobCase 'close' -How '' -IniText $libassIni
+        $p = @()
+        if (-not $run.exited) { $p += 'the player did not exit within 20 s' }
+        elseif ($run.exitCode -ne 0) { $p += ('exit code 0x{0:X8}' -f [uint32]$run.exitCode) }
+        $saved = [regex]::Match($run.iniAfter, '(?m)^SPCSize2=(\d+)')
+        if (-not $saved.Success) { $p += 'no SPCSize2 in the ini after exit' }
+        elseif ($saved.Groups[1].Value -ne '10') { $p += "SPCSize2 saved as $($saved.Groups[1].Value), not 10" }
+        Complete-Case 'libass-keeps-subpic-queue-size' $p
     }
 
     # The reset guard. Options opens at Miscellaneous; ResetMarker is a key only a reset removes.

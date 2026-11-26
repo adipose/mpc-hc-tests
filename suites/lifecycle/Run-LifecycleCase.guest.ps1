@@ -34,6 +34,11 @@
 #             help prompt context back through a pointer into the deleted CMainFrame once the prompt
 #             returned (#4257, DrDump 147447113). The host turns on page heap for the exe so that write
 #             faults on every run rather than only when the heap happens to decommit the page.
+#   close     Options opens at the page LastUsedPage names, is cancelled, and the frame is closed with
+#             WM_CLOSE. Recorded: the exit code and the ini afterwards, so the host can check what the
+#             player saved from the ini it was given. With libass on, GetRenderersSettings() (which
+#             the Subtitles page calls) wrote 0 over the user's subtitle buffer size, and SaveSettings
+#             then wrote that back as SPCSize2.
 param([Parameter(Mandatory)] [string] $Job)
 
 $ErrorActionPreference = 'Stop'
@@ -206,6 +211,19 @@ try {
             $result.exited = $true
             $result.exitCode = $script:proc.ExitCode
         }
+    } elseif ($j.Case -eq 'close') {
+        # Options opens at the page LastUsedPage names; Cancel, then WM_CLOSE to the frame
+        $cancel = Wait-For { $b = [Life]::Child($sheet, 2); if ($b -ne [IntPtr]::Zero) { $b } }   # IDCANCEL
+        if (-not $cancel) { throw 'no Cancel button on Options' }
+        [void][Life]::PostMessage($cancel, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+        $closed = Wait-For { if (@([Life]::TopLevel($pid0, '#32770')).Count -eq 0) { $true } }
+        if (-not $closed) { throw 'Options did not close on Cancel' }
+        Start-Sleep -Milliseconds 500
+        [void][Life]::PostMessage($frame, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+        $result.exited = $script:proc.WaitForExit(20000)
+        $result.exitCode = if ($result.exited) { $script:proc.ExitCode } else { $null }
+        $ini = [IO.Path]::ChangeExtension($j.Exe, 'ini')
+        $result.iniAfter = if (Test-Path $ini) { [IO.File]::ReadAllText($ini) } else { '' }
     } elseif ($j.Case -eq 'reset') {
         $button = Wait-For { $b = [Life]::Child($sheet, [int]$j.Ids.ResetButton); if ($b -ne [IntPtr]::Zero) { $b } }
         if (-not $button) { throw 'no Reset button on the page Options opened at' }
