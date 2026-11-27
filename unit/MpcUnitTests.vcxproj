@@ -112,8 +112,13 @@
          (DSMPropertyBag.h, header-only), CComPtr/CComBSTR (atlcomcli.h, added to
          this project's stdafx.h for it) - is already linked or included. -->
     <ClCompile Include="..\..\src\mpc-hc\CoverArt.cpp" />
+    <!-- PanNScan (ledger S2/S4): the pan and scan preset parser, formatter
+         and clamp, split out of CVideoGeometry and CPnSPresetsDlg so it has
+         no frame dependency; CString comes from this PCH. -->
+    <ClCompile Include="..\..\src\mpc-hc\PanNScan.cpp" />
     <ClCompile Include="test_Profile.cpp" />
     <ClCompile Include="test_CoverArt.cpp" />
+    <ClCompile Include="test_PanNScan.cpp" />
     <ClCompile Include="test_CrashEventLog.cpp" />
     <ClCompile Include="test_Mixer.cpp" />
     <ClCompile Include="test_USFSubtitles.cpp" />
