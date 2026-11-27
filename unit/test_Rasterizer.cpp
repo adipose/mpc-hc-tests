@@ -106,6 +106,35 @@ TEST_ISOLATED(Rasterizer, BSplineOutlineSizedFromTheCurveNotTheControlPoints)
     EXPECT_NEAR(r.Outline()->mWidth, 85, 8);
 }
 
+// #4471: the closing segments of an ASS spline (`m 0 0 s A B C c`) were left
+// out of the outline size. `c` appends the first three spline points again as
+// PT_BSPLINEPATCHTO, and ScanConvert draws a b-spline segment from points
+// i-3..i for each of them, but sized the outline from the patch point alone,
+// while the controls before it were skipped as spline points. Here C pulls
+// the closed spline down to the knot (B + 4C + P0) / 6 = 4133 at least, while
+// the unfixed sizing stops at the first segment's end, (A + 4B + C) / 6 =
+// 1533: the scan conversion then writes about 325 rows past the scanline
+// buffer, the heap corruption (0xc0000374) of the report.
+TEST_ISOLATED(Rasterizer, ClosedSplineOutlineCoversTheClosingSegments)
+{
+    const POINT pts[] = {
+        {0, 0},                                  // m 0 0
+        {800, 0}, {800, 800}, {0, 6000},         // s A B C
+        {0, 0}, {800, 0}, {800, 800},            // c
+    };
+    const BYTE types[] = {
+        PT_MOVETO,
+        PT_BSPLINETO, PT_BSPLINETO, PT_BSPLINETO,
+        PT_BSPLINEPATCHTO, PT_BSPLINEPATCHTO, PT_BSPLINEPATCHTO,
+    };
+    CTestRasterizer r;
+    r.SetPath(pts, types, _countof(pts));
+    ASSERT_TRUE(r.ScanConvert());
+    ASSERT_TRUE(r.Outline() != nullptr);
+    // the unfixed code reports offsetY 0 and height 193
+    EXPECT_GE(r.Outline()->mPathOffsetY + r.Outline()->mHeight, 4133 / 8 + 1);
+}
+
 // eb0db38518: the overlay buffers were allocated with no cap on their size,
 // pitch times height computed in 32-bit int. A drawing scaled past that (an
 // ASS \fscx/\fscy or a huge {\p1} shape) either allocated gigabytes for one
