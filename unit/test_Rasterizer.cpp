@@ -110,29 +110,92 @@ TEST_ISOLATED(Rasterizer, BSplineOutlineSizedFromTheCurveNotTheControlPoints)
 // out of the outline size. `c` appends the first three spline points again as
 // PT_BSPLINEPATCHTO, and ScanConvert draws a b-spline segment from points
 // i-3..i for each of them, but sized the outline from the patch point alone,
-// while the controls before it were skipped as spline points. Here C pulls
-// the closed spline down to the knot (B + 4C + P0) / 6 = 4133 at least, while
-// the unfixed sizing stops at the first segment's end, (A + 4B + C) / 6 =
-// 1533: the scan conversion then writes about 325 rows past the scanline
-// buffer, the heap corruption (0xc0000374) of the report.
-TEST_ISOLATED(Rasterizer, ClosedSplineOutlineCoversTheClosingSegments)
+// while the controls before it were skipped as spline points. So a closing
+// segment that reaches past the other points runs off the outline. In each
+// case below C pulls the closed spline out to the knot (B + 4C + P0) / 6,
+// while the unfixed sizing stops at the first segment's end, (A + 4B + C) / 6.
+// Clamping the scanline index at the bottom (the first patch proposed on the
+// issue) only stops the first case crashing: the shape is then cut off at the
+// bottom of the outline, and the other two cases still write out of bounds.
+static void SetClosedSpline(CTestRasterizer& r, POINT a, POINT b, POINT c)
 {
     const POINT pts[] = {
         {0, 0},                                  // m 0 0
-        {800, 0}, {800, 800}, {0, 6000},         // s A B C
-        {0, 0}, {800, 0}, {800, 800},            // c
+        a, b, c,                                 // s A B C
+        {0, 0}, a, b,                            // c
     };
     const BYTE types[] = {
         PT_MOVETO,
         PT_BSPLINETO, PT_BSPLINETO, PT_BSPLINETO,
         PT_BSPLINEPATCHTO, PT_BSPLINEPATCHTO, PT_BSPLINEPATCHTO,
     };
-    CTestRasterizer r;
     r.SetPath(pts, types, _countof(pts));
+}
+
+// Down: the knot is at y = 4133, the unfixed sizing stops at 1533, and the
+// scan conversion writes about 325 rows past the end of the scanline buffer,
+// the heap corruption (0xc0000374) of the report.
+TEST_ISOLATED(Rasterizer, ClosedSplineOutlineCoversTheClosingSegments)
+{
+    CTestRasterizer r;
+    SetClosedSpline(r, {800, 0}, {800, 800}, {0, 6000});
     ASSERT_TRUE(r.ScanConvert());
     ASSERT_TRUE(r.Outline() != nullptr);
     // the unfixed code reports offsetY 0 and height 193
     EXPECT_GE(r.Outline()->mPathOffsetY + r.Outline()->mHeight, 4133 / 8 + 1);
+}
+
+// The same shape filled: it must be drawn down to the knot. With only the
+// index clamped, the scan stops at the outline's last row, 192, and nothing
+// is drawn below overlay row 24, about 40 rows short of the shape.
+TEST_ISOLATED(Rasterizer, ClosedSplineIsDrawnDownToItsClosingSegments)
+{
+    CTestRasterizer r;
+    SetClosedSpline(r, {800, 0}, {800, 800}, {0, 6000});
+    ASSERT_TRUE(r.ScanConvert());
+    ASSERT_TRUE(r.Rasterize(0, 0, false, 0.0));
+    const auto& o = r.Overlay();
+    ASSERT_TRUE(o != nullptr && o->mpOverlayBufferBody != nullptr);
+    int lastRow = -1;
+    for (int y = 0; y < o->mOverlayHeight; y++) {
+        const byte* row = o->mpOverlayBufferBody + (size_t)y * o->mOverlayPitch;
+        for (int x = 0; x < o->mOverlayWidth; x++) {
+            if (row[x]) {
+                lastRow = y;
+                break;
+            }
+        }
+    }
+    // the knot is outline row 516, overlay row 64; allow a few rows for the
+    // thin tip of the shape
+    EXPECT_GE(o->mOffsetY + lastRow, 60) << "last drawn overlay row " << lastRow << ", offset " << o->mOffsetY;
+}
+
+// Up: the mirror image. The knot is at y = -4133 and the unfixed sizing
+// stops at -1533, so the scan writes about 325 rows before the start of the
+// scanline buffer, which a clamp on the bottom row does not touch.
+TEST_ISOLATED(Rasterizer, ClosedSplineAboveTheOutlineStaysInTheScanBuffer)
+{
+    CTestRasterizer r;
+    SetClosedSpline(r, {800, 0}, {800, -800}, {0, -6000});
+    ASSERT_TRUE(r.ScanConvert());
+    ASSERT_TRUE(r.Outline() != nullptr);
+    EXPECT_LE(r.Outline()->mPathOffsetY, -4133 / 8);
+    EXPECT_TRUE(r.Rasterize(0, 0, false, 0.0));
+}
+
+// Left: the knot is at x = -3867, inside the outline's rows, and the unfixed
+// sizing stops at x = -334. The scan buffer is not overrun, but the spans
+// start left of the outline, and Rasterize turns those negative x positions
+// into huge unsigned offsets into the overlay buffer.
+TEST_ISOLATED(Rasterizer, ClosedSplineLeftOfTheOutlineStaysInTheOverlay)
+{
+    CTestRasterizer r;
+    SetClosedSpline(r, {800, 0}, {800, 800}, {-6000, 400});
+    ASSERT_TRUE(r.ScanConvert());
+    ASSERT_TRUE(r.Outline() != nullptr);
+    EXPECT_LE(r.Outline()->mPathOffsetX, -3867 / 8);
+    EXPECT_TRUE(r.Rasterize(0, 0, false, 0.0));
 }
 
 // eb0db38518: the overlay buffers were allocated with no cap on their size,
