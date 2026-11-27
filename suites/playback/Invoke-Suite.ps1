@@ -2812,6 +2812,44 @@ try {
             Complete-Case 'dvd-opens-evr-cp' @((Get-ProcessProblem $c.Run))
         }
     }
+
+    # 70-72. libass with a subtitle buffer (SPCSize2=10, the render thread of CSubPicQueue). Until patch865
+    #    GetRenderersSettings forced the buffer off whenever libass was on, so on a player before it these run
+    #    without the thread and pass all the same: they are here to catch the thread breaking libass, not as
+    #    the proof of that change, which is unit\test_SubPicQueue.cpp. Asserted: the band of the expected track
+    #    is in the frame, for an embedded track, for a file beside the clip, and after a seek back at 1.5 s
+    #    (ID_PLAY_SEEKBACKWARDMED, which invalidates what the thread rendered ahead), and the player exits 0.
+    $libassBuffered = @{ RenderSSAUsingLibass = 1; RenderSRTUsingLibass = 1; SPCSize2 = 10 }
+    if (Test-CaseSelected 'libass-buffered-embedded-track') {
+        $subs = $clips.clips.'subs.mkv'
+        $defaultSub = @($subs.subtitles | Where-Object default)[0]
+        $c = Invoke-PlayerCase -Name 'libass-buffered-embedded-track' -Clip 'subs.mkv' -Switches '/play /close /fullscreen /monitor 2' `
+            -PlugModes '1920x1080@60' -CaptureAtSec 2.5 -Settings $libassBuffered
+        Complete-Case 'libass-buffered-embedded-track' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $subs.picture),
+            (Test-Band $c.Png $defaultSub.band)
+        )
+    }
+    if (Test-CaseSelected 'libass-buffered-external-file') {
+        $ext = $clips.clips.'ext.mkv'
+        $c = Invoke-PlayerCase -Name 'libass-buffered-external-file' -Clip 'ext.mkv' -Switches '/play /close /fullscreen /monitor 2' `
+            -PlugModes '1920x1080@60' -CaptureAtSec 2.5 -Settings $libassBuffered
+        Complete-Case 'libass-buffered-external-file' @(
+            (Get-ProcessProblem $c.Run),
+            (Test-Picture $c.Png $ext.picture),
+            (Test-Band $c.Png $ext.sidecar.band)
+        )
+    }
+    if (Test-CaseSelected 'libass-buffered-after-seek') {
+        $subs = $clips.clips.'subs.mkv'
+        $defaultSub = @($subs.subtitles | Where-Object default)[0]
+        $c = Invoke-PlayerCase -Name 'libass-buffered-after-seek' -Clip 'subs.mkv' -Switches '/play /close /fullscreen /monitor 2' `
+            -PlugModes '1920x1080@60' -PostCommands '1.5:901' -CaptureAtSec 2.5 -Settings $libassBuffered
+        $problems = @((Get-ProcessProblem $c.Run), (Test-Band $c.Png $defaultSub.band))
+        if (@($c.Run.posts | Where-Object { -not $_.delivered }).Count) { $problems += 'the seek did not reach the player' }
+        Complete-Case 'libass-buffered-after-seek' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

@@ -91,6 +91,7 @@
     <ClCompile Include="test_RtsFontCache.cpp" />
     <ClCompile Include="test_RtsRoundedBox.cpp" />
     <ClCompile Include="test_SubPicMatrix.cpp" />
+    <ClCompile Include="test_SubPicQueue.cpp" />
     <ClCompile Include="test_TextFile.cpp" />
     <ClCompile Include="test_WebVTT.cpp" />
     <!-- CProfile lives in the exe project, so it is compiled in directly. Its

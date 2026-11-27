@@ -172,6 +172,9 @@ centre the box there. The band cases only ask which colour is present.
 | `info-bar-chapter-after-hidden-pause` | `chapters.mkv` with the information bar hidden, paused at 7 s and the bar shown with View > Information at 8 s: its Chapter line names the chapter of the paused position, read from the time label (unfixed develop ce7d91a750: `one (1/3)`, the chapter it had at open) | #4385 (patch840) |
 | `info-bar-dvd-after-hidden-pause` | the sample DVD (`-SampleDvd`, a dvdauthor build with chapters at 0, 10 and 20 s; skipped without one), the information bar hidden, Next chapter at 4 s, paused at 6 s, shown with View > Information at 7 s: the Location line names chapter 02/03 (unfixed develop ce7d91a750: `-`, as set at open) | #4385 (patch840) |
 | `dvd-opens-evr-cp` | the sample DVD (`-SampleDvd`, skipped without one) in EVR-CP, closed at 8 s: the player exits (unfixed develop c3b1ef26ae: the render thread's HLG input pin check deadlocks with the DVD's in-band format change, the player stays at "Opening..." and ignores WM_CLOSE) | patch841 |
+| `libass-buffered-embedded-track` | `subs.mkv` with `RenderSSAUsingLibass=1` and `SPCSize2=10`, so libass renders on the queue's thread: the default track's cyan band is in the frame and the player exits 0. A player from before the change runs this without the thread (the buffer was forced off with libass) and passes too; what fails on it is `unit\test_SubPicQueue.cpp` | patch865 |
+| `libass-buffered-external-file` | the same settings on `ext.mkv` + `ext.ass`: the magenta band | patch865 |
+| `libass-buffered-after-seek` | the same on `subs.mkv` with a seek back posted at 1.5 s, which drops what the thread rendered ahead: the band is in the frame captured at 2.5 s | patch865 |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
