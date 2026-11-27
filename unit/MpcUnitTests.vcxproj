@@ -113,6 +113,7 @@
     <ClCompile Include="..\..\src\mpc-hc\CoverArt.cpp" />
     <ClCompile Include="test_Profile.cpp" />
     <ClCompile Include="test_CoverArt.cpp" />
+    <ClCompile Include="test_CrashEventLog.cpp" />
     <ClCompile Include="test_Mixer.cpp" />
     <ClCompile Include="test_USFSubtitles.cpp" />
     <ClCompile Include="test_VobFile.cpp" />
