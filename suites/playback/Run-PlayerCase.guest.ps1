@@ -83,6 +83,8 @@ param(
                                          # frame and reads the video pane's centre colour as fast as
                                          # PrintWindow allows for 700 ms ("sequence", a letter per read);
                                          # command 0 only reads.
+                                         # <sec>:clip:0 reads the clipboard's text; the runner seeds it
+                                         # with a sentinel before the player starts when any step does.
                                          # Decimal. Recorded under "controls".
     [int] $PluggedScale = 0              # non-zero: before the player starts, set the display scale of the one
                                          # monitor that is not the primary (the plugged virtual one) to this
@@ -581,6 +583,17 @@ function Invoke-ControlStep {
         Start-Sleep -Milliseconds 1500
         return [ordered]@{ at = $Step.at; op = 'dpi'; ctrl = 0; percent = $Step.value; result = $set; effectiveDpi = (Get-PrimaryDpi) }
     }
+    if ($Step.op -eq 'clip') {
+        # <sec>:clip:0, no control: the clipboard's text as "text" (null when it holds none). The runner
+        # seeds it with $clipboardSentinel before the player starts, so a player that never wrote it
+        # reads back as the sentinel. The player may hold the clipboard open at that moment, so retry.
+        $text = $null; $err = $null
+        for ($try = 0; $try -lt 10; $try++) {
+            try { $text = if ([System.Windows.Forms.Clipboard]::ContainsText()) { [System.Windows.Forms.Clipboard]::GetText() } else { $null }; $err = $null; break }
+            catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 50 }
+        }
+        return [ordered]@{ at = $Step.at; op = 'clip'; ctrl = 0; text = $text; error = $err }
+    }
     # fprobe is a probe of a control in the player's own frame (its status bar, its toolbars) rather than in a dialog;
     # sbar captures the bar such a control sits in, redraw repaints it.
     $topClass = if ($Step.op -in 'fprobe', 'sbar', 'redraw', 'vwatch', 'ibar') { 'MediaPlayerClassicW' } else { '#32770' }
@@ -830,6 +843,16 @@ if ($PluggedScale -and $pluggedScreen) {
     $result.plugged = [ordered]@{ device = $null }
 }
 
+# A case that reads the clipboard (a clip control step) starts from a known text, so "the player did not
+# write it" is the sentinel coming back rather than whatever the last case or user left there. The
+# clipboard needs an STA thread, which Windows PowerShell's console host is.
+$clipboardSentinel = 'mpc-test: clipboard not written by the player'
+if ($ControlAt -match '(^|,)[0-9.]+:clip:') {
+    for ($try = 0; $try -lt 10; $try++) {
+        try { [System.Windows.Forms.Clipboard]::SetText($clipboardSentinel); $result.clipboardSeeded = $true; break }
+        catch { $result.clipboardSeeded = $false; Start-Sleep -Milliseconds 50 }
+    }
+}
 # An empty line is a launch with no file at all (a case about what the player restores by itself), and
 # Start-Process refuses an empty -ArgumentList.
 $p = if ($ArgumentLine) { Start-Process -FilePath $Exe -ArgumentList $ArgumentLine -PassThru } else { Start-Process -FilePath $Exe -PassThru }

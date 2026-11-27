@@ -2812,6 +2812,33 @@ try {
             Complete-Case 'dvd-opens-evr-cp' @((Get-ProcessProblem $c.Run))
         }
     }
+
+    # 70. Auto-copy subtitle text (ID_SUBTITLES_AUTOCOPY, 958, a toggle that is not saved, so it is posted) copies
+    #    the line on screen, without its override tags, for every renderer and source. autocopy.mkv's one ASS line
+    #    is up from 1 s to 15 s; the runner seeds the clipboard with a sentinel, the toggle goes at 3 s and the
+    #    clipboard is read at 5.5 s. With RenderSSAUsingLibass=1 an embedded track is fed to libass only, and
+    #    auto-copy read the internal renderer's parse, which is empty for it (ledger S18; unfixed 99f6619212: the
+    #    sentinel comes back). The same line as a sidecar file, and the embedded track with libass off, were
+    #    copied before the fix too and must still be.
+    $autocopyCases = @(
+        @{ Name = 'autocopy-libass-embedded'; Clip = 'autocopy.mkv'; Libass = 1 }
+        @{ Name = 'autocopy-libass-external'; Clip = 'autocopy-ext.mkv'; Libass = 1 }
+        @{ Name = 'autocopy-internal-embedded'; Clip = 'autocopy.mkv'; Libass = 0 }
+    )
+    foreach ($ac in $autocopyCases) {
+        if (-not (Test-CaseSelected $ac.Name)) { continue }
+        $c = Invoke-PlayerCase -Name $ac.Name -Clip $ac.Clip -Switches '/play /new' `
+            -Settings @{ RenderSSAUsingLibass = $ac.Libass; AfterPlayback = 0 } -PostCommands '3:958' -ControlAt '5.5:clip:0' -CloseAtSec 7
+        $expected = $clips.clips.($ac.Clip).autocopy
+        $problems = @((Get-ProcessProblem $c.Run))
+        $clip = @($(if ($c.Run.PSObject.Properties['controls']) { $c.Run.controls }) | Where-Object { $_.op -eq 'clip' })[0]
+        if (-not $c.Run.PSObject.Properties['clipboardSeeded'] -or -not $c.Run.clipboardSeeded) { $problems += 'the runner could not seed the clipboard' }
+        if (@($c.Run.posts | Where-Object { -not $_.delivered }).Count) { $problems += 'the auto-copy toggle did not reach the player' }
+        if (-not $clip) { $problems += 'no clipboard reading' }
+        elseif ($clip.error) { $problems += "the clipboard could not be read: $($clip.error)" }
+        elseif ($clip.text -ne $expected) { $problems += "the clipboard holds '$($clip.text -replace "`r`n", '\r\n')', expected '$($expected -replace "`r`n", '\r\n')'" }
+        Complete-Case $ac.Name $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue

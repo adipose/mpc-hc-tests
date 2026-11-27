@@ -366,6 +366,33 @@ if ($Force -or -not (Test-Path $subshift)) {
     Remove-Item $cues
 }
 
+# --- autocopy.mkv: long.mkv with one ASS line, from 1 s to 15 s, embedded as -
+# the default track (a fresh profile does not enable a track that is not), and
+# autocopy-ext.mkv + autocopy-ext.ass: the same line as a sidecar. The line has
+# override blocks, a hard space and a line break, so auto-copy has to strip
+# them: its text is "Auto-copy line" and "second row" on two lines. With
+# RenderSSAUsingLibass=1 the embedded track is fed to libass only, and
+# auto-copy, which read the internal renderer's parse, copied nothing for it
+# (ledger S18, fixed on patch862).
+$autocopyAss = Join-Path $OutDir 'autocopy-ext.ass'
+[IO.File]::WriteAllLines($autocopyAss, @(
+    '[Script Info]', 'ScriptType: v4.00+', 'PlayResX: 1280', 'PlayResY: 720', '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    'Style: Default,Arial,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,30,1', '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+    'Dialogue: 0,0:00:01.00,0:00:15.00,Default,,0,0,0,,{\an8}{\b1}Auto-copy\h{\i1}line{\i0}\Nsecond row{\b0}'
+), [Text.UTF8Encoding]::new($false))
+$autocopy = Join-Path $OutDir 'autocopy.mkv'
+Invoke-FFmpeg $autocopy @(
+    '-i', $long, '-i', $autocopyAss,
+    '-map', '0:v', '-map', '0:a', '-map', '1:s',
+    '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'ass',
+    '-disposition:s:0', 'default'
+)
+Copy-Item $long (Join-Path $OutDir 'autocopy-ext.mkv') -Force
+
 # --- tail.dsm: stereo.mkv's tones as 16 bit PCM in a DirectShow Media file, --
 # with two zero bytes after the last packet. ffmpeg cannot write DSM, so the
 # packets are written here (layout from DSMMuxer.cpp): a file info packet, one
@@ -529,6 +556,16 @@ $clips = [ordered]@{
         'subshift.mkv' = [ordered]@{
             seconds = $longSeconds
             note    = 'long.mkv plus an SRT track with a cue at every whole second from 1 s (default) and the cyan band ASS as track 2'
+        }
+        'autocopy.mkv' = [ordered]@{
+            seconds  = $longSeconds
+            note     = 'long.mkv plus one embedded ASS line (default track), 1 s to 15 s, with override tags'
+            autocopy = "Auto-copy line`r`nsecond row"
+        }
+        'autocopy-ext.mkv' = [ordered]@{
+            seconds  = $longSeconds
+            sidecar  = [ordered]@{ file = 'autocopy-ext.ass' }
+            autocopy = "Auto-copy line`r`nsecond row"
         }
         'rotated90.mp4' = [ordered]@{
             picture = [ordered]@{ width = $rotatedSize[0]; height = $rotatedSize[1]; corners = $rotatedCorners; note = 'as rendered by ffmpeg with autorotation' }
