@@ -85,6 +85,7 @@
     <ClCompile Include="test_LibassTimeline.cpp" />
     <ClCompile Include="test_BitmapSubs.cpp" />
     <ClCompile Include="test_DSUtilText.cpp" />
+    <ClCompile Include="test_DualSubPicProvider.cpp" />
     <ClCompile Include="test_Rasterizer.cpp" />
     <ClCompile Include="test_Resources.cpp" />
     <ClCompile Include="test_RenderingCacheGrowth.cpp" />
