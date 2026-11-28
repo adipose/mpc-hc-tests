@@ -2812,6 +2812,47 @@ try {
             Complete-Case 'dvd-opens-evr-cp' @((Get-ProcessProblem $c.Run))
         }
     }
+
+    # 70. A resizable dialog that names no template and sets its anchors in OnInitDialog follows a display
+    #    scale change (patch869). Pan&Scan presets (the "Edit..." item after the five default presets, 4105)
+    #    is a CDpiAwareResizableDialog that overrides neither GetDialogTemplateID nor SetupAnchors. On a DPI
+    #    change the base class removed every anchor and could lay nothing out again without a template, so
+    #    its controls kept their 100% size and nothing moved when the dialog was resized after it. Opened at
+    #    100%, the primary goes live to 125% (as in modeless-dialog-follows-dpi-change), then the dialog grows
+    #    by 80 px each way. Its OK button (IDOK 1, anchored bottom right) and preset list (IDC_LIST1 11160,
+    #    anchored top left to bottom right) are measured at each step. Asserted: OK laid out again at the new
+    #    DPI, by the rule case 47 uses, and inside the dialog; after the resize OK keeps its distance from the
+    #    dialog's bottom-right corner (2 px) and the list grows by at least 70 px each way.
+    if (Test-CaseSelected 'templateless-dialog-follows-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'templateless-dialog-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' -PostCommands '2:4105' `
+            -ControlAt '3:probe:1,3.2:probe:11160,4:dpi:0:125,8:probe:1,8.2:probe:11160,9:size:1:80,10:probe:1,10.2:probe:11160,11:cmd:1:2,12:dpi:0:100' -CloseAtSec 14
+        $problems = @(Get-ProcessProblem $c.Run)
+        $steps = @($c.Run.controls)
+        $dpiStep = $steps | Where-Object { $_.op -eq 'dpi' -and $_.percent -eq 125 } | Select-Object -First 1
+        $scale = if ($dpiStep -and $dpiStep.effectiveDpi) { $dpiStep.effectiveDpi / 96 } else { 0 }
+        if ([math]::Abs($scale - 1.25) -gt 0.01) { $problems += "the display scale did not change to 125% (effective DPI $(if ($dpiStep) { $dpiStep.effectiveDpi } else { 'unread' })), so the case proves nothing" }
+        $probeAt = { param([int] $Ctrl, [double] $From, [double] $To) $steps | Where-Object { $_.op -eq 'probe' -and $_.ctrl -eq $Ctrl -and $_.at -ge $From -and $_.at -lt $To -and $_.found } | Select-Object -First 1 }
+        $ok0 = & $probeAt 1 0 4; $ok1 = & $probeAt 1 5 9; $ok2 = & $probeAt 1 9.5 11
+        $list1 = & $probeAt 11160 5 9; $list2 = & $probeAt 11160 9.5 11
+        if (-not $ok0 -or -not $ok1 -or -not $ok2 -or -not $list1 -or -not $list2) {
+            $problems += 'Pan&Scan presets, its OK button or its preset list was not found at every step'
+        } else {
+            $w = { param($r) $r[2] - $r[0] }; $h = { param($r) $r[3] - $r[1] }
+            Note Gray ("      dialog {0}x{1} -> {2}x{3} -> {4}x{5}, OK {6}x{7} -> {8}x{9}, list {10}x{11} -> {12}x{13}" -f `
+                (& $w $ok0.dialogRect), (& $h $ok0.dialogRect), (& $w $ok1.dialogRect), (& $h $ok1.dialogRect), (& $w $ok2.dialogRect), (& $h $ok2.dialogRect),
+                (& $w $ok0.rect), (& $h $ok0.rect), (& $w $ok1.rect), (& $h $ok1.rect), (& $w $list1.rect), (& $h $list1.rect), (& $w $list2.rect), (& $h $list2.rect))
+            $hRatio = (& $h $ok1.rect) / (& $h $ok0.rect); $wRatio = (& $w $ok1.rect) / (& $w $ok0.rect)
+            if ($scale -gt 1 -and ($hRatio -lt 1 + ($scale - 1) / 2 -or $wRatio -lt 1 + ($scale - 1) / 5)) { $problems += ("the OK button changed x{0:N2} wide, x{1:N2} tall for a 100%->{2:N0}% change: the controls were not laid out again at the new DPI" -f $wRatio, $hRatio, ($scale * 100)) }
+            $d = $ok1.dialogRect; $r = $ok1.rect
+            if ($r[2] -gt $d[2] -or $r[3] -gt $d[3]) { $problems += "after the change the OK button ($($r -join ',')) reaches outside the dialog ($($d -join ','))" }
+            $gap1 = @(($ok1.dialogRect[2] - $ok1.rect[2]), ($ok1.dialogRect[3] - $ok1.rect[3]))
+            $gap2 = @(($ok2.dialogRect[2] - $ok2.rect[2]), ($ok2.dialogRect[3] - $ok2.rect[3]))
+            if ((& $w $ok2.dialogRect) - (& $w $ok1.dialogRect) -lt 70) { $problems += 'the dialog did not grow when resized, so the anchors were not exercised' }
+            elseif ([math]::Abs($gap2[0] - $gap1[0]) -gt 2 -or [math]::Abs($gap2[1] - $gap1[1]) -gt 2) { $problems += "after the resize the OK button is $($gap2 -join ',') px from the dialog's bottom-right corner, $($gap1 -join ',') before: it lost its anchor" }
+            elseif ((& $w $list2.rect) - (& $w $list1.rect) -lt 70 -or (& $h $list2.rect) - (& $h $list1.rect) -lt 70) { $problems += ("the preset list went from {0}x{1} to {2}x{3} for an 80 px resize: it lost its anchor" -f (& $w $list1.rect), (& $h $list1.rect), (& $w $list2.rect), (& $h $list2.rect)) }
+        }
+        Complete-Case 'templateless-dialog-follows-dpi-change' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
