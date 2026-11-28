@@ -2853,6 +2853,46 @@ try {
         }
         Complete-Case 'templateless-dialog-follows-dpi-change' $problems
     }
+
+    # 71. The Properties sheet follows a display scale change (patch869). It is a CResizableSheet whose pages anchor
+    #    every control: Windows scaled the fonts on a DPI change, and the next layout put every control back at
+    #    its old pixel size, so the sheet's Close button and the Details page's fields kept their 100% size around
+    #    125% text. Opened (File > Properties, 814) at 100%, the primary goes live to 125%, then the sheet grows
+    #    by 80 px each way. Close (IDOK 1, anchored bottom right) and the Details page's Type field (IDC_EDIT2
+    #    11063, anchored top left) are measured. Asserted: both laid out again at the new DPI, by the rule case 47
+    #    uses, and Close inside the sheet; after the resize Close keeps its distance from the sheet's bottom-right
+    #    corner (2 px).
+    if (Test-CaseSelected 'property-sheet-follows-dpi-change') {
+        $c = Invoke-PlayerCase -Name 'property-sheet-follows-dpi-change' -Clip 'long.mkv' -Switches '/play' -PostCommands '2:814' `
+            -ControlAt '3:probe:1,3.2:probe:11063,4:dpi:0:125,8:probe:1,8.2:probe:11063,9:size:1:80,10:probe:1,11:cmd:1:1,12:dpi:0:100' -CloseAtSec 14
+        $problems = @(Get-ProcessProblem $c.Run)
+        $steps = @($c.Run.controls)
+        $dpiStep = $steps | Where-Object { $_.op -eq 'dpi' -and $_.percent -eq 125 } | Select-Object -First 1
+        $scale = if ($dpiStep -and $dpiStep.effectiveDpi) { $dpiStep.effectiveDpi / 96 } else { 0 }
+        if ([math]::Abs($scale - 1.25) -gt 0.01) { $problems += "the display scale did not change to 125% (effective DPI $(if ($dpiStep) { $dpiStep.effectiveDpi } else { 'unread' })), so the case proves nothing" }
+        $probeAt = { param([int] $Ctrl, [double] $From, [double] $To) $steps | Where-Object { $_.op -eq 'probe' -and $_.ctrl -eq $Ctrl -and $_.at -ge $From -and $_.at -lt $To -and $_.found } | Select-Object -First 1 }
+        $ok0 = & $probeAt 1 0 4; $ok1 = & $probeAt 1 5 9; $ok2 = & $probeAt 1 9.5 11
+        $type0 = & $probeAt 11063 0 4; $type1 = & $probeAt 11063 5 9
+        if (-not $ok0 -or -not $ok1 -or -not $ok2 -or -not $type0 -or -not $type1) {
+            $problems += 'Properties, its Close button or the Details page Type field was not found at every step'
+        } else {
+            $w = { param($r) $r[2] - $r[0] }; $h = { param($r) $r[3] - $r[1] }
+            Note Gray ("      sheet {0}x{1} -> {2}x{3} -> {4}x{5}, Close {6}x{7} -> {8}x{9}, Type field {10}x{11} -> {12}x{13}" -f `
+                (& $w $ok0.dialogRect), (& $h $ok0.dialogRect), (& $w $ok1.dialogRect), (& $h $ok1.dialogRect), (& $w $ok2.dialogRect), (& $h $ok2.dialogRect),
+                (& $w $ok0.rect), (& $h $ok0.rect), (& $w $ok1.rect), (& $h $ok1.rect), (& $w $type0.rect), (& $h $type0.rect), (& $w $type1.rect), (& $h $type1.rect))
+            foreach ($pair in @(@('the Close button', $ok0, $ok1), @('the Type field', $type0, $type1))) {
+                $hRatio = (& $h $pair[2].rect) / (& $h $pair[1].rect); $wRatio = (& $w $pair[2].rect) / (& $w $pair[1].rect)
+                if ($scale -gt 1 -and ($hRatio -lt 1 + ($scale - 1) / 2 -or $wRatio -lt 1 + ($scale - 1) / 5)) { $problems += ("{0} changed x{1:N2} wide, x{2:N2} tall for a 100%->{3:N0}% change: it was not laid out again at the new DPI" -f $pair[0], $wRatio, $hRatio, ($scale * 100)) }
+            }
+            $d = $ok1.dialogRect; $r = $ok1.rect
+            if ($r[2] -gt $d[2] -or $r[3] -gt $d[3]) { $problems += "after the change the Close button ($($r -join ',')) reaches outside the sheet ($($d -join ','))" }
+            $gap1 = @(($ok1.dialogRect[2] - $ok1.rect[2]), ($ok1.dialogRect[3] - $ok1.rect[3]))
+            $gap2 = @(($ok2.dialogRect[2] - $ok2.rect[2]), ($ok2.dialogRect[3] - $ok2.rect[3]))
+            if ((& $w $ok2.dialogRect) - (& $w $ok1.dialogRect) -lt 70) { $problems += 'the sheet did not grow when resized, so the anchors were not exercised' }
+            elseif ([math]::Abs($gap2[0] - $gap1[0]) -gt 2 -or [math]::Abs($gap2[1] - $gap1[1]) -gt 2) { $problems += "after the resize the Close button is $($gap2 -join ',') px from the sheet's bottom-right corner, $($gap1 -join ',') before: it lost its anchor" }
+        }
+        Complete-Case 'property-sheet-follows-dpi-change' $problems
+    }
 }
 finally {
     Remove-PSSession $session -ErrorAction SilentlyContinue
