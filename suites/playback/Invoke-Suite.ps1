@@ -260,6 +260,9 @@ try {
             [string] $ProbeAt = '',              # comma-separated seconds: at each, the guest reads the player's
                                                # playlist list control (count, selection, scroll, scrollbars)
                                                # into the run's probes array
+            [string] $SmtcAt = '',               # comma-separated <seconds>:read or <seconds>:toggle on the player's
+                                               # SMTC session as Windows reports it (status and timeline, or a
+                                               # play/pause sent through it); lands in the run's smtc array
             [string[]] $HttpAt = @(),          # '<sec>|<method>|<path>|<body>' web requests, run in the same
                                                # time-ordered sequence as the posts and probes; answers land in
                                                # the run's http array, bodies in http-<n>.bin files
@@ -306,8 +309,8 @@ try {
         $httpEncoded = (@($HttpAt | Where-Object { $_ } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) })) -join ','
         # The casts are parenthesised: in a command's argument list a bare [bool]$x is the string "[bool]False",
         # which is true on the other side.
-        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt, $ControlAt, $PluggedScale {
-            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt, $controlAt, $pluggedScale)
+        $guest = Invoke-Command -Session $session -ArgumentList $iniText, $PlugModes, $argumentLine, $guestOut, $guestPng, $CaptureAtSec, $CloseAtSec, ([bool]$KeepProfile), $consoleUser, $CloseKind, ([bool]$CloseWhenWindowAppears), $CloseRepeat, $RedirectStorm, ($RedirectFiles -join ','), $StormAtSec, $StormIntervalMs, $rendererJson, $secondEncoded, $SecondAtSec, $PostCommands, $ProbeAt, $httpEncoded, $HttpPort, $CloseDialogAt, $AcceptDialogAt, $ControlAt, $PluggedScale, $SmtcAt {
+            param($iniText, $plugModes, $argumentLine, $out, $png, $captureAt, $closeAt, $keepProfile, $user, $closeKind, $closeOnWindow, $closeRepeat, $redirectStorm, $redirectFiles, $stormAtSec, $stormIntervalMs, $rendererJson, $secondEncoded, $secondAtSec, $postCommands, $probeAt, $httpAt, $httpPort, $closeDialogAt, $acceptDialogAt, $controlAt, $pluggedScale, $smtcAt)
             # The session is shared with the driver install scripts, which leave it on 'Stop'; a native tool
             # writing to stderr would then end the case instead of being a result.
             $ErrorActionPreference = 'Continue'
@@ -356,6 +359,8 @@ try {
             if ($acceptDialogAt) { $taskArgs += (' -AcceptDialogAt "{0}"' -f $acceptDialogAt) }
             if ($controlAt) { $taskArgs += (' -ControlAt "{0}"' -f $controlAt) }
             if ($pluggedScale) { $taskArgs += " -PluggedScale $pluggedScale" }
+            # Digits, dots, colons, commas and the words read and toggle only, like the posts.
+            if ($smtcAt) { $taskArgs += (' -SmtcAt "{0}"' -f $smtcAt) }
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
             $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
             Register-ScheduledTask -TaskName 'MpcPlaybackCase' -Action $action -Principal $principal -Force | Out-Null
@@ -2811,6 +2816,40 @@ try {
                 -Settings @{ RememberDVDPos = 0; DSVidRen = 11 } -CloseAtSec 8
             Complete-Case 'dvd-opens-evr-cp' @((Get-ProcessProblem $c.Run))
         }
+    }
+
+    # 70. SMTC keeps following the player after the first file: #4450. e21c9fcfff gave MediaTransControls an
+    #    m_active flag that Init set once and CloseMedia cleared on every file change, so from the second file
+    #    on the state and timeline updates returned early: Windows kept the first file's end and a frozen
+    #    position, and the status stayed Playing through a pause, so a head unit's play/pause sent Pause to a
+    #    paused player. Read from outside the player, as the head unit sees it: stereo.mkv (4 s) is skipped
+    #    to long.mkv (20 s) at 3 s; the session must then report long.mkv's end and a moving position, show
+    #    a pause posted at 10 s as Paused, and resume on a play/pause sent through SMTC at 12 s. The timeline
+    #    is sent at most every 2 s while playing, so reads 3 s apart see at least one update between them.
+    if (Test-CaseSelected 'smtc-follows-next-file') {
+        $c = Invoke-PlayerCase -Name 'smtc-follows-next-file' -Clip 'stereo.mkv' `
+            -Switches '"C:\mpc-test\media\long.mkv" /play' -Settings @{ UseSMTC = 1 } `
+            -PostCommands '3:922,10:888' -SmtcAt '2.5:read,6:read,9:read,11.5:read,12:toggle,15:read' -CloseAtSec 16
+        $problems = @((Get-ProcessProblem $c.Run))
+        $posts = @($c.Run.posts)
+        $reads = @($c.Run.smtc | Where-Object { $_.op -eq 'read' })
+        $toggle = @($c.Run.smtc | Where-Object { $_.op -eq 'toggle' })[0]
+        if (@($posts | Where-Object delivered).Count -ne 2) { $problems += 'the posted skip or pause did not reach a window' }
+        if ($reads.Count -ne 5 -or @($reads | Where-Object found).Count -ne 5) {
+            $problems += "the player's SMTC session was not found at every read: $(($c.Run.smtc | ConvertTo-Json -Compress -Depth 3))"
+        } else {
+            $first, $second, $third, $paused, $resumed = $reads
+            if ([math]::Abs($first.end - 4) -gt 1) { $problems += "first file: SMTC end $($first.end) s, expected about 4" }
+            foreach ($r in $second, $third) {
+                if ([math]::Abs($r.end - 20) -gt 1) { $problems += "at $($r.at) s, after the skip: SMTC end $($r.end) s, expected about 20 (the second file's)" }
+            }
+            if ($third.position - $second.position -lt 1) { $problems += "after the skip the SMTC position did not move: $($second.position) s at $($second.at) s, $($third.position) s at $($third.at) s" }
+            if ($paused.status -ne 'Paused') { $problems += "after the posted pause SMTC reports $($paused.status), expected Paused" }
+            if (-not $toggle -or -not $toggle.found -or -not $toggle.accepted) { $problems += 'the play/pause sent through SMTC was not accepted' }
+            if ($resumed.status -ne 'Playing') { $problems += "after the play/pause sent through SMTC it reports $($resumed.status), expected Playing" }
+            if ($resumed.position - $paused.position -lt 1) { $problems += "after the play/pause sent through SMTC the position did not move: $($paused.position) s, then $($resumed.position) s" }
+        }
+        Complete-Case 'smtc-follows-next-file' $problems
     }
 }
 finally {

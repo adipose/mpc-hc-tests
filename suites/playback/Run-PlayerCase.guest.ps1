@@ -84,6 +84,12 @@ param(
                                          # PrintWindow allows for 700 ms ("sequence", a letter per read);
                                          # command 0 only reads.
                                          # Decimal. Recorded under "controls".
+    [string] $SmtcAt = '',               # comma-separated <sec>:read or <sec>:toggle, on the player's System
+                                         # Media Transport Controls session as Windows reports it to anything
+                                         # outside the player (the taskbar flyout, a Bluetooth head unit):
+                                         # read records its playback status and timeline (position, end, and
+                                         # when the player last sent it); toggle sends TryTogglePlayPauseAsync,
+                                         # as a head unit's play/pause button does. Recorded under "smtc".
     [int] $PluggedScale = 0              # non-zero: before the player starts, set the display scale of the one
                                          # monitor that is not the primary (the plugged virtual one) to this
                                          # percent, and put it back to its recommended scale at the end; its
@@ -891,7 +897,45 @@ if ($SecondArgumentLine) {
     }
 }
 
-if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogAt -or $ControlAt -or $CaptureAtSec -gt 0) {
+if ($SmtcAt) {
+    # The WinRT projection exists only in Windows PowerShell, which this task runs under. A session manager
+    # sees later changes only through events, which need a message pump this script does not run, so every
+    # step asks for a fresh one: a manager kept from before the player registered never listed its session.
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $script:asTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+    $script:smtcManagerType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]
+
+    function Wait-WinRtOperation($operation, [Type] $resultType) {
+        $task = $script:asTaskOp.MakeGenericMethod($resultType).Invoke($null, @($operation))
+        if (-not $task.Wait(5000)) { return $null }
+        $task.Result
+    }
+
+    function Invoke-SmtcStep($step) {
+        $entry = [ordered]@{ at = $step.at; op = $step.op; found = $false }
+        try {
+            $manager = Wait-WinRtOperation ($script:smtcManagerType::RequestAsync()) $script:smtcManagerType
+            $session = @($manager.GetSessions() | Where-Object { $_.SourceAppUserModelId -like '*mpc-hc64*' })[0]
+            if (-not $session) { return $entry }
+            $entry.found = $true
+            if ($step.op -eq 'toggle') {
+                $entry.accepted = [bool] (Wait-WinRtOperation ($session.TryTogglePlayPauseAsync()) ([bool]))
+            } else {
+                $timeline = $session.GetTimelineProperties()
+                $entry.status = "$($session.GetPlaybackInfo().PlaybackStatus)"
+                $entry.position = [math]::Round($timeline.Position.TotalSeconds, 2)
+                $entry.end = [math]::Round($timeline.EndTime.TotalSeconds, 2)
+                $entry.updatedSecondsAgo = [math]::Round(([DateTimeOffset]::Now - $timeline.LastUpdatedTime).TotalSeconds, 2)
+            }
+        } catch {
+            $entry.error = "$_"
+        }
+        $entry
+    }
+}
+
+if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogAt -or $ControlAt -or $SmtcAt -or $CaptureAtSec -gt 0) {
     # Posts, probes, web requests and dialog closes are one time-ordered sequence; at the same
     # second the post goes first, so a probe can observe what its command did. Delivered (for a
     # post) means a main window existed and PostMessageW accepted the message; MFC still drops a
@@ -944,12 +988,19 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
                                           op = $parts[1]; ctrl = [int] $parts[2]; value = $(if ($parts.Count -gt 3) { [long] $parts[3] } else { 0 }) }
         }
     }
+    if ($SmtcAt) {
+        foreach ($entry in ($SmtcAt -split ',')) {
+            $parts = $entry -split ':'
+            $events += [pscustomobject]@{ at = [double]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture); id = 0; kind = 'smtc'; op = $parts[1] }
+        }
+    }
     if ($CaptureAtSec -gt 0) {
         $events += [pscustomobject]@{ at = $CaptureAtSec; id = 0; kind = 'capture' }
     }
     # At the same second: post first, then http, then dialog close or accept, then control steps,
-    # then the frame capture, then probe (the probe sees the rest).
-    $kindOrder = @{ post = 0; http = 1; dialog = 2; accept = 3; control = 4; capture = 5; probe = 6 }
+    # then the frame capture, then probe and SMTC (they see the rest).
+    $kindOrder = @{ post = 0; http = 1; dialog = 2; accept = 3; control = 4; capture = 5; probe = 6; smtc = 7 }
+    $smtc = @()
     $controls = @()
     $posts = @()
     $probes = @()
@@ -961,6 +1012,8 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
         if ($step.at -gt $elapsed) { Start-Sleep -Milliseconds ([int](($step.at - $elapsed) * 1000)) }
         if ($step.kind -eq 'probe') {
             $probes += Get-PlaylistProbe $step.at $p.Id
+        } elseif ($step.kind -eq 'smtc') {
+            $smtc += Invoke-SmtcStep $step
         } elseif ($step.kind -eq 'http') {
             $webAnswers += Send-WebProbe -At $step.at -Method $step.method -Path $step.path -Body $step.body -Port $HttpPort -OutDir (Split-Path $Out) -Index $step.id
         } elseif ($step.kind -eq 'dialog') {
@@ -994,6 +1047,7 @@ if ($PostCommands -or $ProbeAt -or $HttpAt -or $CloseDialogAt -or $AcceptDialogA
     }
     if ($PostCommands) { $result.posts = $posts }
     if ($ProbeAt) { $result.probes = $probes }
+    if ($SmtcAt) { $result.smtc = $smtc }
     if ($HttpAt) { $result.http = $webAnswers }
     if ($CloseDialogAt) { $result.dialogCloses = $dialogCloses }
     if ($AcceptDialogAt) { $result.dialogAccepts = $dialogAccepts }

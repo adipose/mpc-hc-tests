@@ -65,6 +65,11 @@ Run-ApiCase.guest.ps1     target side for the /slave API cases: host a window
      rect, the DWM extended frame bounds (their difference is the invisible
      border the player inflates its work area by), the maximized state and
      the primary monitor's work area;
+   - **SMTC session** -- for a case with `UseSMTC=1`, the player's System
+     Media Transport Controls session as Windows reports it to anything
+     outside the player (the taskbar flyout, a Bluetooth head unit): its
+     playback status and timeline at given times, and a play/pause sent
+     through it, as a head unit's button does;
    - **web answers** -- for a case with the web interface on, timed HTTP
      requests to `http://127.0.0.1:<port>` (the server binds IPv4 only):
      status, elapsed ms, and the body (saved as `http-<n>.bin`). A
@@ -172,6 +177,7 @@ centre the box there. The band cases only ask which colour is present.
 | `info-bar-chapter-after-hidden-pause` | `chapters.mkv` with the information bar hidden, paused at 7 s and the bar shown with View > Information at 8 s: its Chapter line names the chapter of the paused position, read from the time label (unfixed develop ce7d91a750: `one (1/3)`, the chapter it had at open) | #4385 (patch840) |
 | `info-bar-dvd-after-hidden-pause` | the sample DVD (`-SampleDvd`, a dvdauthor build with chapters at 0, 10 and 20 s; skipped without one), the information bar hidden, Next chapter at 4 s, paused at 6 s, shown with View > Information at 7 s: the Location line names chapter 02/03 (unfixed develop ce7d91a750: `-`, as set at open) | #4385 (patch840) |
 | `dvd-opens-evr-cp` | the sample DVD (`-SampleDvd`, skipped without one) in EVR-CP, closed at 8 s: the player exits (unfixed develop c3b1ef26ae: the render thread's HLG input pin check deadlocks with the DVD's in-band format change, the player stays at "Opening..." and ignores WM_CLOSE) | patch841 |
+| `smtc-follows-next-file` | `UseSMTC=1`, `stereo.mkv` skipped to `long.mkv` at 3 s, the player's SMTC session read from outside it: after the skip it reports the second file's 20 s end and a moving position, a pause posted at 10 s shows as Paused, and a play/pause sent through SMTC resumes it (unfixed develop e1bbff4c83: the first file's 4 s end, a frozen position, Playing through the pause) | #4450 (patch868) |
 
 `-Case <pattern>` runs only the cases whose name matches (one pattern per
 argument, `-like` wildcards), e.g. `-Case default-audio-track` or
