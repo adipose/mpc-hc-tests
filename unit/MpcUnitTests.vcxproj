@@ -83,6 +83,7 @@
     <ClCompile Include="test_LibassFlatten.cpp" />
     <ClCompile Include="test_LibassTrackData.cpp" />
     <ClCompile Include="test_LibassTimeline.cpp" />
+    <ClCompile Include="test_LibassUtf8Names.cpp" />
     <ClCompile Include="test_BitmapSubs.cpp" />
     <ClCompile Include="test_DSUtilText.cpp" />
     <ClCompile Include="test_Rasterizer.cpp" />
